@@ -10,7 +10,6 @@ from __future__ import annotations
 import argparse
 import fcntl
 import io
-import json
 import sys
 from collections import Counter
 from collections.abc import Sequence, Iterable, Mapping
@@ -272,13 +271,7 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
             log.append("note", path=log_path, text=f"queue import failed: {failure}")
             print(f"import - failed: {failure}")
-        for line in result.out.splitlines() if result.ok else ():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if not isinstance(entry, dict) or not isinstance(entry.get("ts"), str):
-                continue
+        for entry in log.records(result.out) if result.ok else ():
             if entry.get("ev") not in ("landed", "rejected"):
                 continue
             branch = entry.get("branch")
@@ -432,11 +425,7 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
         checkout = Path(result.out.strip()) if result.ok and result.out.strip() else plan_dir.resolve()
         if result.ok and result.out.strip():
             sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
-        plan = specs.load_plan(plan_dir / "plan.toml")
-        tasks = specs.load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
-        issues = specs.problems(plan, tasks)
-        if issues:
-            raise specs.PlanError("\n".join(issues))
+        plan, tasks = specs.load(plan_dir)
         hosts = machines.load() if hosts is None else hosts
         events = log.read(log_path)
         _import_queue(tasks, events, hosts, sh=sh, log_path=log_path)
@@ -519,11 +508,7 @@ def main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
     try:
         if args.dry_run:
-            plan = specs.load_plan(args.plan_dir / "plan.toml")
-            tasks = specs.load_tasks(args.plan_dir / "tasks", plan.draft, plan.repo)
-            issues = specs.problems(plan, tasks)
-            if issues:
-                raise specs.PlanError("\n".join(issues))
+            plan, tasks = specs.load(args.plan_dir)
             for action in decide(plan, tasks, log.read(), machines.load()):
                 print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:

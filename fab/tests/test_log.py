@@ -41,3 +41,19 @@ class LogTest(unittest.TestCase):
         stamp = log.now()
         self.assertRegex(stamp, r"^\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d\.\d{3}Z$")
         self.assertEqual(json.loads(json.dumps(log.record("note", ts=stamp)))["ts"], stamp)
+
+
+class RecordsTest(unittest.TestCase):
+    def test_records_keep_objects_in_line_order_without_requiring_an_event(self):
+        first = {"ts": "002", "text": "café"}
+        second = {"ts": "001", "ev": "landed", "branch": "draft/a"}
+        self.assertEqual(log.records(json.dumps(first) + "\n" + json.dumps(second)),
+                         [first, second])
+        self.assertEqual(log.records('{"ts":""}'), [{"ts": ""}])
+
+    def test_records_skip_blank_malformed_non_objects_and_non_string_timestamps(self):
+        lines = ("", "  ", '{"ts":', "stray output", "[]", "null", "true", "3", "1.5",
+                 '"text"', "{}", '{"ev":"landed"}', '{"ts":null}', '{"ts":1}',
+                 '{"ts":true}', '{"ts":[]}', '{"ts":{}}', '{"ts":"003"}')
+        self.assertEqual(log.records("\n".join(lines)), [{"ts": "003"}])
+        self.assertEqual(log.records(""), [])

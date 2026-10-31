@@ -594,6 +594,20 @@ walk = false
         self.assertEqual(log.read()[0]["tip"], "tip")
 
 
+    def test_queue_import_continues_after_a_torn_line_between_records(self):
+        self.add_task("b")
+        first = dict(ev="landed", ts="001", branch="draft/a", tip="a", main="main")
+        second = dict(ev="landed", ts="002", branch="draft/b", tip="b", main="main")
+        prefix = ssh("fake@gate", ["fab", "queue", "log"])[:-1]
+        self.fake.on(prefix, Result(0, json.dumps(first) + '\n{"ev":\n' + json.dumps(second)))
+        self.tick()
+        self.assertEqual([(entry["task"], entry["queue_ts"]) for entry in log.read()],
+                         [("draft/a", "001"), ("draft/b", "002")])
+        self.tick()
+        self.assertEqual(len(log.read()), 2)
+        self.assertEqual(self.fake.argvs()[-2],
+                         ssh("fake@gate", ["fab", "queue", "log", "--since", "002"]))
+
     def test_import_queue_records_once_including_shared_timestamps_and_rebases(self):
         self.add_task("b")
         self.add_task("c")

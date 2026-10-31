@@ -8,7 +8,6 @@ figures' formatting, and the command that writes the reports under FAB_HOME/repo
 
 from __future__ import annotations
 
-import json
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -178,15 +177,7 @@ def gather(hosts: Mapping[str, Host], since: str, *, sh: Runner = run,
             sources.unread.append(f"{source} {host.name}: " +
                                   (detail[-1] if detail else f"exit {result.code}"))
             return []
-        records = []
-        for line in result.out.splitlines():
-            try:
-                record = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if isinstance(record, dict) and isinstance(record.get("ts"), str):
-                records.append(record)
-        return records
+        return log.records(result.out)
 
     ordered = sorted(hosts.values(), key=lambda host: host.name)
     gate = next((host for host in ordered if "gate" in host.roles), None)
@@ -225,7 +216,7 @@ def main(argv: list[str]) -> int:
     import sys
 
     from fab import code_report, hosts, landing_report
-    from fab.plan import PlanError, load_plan, load_tasks, problems
+    from fab.plan import PlanError, load
 
     parser = argparse.ArgumentParser(prog="fab report")
     commands = parser.add_subparsers(dest="command", required=True)
@@ -247,14 +238,6 @@ def main(argv: list[str]) -> int:
         parser.error(str(error))
     day = window.start[:10]
     since = stamp(moment(window.previous().start) - timedelta(days=LOOKBACK_DAYS))
-
-    def load(directory):
-        plan = load_plan(directory / "plan.toml")
-        tasks = load_tasks(directory / "tasks", plan.draft, plan.repo)
-        issues = problems(plan, tasks)
-        if issues:
-            raise PlanError(f"{directory}: " + "\n".join(issues))
-        return plan, tasks
 
     try:
         selected = hosts.load()

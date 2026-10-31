@@ -82,6 +82,16 @@ class Task:
         return self.id.split("/", 1)[1]
 
 
+def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
+    """Read plan.toml and tasks/; raise PlanError naming plan_dir and every problem if unsound."""
+    plan = load_plan(plan_dir / "plan.toml")
+    tasks = load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
+    issues = problems(plan, tasks)
+    if issues:
+        raise PlanError(f"{plan_dir}: " + "\n".join(issues))
+    return plan, tasks
+
+
 def load_plan(path: Path) -> Plan:
     """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
     retired=false. A part's contract defaults to false. Each `[[question]]` table requires id,

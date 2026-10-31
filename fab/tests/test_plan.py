@@ -2,8 +2,9 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
+from fab import atomic
 from fab.plan import (EFFORTS, KINDS, MODES, Part, Plan, PlanError, Slice, Task,
-                     load_plan, load_tasks, parse_task, problems)
+                     load, load_plan, load_tasks, parse_task, problems)
 from fab.tests.support import tmp_home
 
 
@@ -125,6 +126,29 @@ class PlanTest(unittest.TestCase):
             self.assertTrue(tasks)
             self.assertIn("agents-rebuild/files", tasks)
             self.assertEqual(problems(plan, tasks), [])
+
+
+class LoadTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = self.enterContext(tmp_home()) / "plan"
+        atomic.write(self.directory / "plan.toml", FULL)
+        atomic.write(self.directory / "tasks/task.md", spec())
+
+    def test_load_returns_sound_plan_and_its_tasks(self):
+        plan, tasks = load(self.directory)
+        self.assertEqual(plan.draft, "draft")
+        self.assertEqual(list(plan.parts), ["core"])
+        self.assertEqual(tasks, {"draft/task": Task(
+            "draft/task", "core", "feature", "repo", (), (), "high", 25,
+            "# Task\n\nDo it.\n", str(self.directory / "tasks/task.md"))})
+
+    def test_load_names_directory_and_every_problem(self):
+        atomic.write(self.directory / "plan.toml", FULL.replace('parts = ["core"]', 'parts = []'))
+        atomic.write(self.directory / "tasks/task.md", spec(HEADER + 'needs = ["absent"]\n'))
+        with self.assertRaises(PlanError) as caught:
+            load(self.directory)
+        self.assertEqual(str(caught.exception), f"{self.directory}: part core is in no slice\n"
+                         "task draft/task needs unknown task draft/absent")
 
 
 class TaskTest(unittest.TestCase):

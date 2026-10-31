@@ -63,6 +63,19 @@ def read(path: Path | None = None) -> list[dict]:
     return list(iterate(path))
 
 
+def records(text: str) -> list[dict]:
+    """JSON objects with a string ts, in line order; skip blank, malformed and other lines."""
+    found = []
+    for line in text.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict) and isinstance(entry.get("ts"), str):
+            found.append(entry)
+    return found
+
+
 def iterate(path: Path | None = None) -> Iterator[dict]:
     path = path or default_path()
     try:
