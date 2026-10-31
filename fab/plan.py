@@ -126,6 +126,13 @@ def load_plan(path: Path) -> Plan:
     buffer = value(data, "buffer", (dict,), {})
     low = value(buffer, "low", (int, float), 1.0)
     high = value(buffer, "high", (int, float), 2.0)
+    parts, slices, questions = _plan_tables(data, path, value, strings)
+    return Plan(draft, repo, sources, float(low), float(high), parts, slices,
+                value(data, "retired", (bool,), False), questions)
+
+
+def _plan_tables(data, path, value, strings):
+    """Read the plan's ordered tables with load_plan's field checks."""
     parts = {}
     for item in value(data, "part", (list,), required=True):
         if not isinstance(item, dict):
@@ -136,6 +143,7 @@ def load_plan(path: Path) -> Plan:
                     strings(item, "needs", required=True),
                     value(item, "design", (str,), required=True),
                     value(item, "done", (bool,), False),
+                    contract=value(item, "contract", (bool,), False),
                     needs_landed=strings(item, "needs_landed"))
         if part.mode not in MODES:
             raise PlanError(f"{path}: part {part.id} has unknown mode {part.mode!r}")
@@ -150,7 +158,15 @@ def load_plan(path: Path) -> Plan:
                             value(item, "story", (str,), required=True),
                             strings(item, "parts", required=True),
                             value(item, "walk", (bool,), required=True)))
-    return Plan(draft, repo, sources, float(low), float(high), parts, tuple(slices))
+    questions = []
+    for item in value(data, "question", (list,), []):
+        if not isinstance(item, dict):
+            raise PlanError(f"{path}: question must be a table")
+        questions.append(Question(value(item, "id", (str,), required=True),
+                                  value(item, "text", (str,), required=True),
+                                  strings(item, "parts", required=True),
+                                  value(item, "answer", (str,), "")))
+    return parts, tuple(slices), tuple(questions)
 
 
 def parse_task(text: str, path: str, draft: str, default_repo: str) -> Task:
@@ -234,6 +250,8 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
     issues = []
     included = {part for item in plan.slices for part in item.parts}
     for part in plan.parts.values():
+        if part.id in RESERVED:
+            issues.append(f"part {part.id} takes a reserved id")
         for need in part.needs:
             if need not in plan.parts:
                 issues.append(f"part {part.id} needs unknown part {need}")
@@ -253,6 +271,14 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
             if need not in tasks:
                 issues.append(f"task {task.id} needs unknown task {need}")
 
+    seen = set()
+    for question in plan.questions:
+        if question.id in seen:
+            issues.append(f"question {question.id} is used twice")
+        seen.add(question.id)
+        for part in question.parts:
+            if part not in plan.parts:
+                issues.append(f"question {question.id} names unknown part {part}")
     issues.extend(_cycles({key: part.needs for key, part in plan.parts.items()}, "part"))
     issues.extend(_cycles({key: task.needs for key, task in tasks.items()}, "task"))
     return sorted(issues)

@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from fab import atomic
-from fab.plan import (EFFORTS, KINDS, MODES, Part, Plan, PlanError, Slice, Task,
+from fab.plan import (EFFORTS, KINDS, MODES, RESERVED, Part, Plan, PlanError, Question, Slice, Task,
                      load, load_plan, load_tasks, parse_task, problems)
 from fab.tests.support import tmp_home
 
@@ -70,6 +70,39 @@ class PlanTest(unittest.TestCase):
         for value in ('"core"', '[1]', 'false'):
             with self.subTest(value=value), self.assertRaisesRegex(PlanError, "needs_landed"):
                 self.read(FULL.replace('needs = []', f'needs = []\nneeds_landed = {value}'))
+
+    def test_designer_fields_and_defaults(self):
+        plain = self.read(FULL)
+        self.assertFalse(plain.retired)
+        self.assertFalse(plain.parts["core"].contract)
+        self.assertEqual(plain.questions, ())
+        text = "retired = true\n" + FULL.replace('needs = []', 'needs = []\ncontract = true')
+        text += ('[[question]]\nid = "budget"\ntext = "How much?"\nparts = ["core"]\n'
+                 '[[question]]\nid = "machine"\ntext = "Which machine?"\nparts = []\nanswer = "heavy"\n')
+        plan = self.read(text)
+        self.assertTrue(plan.retired)
+        self.assertTrue(plan.parts["core"].contract)
+        self.assertEqual(plan.questions, (Question("budget", "How much?", ("core",)),
+                                          Question("machine", "Which machine?", (), "heavy")))
+
+    def test_designer_fields_reject_wrong_types_and_missing_question_keys(self):
+        question = '[[question]]\nid = "q"\ntext = "Which?"\nparts = ["core"]\nanswer = "yes"\n'
+        cases = [("retired = 1\n" + FULL, "retired has the wrong type"),
+                 (FULL.replace('needs = []', 'needs = []\ncontract = "yes"'), "contract has the wrong type"),
+                 (MINIMAL + 'question = "bad"\n', "question has the wrong type"),
+                 (MINIMAL + 'question = [1]\n', "question must be a table")]
+        for old, new, reason in [('id = "q"', 'id = 1', 'id has the wrong type'),
+                                  ('text = "Which?"', 'text = false', 'text has the wrong type'),
+                                  ('parts = ["core"]', 'parts = "core"', 'parts has the wrong type'),
+                                  ('parts = ["core"]', 'parts = [1]', 'parts must contain strings'),
+                                  ('answer = "yes"', 'answer = false', 'answer has the wrong type')]:
+            cases.append((MINIMAL + question.replace(old, new), reason))
+        for line, key in [('id = "q"\n', "id"), ('text = "Which?"\n', "text"),
+                           ('parts = ["core"]\n', "parts")]:
+            cases.append((MINIMAL + question.replace(line, ""), f"missing {key}"))
+        for text, reason in cases:
+            with self.subTest(text=text), self.assertRaisesRegex(PlanError, f"plan.toml: {reason}"):
+                self.read(text)
 
     def test_partial_buffer_uses_the_other_default(self):
         self.assertEqual(self.read(MINIMAL + "[buffer]\nlow = 2\n").high, 2.0)
@@ -265,6 +298,19 @@ class ProblemsTest(unittest.TestCase):
         self.parts["next"] = replace(self.parts["next"], needs=("core",))
         tasks = {"draft/a": task("draft/a"), "draft/b": task("draft/b", ("draft/a",))}
         self.assertEqual(problems(self.plan, tasks), [])
+
+    def test_reserved_ids_and_question_problems_are_sorted(self):
+        for reserved in RESERVED:
+            with self.subTest(reserved=reserved):
+                parts = {reserved: Part(reserved, "Reserved", "feature", (), "design.md")}
+                plan = replace(self.plan, parts=parts, slices=(Slice(1, "story", (reserved,), False),))
+                self.assertEqual(problems(plan, {}), [f"part {reserved} takes a reserved id"])
+        questions = (Question("q", "First?", ("missing",)), Question("q", "Second?", ("core",)),
+                     Question("a", "Other?", ("unknown",)))
+        self.assertEqual(problems(replace(self.plan, questions=questions), {}), [
+            "question a names unknown part unknown", "question q is used twice",
+            "question q names unknown part missing",
+        ])
 
     def test_needs_landed_must_also_be_a_need(self):
         self.parts["next"] = replace(self.parts["next"], needs=("core",), needs_landed=("core",))
