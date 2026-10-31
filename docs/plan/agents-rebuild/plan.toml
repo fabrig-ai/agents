@@ -206,6 +206,13 @@ needs = ["run", "gates"]
 design = "docs/design/fab.md, 13.1"
 
 [[part]]
+id = "plans"
+title = "Every plan in one tick; skeleton calls in parallel"
+mode = "feature"
+needs = ["dispatch", "flow"]
+design = "docs/design/fab.md, 13.4"
+
+[[part]]
 id = "critique"
 title = "A self-critique run on every branch before it lands or is readied"
 mode = "feature"
@@ -281,13 +288,6 @@ title = "Events start the tick, coalesced; the timer only a 10-minute backstop"
 mode = "feature"
 needs = ["dispatch", "codex"]
 design = "docs/design/fab.md, 13.9"
-
-[[part]]
-id = "plans"
-title = "Every plan in one tick; skeleton calls in parallel"
-mode = "feature"
-needs = ["dispatch", "flow"]
-design = "docs/design/fab.md, 13.4"
 
 [[part]]
 id = "accounting"

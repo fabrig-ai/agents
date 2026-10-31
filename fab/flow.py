@@ -36,7 +36,8 @@ def target(draft: str, events: Iterable[dict]) -> int:
     rejected, and whether its latest run ended while the window was full: at that run.ended
     the runs in flight, counting the ending run itself, were at least the target then.
     - run.ended with outcome infra: the target drops by one, never below FLOOR.
-    - branch.rejected: the task is marked rejected; the target drops by one, never below FLOOR.
+    - branch.rejected: the task is marked rejected; the target drops by one, never below FLOOR,
+      unless the step is rebase or merge (a conflict between parallel branches).
     - branch.landed: the target grows by one when it is the task's first branch.landed, the
       task has exactly one run.started, was never rejected, and its latest run ended while
       the window was full. A landing from a run that ended with fewer runs in flight than
@@ -65,7 +66,9 @@ def target(draft: str, events: Iterable[dict]) -> int:
                 limit = max(FLOOR, limit - 1)
         elif kind == "branch.rejected":
             rejected.add(task)
-            limit = max(FLOOR, limit - 1)
+            # A rebase or merge conflict is parallel work meeting, not a fault of quality.
+            if event.get("step") not in ("rebase", "merge"):
+                limit = max(FLOOR, limit - 1)
         elif kind == "branch.landed":
             if task not in landed and attempts[task] == 1 and task not in rejected and full.get(task):
                 limit += 1

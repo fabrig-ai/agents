@@ -169,3 +169,11 @@ class MeasureTest(unittest.TestCase):
         fake = FakeRunner()
         self.assertEqual(flow.measure({"gate": self.hosts["gate"]}, NOW, sh=fake), {})
         self.assertEqual(fake.calls, [])
+
+
+class ConflictRefusalTest(unittest.TestCase):
+    def test_a_conflict_refusal_leaves_the_target(self):
+        start = flow.START
+        for step, expected in (("rebase", start), ("merge", start), ("test", max(flow.FLOOR, start - 1))):
+            events = [{"ev": "branch.rejected", "task": "d/a", "step": step, "ts": "t"}]
+            self.assertEqual(flow.target("d", events), expected, step)
