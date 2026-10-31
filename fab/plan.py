@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import tomllib
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
 from fab import log
 
+LANDINGS = ("queue", "integration")
+OPTIONS = ("landing", "ready", "reviews", "direct")
 MODES = ("feature", "migration", "fix", "probe", "direct")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
 EFFORTS = ("medium", "high")
@@ -60,6 +62,15 @@ class Plan:
     slices: tuple[Slice, ...]
     retired: bool = False  # set by the retire call; the tick skips a retired plan
     questions: tuple[Question, ...] = ()
+    landing: str = "queue"
+    ready: bool = True
+    reviews: bool = True
+    direct: bool = False
+
+    @property
+    def trunk(self) -> str:
+        """The branch from which this plan's calls and tasks start (13.12)."""
+        return f"{self.draft}/integration" if self.landing == "integration" else "main"
 
 
 @dataclass(frozen=True)
@@ -100,10 +111,12 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
 
 def load_plan(path: Path) -> Plan:
     """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
-    retired=false. A part's contract defaults to false and needs_landed to ().
+    retired=false, landing="queue", ready=true, reviews=true, direct=false.
+    A part's contract defaults to false and needs_landed to ().
     Each `[[question]]` table requires id, text and parts (strings) and defaults answer="".
 
-    Raises PlanError for a missing key, a wrong type, an unknown mode, or a part id used twice.
+    Raises PlanError for a missing key, a wrong type, an unknown mode or landing,
+    or a part id used twice.
     """
     def value(table, key, expected, default=None, *, required=False):
         if key not in table:
@@ -133,7 +146,39 @@ def load_plan(path: Path) -> Plan:
     high = value(buffer, "high", (int, float), 2.0)
     parts, slices, questions = _plan_tables(data, path, value, strings)
     return Plan(draft, repo, sources, float(low), float(high), parts, slices,
-                value(data, "retired", (bool,), False), questions)
+                value(data, "retired", (bool,), False), questions,
+                **{key: _option(key, data[key], str(path)) for key in OPTIONS if key in data})
+
+
+def _option(key: str, value: object, source: str) -> object:
+    """Check a plan option's type and allowed values, naming its source on failure."""
+    expected = str if key == "landing" else bool
+    if type(value) is not expected:
+        raise PlanError(f"{source}: {key} has the wrong type")
+    if key == "landing" and value not in LANDINGS:
+        raise PlanError(f"{source}: unknown landing {value!r}")
+    return value
+
+
+def parse_options(entries: Sequence[str]) -> dict[str, object]:
+    """Parse KEY=VALUE entries as plan options, with TOML values and later entries winning.
+    Keep keys in entry order. Raise PlanError naming the entry for an unknown key,
+    invalid TOML, a wrong type or an unknown landing. Pure.
+    """
+    options = {}
+    for entry in entries:
+        key, separator, raw = entry.partition("=")
+        key = key.strip()
+        if not separator or key not in OPTIONS:
+            raise PlanError(f"{entry}: expected KEY=VALUE with KEY in {OPTIONS}")
+        try:
+            parsed = tomllib.loads(f"{key} = {raw}")
+        except tomllib.TOMLDecodeError as error:
+            raise PlanError(f"{entry}: {error}") from error
+        if set(parsed) != {key}:
+            raise PlanError(f"{entry}: expected one plan option")
+        options[key] = _option(key, parsed[key], entry)
+    return options
 
 
 def _plan_tables(data, path, value, strings):
@@ -254,11 +299,13 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
     a part's need or a slice's part naming no part; a task naming no part or needing no task;
     a cycle among part needs or among task needs; a part in no slice; a part whose id is in
     RESERVED; a question id used twice; a question naming no part; a part's needs_landed
-    naming a part outside its needs.
+    naming a part outside its needs; a non-direct part in a direct plan.
     """
     issues = []
     included = {part for item in plan.slices for part in item.parts}
     for part in plan.parts.values():
+        if plan.direct and part.mode != "direct":
+            issues.append(f"part {part.id} is not direct in a direct plan")
         if part.id in RESERVED:
             issues.append(f"part {part.id} takes a reserved id")
         for need in part.needs:

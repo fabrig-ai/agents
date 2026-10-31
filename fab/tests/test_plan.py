@@ -3,8 +3,8 @@ from dataclasses import replace
 from pathlib import Path
 
 from fab import atomic, state
-from fab.plan import (EFFORTS, KINDS, MODES, RESERVED, Part, Plan, PlanError, Question, Slice, Task,
-                     load, load_plan, load_tasks, parse_task, problems)
+from fab.plan import (EFFORTS, KINDS, LANDINGS, MODES, OPTIONS, RESERVED, Part, Plan, PlanError,
+                     Question, Slice, Task, load, load_plan, load_tasks, parse_options, parse_task, problems)
 from fab.tests.support import tmp_home
 
 
@@ -42,11 +42,32 @@ class PlanTest(unittest.TestCase):
     def read(self, text):
         with tmp_home() as home:
             path = home / "plan.toml"
-            path.write_text(text)
+            atomic.write(path, text)
             return load_plan(path)
 
     def test_minimal_plan_defaults(self):
         self.assertEqual(self.read(MINIMAL), Plan("draft", "repo", (), 1.0, 2.0, {}, ()))
+
+    def test_replay_options_defaults_and_trunk(self):
+        plan = self.read(MINIMAL)
+        self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                         ("queue", True, True, False))
+        self.assertEqual(plan.trunk, "main")
+
+    def test_replay_options_load_and_select_trunk(self):
+        for landing in LANDINGS:
+            with self.subTest(landing=landing):
+                plan = self.read(f'landing = "{landing}"\nready = false\nreviews = false\ndirect = true\n' + MINIMAL)
+                self.assertEqual((plan.landing, plan.ready, plan.reviews, plan.direct),
+                                 (landing, False, False, True))
+                self.assertEqual(plan.trunk, "draft/integration" if landing == "integration" else "main")
+
+    def test_replay_options_reject_unknown_landing_and_wrong_types(self):
+        for key, values in (("landing", ('"unknown"', 'true', '1', '[]', '{}')),
+                            *[(key, ('"false"', '0', '1.0', '[]', '{}')) for key in OPTIONS[1:]]):
+            for value in values:
+                with self.subTest(key=key, value=value), self.assertRaisesRegex(PlanError, f"plan.toml:.*{key}"):
+                    self.read(f"{key} = {value}\n" + MINIMAL)
 
     def test_full_plan(self):
         expected = Plan("draft", "repo", ("design.md", "another source"), 0.5, 3.0,
@@ -175,6 +196,34 @@ class PlanTest(unittest.TestCase):
             self.assertTrue(tasks)
             self.assertIn("agents-rebuild/files", tasks)
             self.assertEqual(problems(plan, tasks), [])
+
+
+class OptionsTest(unittest.TestCase):
+    def test_empty_options_and_all_supported_values(self):
+        self.assertEqual(parse_options(()), {})
+        for landing in LANDINGS:
+            for enabled in (True, False):
+                entries = [f'landing="{landing}"',
+                           *[f"{key}={str(enabled).lower()}" for key in OPTIONS[1:]]]
+                self.assertEqual(parse_options(entries),
+                                 dict(landing=landing, ready=enabled, reviews=enabled, direct=enabled))
+
+    def test_options_keep_entry_order_and_last_value(self):
+        entries = ["reviews = false", "landing='integration'", "direct=true", "reviews=true"]
+        result = parse_options(entries)
+        self.assertEqual(list(result.items()), [("reviews", True), ("landing", "integration"), ("direct", True)])
+
+    def test_options_reject_bad_entries_and_name_them(self):
+        entries = ["", "ready", "=true", "unknown=false", "READY=true", "ready=", "ready=True",
+                   'landing=integration', 'landing="other"', "landing=false", "landing=[]",
+                   "landing=1", 'ready="false"', "ready=1", "reviews=0.0", "direct=[]", "direct={}",
+                   "ready=false\nreviews=false", "ready=false\n[extra]", "ready=false\nready=true"]
+        for entry in entries:
+            with self.subTest(entry=entry), self.assertRaises(PlanError) as raised:
+                parse_options([entry])
+            self.assertIn(entry, str(raised.exception))
+        with self.assertRaises(PlanError):
+            parse_options(['landing="other"', 'landing="queue"'])
 
 
 class LoadTest(unittest.TestCase):
@@ -317,6 +366,16 @@ class ProblemsTest(unittest.TestCase):
         self.parts = {name: Part(name, name, "feature", (), "design.md") for name in ("core", "next")}
         self.plan = Plan("draft", "repo", (), 1.0, 2.0, self.parts,
                          (Slice(1, "story", ("core", "next"), True),))
+
+    def test_direct_plan_names_only_non_direct_parts(self):
+        self.assertEqual(problems(self.plan, {}), [])
+        self.assertEqual(problems(replace(self.plan, direct=True), {}),
+                         ["part core is not direct in a direct plan", "part next is not direct in a direct plan"])
+        self.parts["core"] = replace(self.parts["core"], mode="direct")
+        self.assertEqual(problems(replace(self.plan, direct=True), {}),
+                         ["part next is not direct in a direct plan"])
+        self.parts["next"] = replace(self.parts["next"], mode="direct")
+        self.assertEqual(problems(replace(self.plan, direct=True), {}), [])
 
     def test_sound_dependencies(self):
         self.parts["next"] = replace(self.parts["next"], needs=("core",))
