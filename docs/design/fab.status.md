@@ -183,13 +183,14 @@
   every 2 minutes and wants pile up unread in `FAB_HOME/tick.want`. Once
   they land, `fab wake --install` on hel8 starts the units, and each
   builder needs ssh to hel8 for its runs' wakes.
-- **Replaying a manual run (13.12) is being built:** the tasks
-  `replay-options` (the plan's options, the cut's `--set`), `replay-trunk`
-  (runs, gates, precheck and spec edits on a trunk), `integration-merge`
-  (the tick merges into the trunk; reviews off), `integration-check` (the
-  recount, the trunk's ratchet, the end check, its repairs, the ready,
-  answers at once) and `replay-roles` (the replay-mode role texts). Until they land, every plan lands
-  through `fab land` or the queue, and every call is reviewed.
+- **The flow of a real run (13.12) is being built** as fab's default:
+  `replay-options`, `replay-trunk` and `integration-merge` have landed (the
+  options, the trunk, the tick's merges, reviews off); `integration-check`
+  (the recount, the trunk's ratchet, the end check, its repairs, the ready,
+  answers at once), `replay-roles` (the cut's and the runs' run-derived
+  texts) and `run-defaults` (the defaults flipped; agents-rebuild names the
+  old flow) are in flight or next. Until `run-defaults` lands, a plan
+  without the keys keeps the old flow.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

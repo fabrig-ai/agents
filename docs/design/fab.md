@@ -880,27 +880,35 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   summed), run ended to checks (the gating or readying), checks to ready,
   ready to landed; a boundary with no event is shown as `-`.
 
-### 13.12 Replaying a manual run
+### 13.12 The flow of a real run
 
-At the user's word (10-31): fab runs the same execution as the Codex manual
-run of skein's component kit (`coord/codex-kit/`: a lead cutting the work
-into 24 direct tasks, Codex implementers in slots, every finished branch
+At the user's word (10-31): fab's flow is modelled on real runs, so that a
+real run replayed on fab differs from it only in who executes it. The
+first model is the Codex manual run of skein's component kit
+(`coord/codex-kit/`): a lead cutting the work into 24 direct tasks with
+shared notes per family, Codex implementers in slots, every finished branch
 merged into one integration branch, dependents started from its tip, one
-full check at the end, a repair, never landed). First the replay reproduces
-that run on fab with similar results; tweaks start from that baseline. It
-is four plan options on today's mechanism, not a second engine.
+full check at the end, a repair, never landed. That run's flow is fab's
+default; the earlier mechanics (skeleton calls, call reviews, surveys,
+landing each task through the queue) stay as options, off, and come back
+only as tweaks once a replay matches its run.
 
-- **The options** (`plan.toml`, read by `fab.plan.load_plan`):
-  - `landing`: `"queue"` (the default: tasks are landed or readied as in
-    section 6) or `"integration"`;
+- **The options** (`plan.toml`, read by `fab.plan.load_plan`); the
+  defaults are the run's flow:
+  - `landing`: `"integration"` (the default) or `"queue"` (each task
+    landed or readied, as in section 6);
   - `ready` (default true): an integration plan readies its checked
-    branch for the queue once; false leaves it unlanded (an experiment);
-  - `reviews` (default true): false approves every call's chain without a
-    review run (13.1) and starts no structure review call (12). The code
-    gates (files, ratchet) stay;
-  - `direct` (default false): every part must be `mode = "direct"`, a
-    plan problem otherwise, so a cut that writes a skeleton part is caught
-    before anything runs.
+    branch for the queue once; false leaves it unlanded (an experiment, as
+    the replay of codex-kit);
+  - `reviews` (default false): true sends every call's chain to a review
+    run (13.1) and starts structure review calls (12). The code gates
+    (files, ratchet) run either way;
+  - `direct` (default true): every part must be `mode = "direct"`, a plan
+    problem otherwise, so a cut that writes a skeleton part is caught
+    before anything runs; false allows skeleton and contract parts.
+  The agents repository's own plan (`docs/plan/agents-rebuild`) names
+  `landing = "queue"`, `reviews = true` and `direct = false`, and keeps
+  its flow.
 - **The trunk.** A plan's trunk is `main`, or `<draft>/integration` for an
   integration plan. Everything that reads main for a plan reads its trunk
   instead: a run's base (`origin/<trunk>` at its start), the Rust gates'
@@ -958,7 +966,7 @@ is four plan options on today's mechanism, not a second engine.
     question.
   - A check run counts as the draft's run in flight and takes a place.
 - **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan options
-  to the cut: its brief says to write them into plan.toml verbatim, and its
+  that differ from the defaults (`ready=false` for a replay) to the cut: its brief says to write them into plan.toml verbatim, and its
   `call.started` carries them (`options`), so the tick reads `landing` and
   `reviews` for the cut's own chain before plan.toml exists. For a replay
   the operator gives the cut the manual run's inputs as `--source`: the
@@ -971,8 +979,7 @@ is four plan options on today's mechanism, not a second engine.
   share in the plan's `notes/`, cited from each spec (the lead's
   `common.md`, `stage-common.md`, `lib-common.md`); implementers read them
   in their checkout.
-- **Replay-mode texts,** so the replay works as the manual lead did; the
-  default flow keeps its own:
+- **Run-derived texts,** so fab works as the manual lead did:
   - a direct plan's cut gets `fab/roles/cut-direct.md` after its role
     text: the lead's way of cutting (parallel Explore surveys of the sites,
     decisions recorded in `notes/decisions.md`, small contract tasks first,
@@ -990,12 +997,13 @@ is four plan options on today's mechanism, not a second engine.
   their tasks have merged, but its retire call starts only once the trunk
   has landed on main (`branch.landed` for task `<draft>/integration` from
   the queue's record).
-- **Departures from the user's drafts, by the user's request for this run**
-  (`execution-modes.md`): no surveys (not built), no skeletons or test
+- **Departures from the user's drafts, at the user's word** (10-31;
+  `execution-modes.md`): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
   review, and the code reaches main as one integration branch through one
   check instead of each task through the merge queue. The self-critique
-  and test-writers are not built yet either.
+  and test-writers are not built yet either. Each may come back as an
+  option once a replay matches its run.
 
 ## 14. Later
 
