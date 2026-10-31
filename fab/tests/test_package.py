@@ -1,6 +1,8 @@
 import io
+import sys
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from pathlib import Path
 from unittest.mock import patch
 
 from fab import cli, hosts
@@ -19,6 +21,28 @@ class CliTest(unittest.TestCase):
         self.assertIn("report", out.getvalue())
         self.assertIn("page", out.getvalue())
         self.assertIn("unknown command", err.getvalue())
+
+
+class ImportTest(unittest.TestCase):
+    def test_each_module_imports_first(self):
+        # A cycle hides when the suite happens to import its modules in a working order.
+        script = (
+            "import importlib, pathlib, sys\n"
+            "failed = []\n"
+            "for path in sorted(pathlib.Path('fab').glob('*.py')):\n"
+            "    if path.stem == '__main__':\n"
+            "        continue\n"
+            "    for name in [n for n in sys.modules if n == 'fab' or n.startswith('fab.')]:\n"
+            "        del sys.modules[name]\n"
+            "    try:\n"
+            "        importlib.import_module('fab.' + path.stem)\n"
+            "    except Exception as error:\n"
+            "        failed.append(f'fab.{path.stem}: {error}')\n"
+            "print('\\n'.join(failed))\n")
+        root = str(Path(__file__).resolve().parents[2])
+        result = run([sys.executable, "-I", "-B", "-c", f"import sys; sys.path.insert(0, {root!r})\n" + script],
+                     cwd=root)
+        self.assertEqual((result.code, result.out.strip()), (0, ""))
 
 
 class RunnerTest(unittest.TestCase):

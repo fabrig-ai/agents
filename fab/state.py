@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fab import call_review, log
+from fab import log
 from fab.plan import Plan, PlanError, Task, load_plan, load_tasks, problems, checked_tasks
 
 STATUSES = ("waiting", "runnable", "running", "parked", "done", "ready", "landed", "rejected")
@@ -145,6 +145,7 @@ def main(argv: list[str]) -> int:
 
 def _parked_chains(tasks: Mapping[str, Task], views: Mapping[str, TaskView], events: list[dict]) -> None:
     """Park the tasks of held skeleton chains, retaining runs and branch provenance."""
+    from fab import call_review  # call_review imports calls, which imports this module
     for identifier, view in views.items():
         source = call_review.task_source(tasks[identifier], events)
         if source is not None and source[1].state in ("hold", "parked") and view.status != "landed":
