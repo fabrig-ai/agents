@@ -23,7 +23,7 @@ and `testing-strategy.md`, section 1.
   acceptance and its focused nextest command, not Python test names.
 - Run `heavy cargo check -p <crate> --tests` one command at a time and fix
   your own compile errors before committing; `cargo fmt` runs directly.
-  Every build and test goes through `heavy`; Only `cargo check -p` of the crates you touch runs here; tests and the workspace build on the builders. If heavy
+  Every build and test goes through `heavy`; only `cargo check -p` of the crates you touch runs here; tests and the workspace build on the builders. If heavy
   exits 75 (`heavy: Infra: disk`), stop with `Infra: disk` in the report.
   Never run the whole workspace. Push your branch; main moves only through
   fabrig's merge queue.
