@@ -13,10 +13,12 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, run as runs, state
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, state
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
+from fab.tests.test_repairs import (TASK as REPAIR_TASK, foreman_run, rejected, report,
+                                    settled, task_run)
 from fab.tests.support import (FakeRunner, call_ended, call_started, run_ended, run_started,
                                tmp_home, units, write_plan)
 
@@ -109,6 +111,84 @@ def question_history(name="a", status="foreman", *, since="2026-10-30T12:29:00.0
                             outcome="done" if status == "settled" else "failed",
                             report=f"collected/{run_id}/report.md", ts=since))
     return history
+
+
+def refusal_history(name="task", status="foreman", *, step="test", verdict="fix", section=""):
+    """Build a refusal history from repairs' vocabulary, renaming its task for this plan."""
+    history = [dict(task_run("01"), host="builder"),
+               dict(ev="run.ended", ts="02", task=REPAIR_TASK.id, run=REPAIR_TASK.id + "-1",
+                    outcome="done", report="task-report.md"), rejected("03", step=step)]
+    if status != "foreman":
+        history.extend(foreman_run("04", outcome=None if status == "deciding" else
+                                   "infra" if status == "fallback" else "done", ended="05"))
+        history[3]["host"] = "builder"
+    if status == "settled":
+        history.append(settled("06", verdict, section=section))
+    return [{key: value.replace(REPAIR_TASK.id, f"draft/{name}") if isinstance(value, str)
+             else value for key, value in entry.items()} for entry in history]
+
+
+class RepairActionsTest(unittest.TestCase):
+    def test_states_order_plan_filter_and_purity(self):
+        tasks = {f"draft/{name}": task(name) for name in ("a", "b", "c", "d", "e")}
+        events = [*refusal_history("b", "decided"), *refusal_history("d", "deciding"),
+                  *refusal_history("a"), *refusal_history("c", "settled"),
+                  *refusal_history("e", "fallback"),
+                  *(dict(entry, task=entry["task"].replace("draft/", "other/"))
+                    for entry in refusal_history("outside"))]
+        before = deepcopy((tasks, events))
+        expected = [Action("remedy", task="draft/b", run="draft/b/foreman-1",
+                           detail="draft/b/foreman-1"),
+                    Action("examine", task="draft/a", branch="draft/a", detail="test draft/a")]
+        self.assertEqual(dispatch.repair_actions(tasks, events), expected)
+        self.assertEqual(dispatch.repair_actions(tasks, events), expected)
+        self.assertEqual((tasks, events), before)
+        self.assertEqual(dispatch.repair_actions({}, events), [])
+
+
+class RefusalDecideTest(unittest.TestCase):
+    def setUp(self):
+        self.plan = make_plan(part("core"))
+        self.task = task("task")
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=10)}
+
+    def actions(self, events, *, hosts=None):
+        return dispatch.decide(self.plan, {self.task.id: self.task}, events,
+                               self.hosts if hosts is None else hosts)
+
+    def test_waiting_refusals_neither_start_nor_park_even_at_run_limit(self):
+        for status in ("foreman", "deciding", "decided"):
+            for count in (1, MAX_RUNS):
+                for hosts in (self.hosts, {}):
+                    with self.subTest(status=status, count=count, hosts=hosts):
+                        events = [entry for n in range(2, count + 1) for entry in
+                                  (dict(task_run("00", n=n), host="builder"),
+                                   dict(ev="run.ended", run=f"{self.task.id}-{n}", outcome="done"))]
+                        events += refusal_history(status=status)
+                        self.assertFalse(any(action.kind in ("start", "park")
+                                             for action in self.actions(events, hosts=hosts)))
+
+    def test_settled_fix_none_and_fallback_start_with_their_context(self):
+        section = "## Repair\n\nKeep  spaces.\n"
+        for status, verdict in (("settled", "fix"), ("settled", "none"), ("fallback", "")):
+            for step in ("test", *repairs.REBASE_STEPS):
+                with self.subTest(status=status, verdict=verdict, step=step):
+                    events = refusal_history(status=status, verdict=verdict, section=section, step=step)
+                    before = deepcopy(events)
+                    action, = [action for action in self.actions(events) if action.kind == "start"]
+                    rejection = next(entry for entry in events if entry["ev"] == "branch.rejected")
+                    expected = {**rejection, "section": section} if verdict == "fix" else rejection
+                    self.assertEqual(action.rejection, expected)
+                    self.assertEqual(action.run_kind, "rebase" if step in repairs.REBASE_STEPS else "repair")
+                    self.assertEqual(events, before)
+
+    def test_retry_lands_or_readies_the_same_branch_without_a_run(self):
+        events = refusal_history(status="settled", verdict="retry")
+        for repo, kind in (("agents", "land"), ("fabrig", "ready")):
+            with self.subTest(repo=repo):
+                self.task = replace(self.task, repo=repo)
+                self.assertEqual(self.actions(events)[1:],
+                                 [Action(kind, task=self.task.id, branch=self.task.id, detail=self.task.id)])
 
 
 class ForemanActionsTest(unittest.TestCase):
@@ -907,8 +987,13 @@ parts = []
                    dict(ev="landed", ts="003", branch="elsewhere/task", tip="x", main="main"),
                    dict(ev="landed", ts="002", branch="draft/c", tip="c", main="main")]
         self.queue(records + [records[1]])
-        self.tick()
-        first = log.read()
+        with patch.object(repairs, "start") as examine:
+            self.tick()
+            first = log.read()
+            self.tick()
+        self.assertEqual(examine.call_count, 2)
+        self.assertEqual(examine.call_args.args[0].step, "merge")
+        self.assertEqual(examine.call_args.args[0].branch, "draft/b-r2")
         self.assertEqual([(e["ev"], e["task"]) for e in first],
                          [("branch.landed", "draft/a"), ("branch.rejected", "draft/b"),
                           ("branch.landed", "draft/c")])
@@ -916,10 +1001,7 @@ parts = []
         self.assertEqual(first[1]["step"], "merge")
         self.assertEqual(first[1]["log"], "conflict")
         self.assertEqual(first[1]["branch"], "draft/b-r2")
-        self.assertEqual(self.calls[0][:3], ("start", "draft/b", "builder"))
-        self.assertEqual(self.calls[0][3]["kind"], "rebase")
-        self.assertEqual(self.calls[0][3]["rejection"], first[1])
-        self.tick()
+        self.start.assert_not_called()
         self.assertEqual(log.read(), first)
         commands = [shlex.split(c.argv[-1].removeprefix("bash -lc "))[0]
                     for c in self.fake.calls if c.argv[0] == "ssh" and c.argv[5] == "fake@gate"]
@@ -974,7 +1056,7 @@ parts = []
         self.append(started(branch=branch), ended(),
                     event("branch.rejected", branch=branch, tip="tip", step="default", log="old"),
                     event("branch.rejected", branch=branch, tip=rejected_tip, step="default", log="red"),
-                    started(n=2, branch=branch), ended(n=2))
+                    dict(started(n=2, branch=branch), kind="repair"), ended(n=2))
         self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip\n"))
         return branch
 
@@ -1723,12 +1805,13 @@ parts = []
         self.add_task("b")
         self.append(*growth(), started(), path=path)
         self.queue([dict(ev="rejected", ts="001", branch="draft/b", tip="b", step="test", log="red")])
-        self.tick(log_path=path)
-        self.assertEqual([c[0] for c in self.calls], ["collect", "start"])
+        with patch.object(repairs, "start") as examine:
+            self.tick(log_path=path)
+        self.assertEqual([c[0] for c in self.calls], ["collect"])
         self.assertEqual(self.calls[0][-1]["log_path"], path)
-        self.assertEqual(self.calls[1][-1]["log_path"], path)
-        self.assertEqual(self.calls[1][-1]["events"][-1]["ev"], "branch.rejected")
-        self.assertEqual(self.calls[1][-1]["rejection"], log.read(path)[-1])
+        self.assertEqual(examine.call_args.kwargs, dict(sh=self.fake, log_path=path))
+        self.assertEqual(examine.call_args.args[3][-1]["ev"], "branch.rejected")
+        self.assertEqual(examine.call_args.args[0].tip, "b")
         self.assertEqual(log.read(), [])
         self.assertEqual(log.read(path)[-1]["queue_ts"], "001")
 
@@ -2159,3 +2242,247 @@ class AnsweredRefusalTest(unittest.TestCase):
                   event("question.asked", "a", text="4 runs"), event("question.answered", "a", answer="go")]
         (start,) = [a for a in dispatch.decide(spec, {"draft/a": task("a")}, events, hosts) if a.kind == "start"]
         self.assertEqual(start.run_kind, "rebase")
+
+
+class RepairTickTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.directory = write_plan(self.home / "plan", "draft", tasks=("task",))
+        self.path = self.home / "events.jsonl"
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2),
+                      "gate": Host("gate", "fake@gate", ("gate",))}
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
+                                    Result(0, str(self.home) + "\n"))
+        self.fake.on(["ssh"], self.remote)
+        self.land = self.enterContext(patch.object(dispatch.land, "main", return_value=0))
+        self.collect = self.enterContext(patch.object(runs, "collect"))
+        self.screen = self.enterContext(patch.object(gates, "screen", return_value=[]))
+        self.examine = self.enterContext(patch.object(repairs, "start", side_effect=self.start_foreman))
+        self.commit = self.enterContext(patch.object(repairs, "commit", return_value="repairs/foreman"))
+        self.out = io.StringIO()
+        self.enterContext(redirect_stdout(self.out))
+
+    def remote(self, call):
+        """Answer launch commands without running a remote service."""
+        argv = shlex.split(shlex.split(call.argv[-1])[2])
+        return Result(0, "codex-1 /state/codex-1\n") if argv[:3] == ["fab", "codex", "start"] else Result(0)
+
+    def append(self, *events):
+        for entry in events:
+            log.append(path=self.path, **entry)
+
+    def start_foreman(self, refusal, task, host, events, **kwargs):
+        self.append(dict(foreman_run("04")[0], task=task.id + "/foreman",
+                         run=task.id + "/foreman-1", host=host.name, step=refusal.step))
+
+    def tick(self, *, hosts=None):
+        return [action for action in dispatch.tick(self.directory, sh=self.fake,
+                                                   hosts=self.hosts if hosts is None else hosts,
+                                                   log_path=self.path) if action.kind != "flow"]
+
+    def decided(self, text=None):
+        self.append(*refusal_history(status="decided"))
+        if text is not None:
+            write(log.home() / "runs/draft/task/foreman-1/report.md", text)
+        return repairs.refusals(plan.load(self.directory)[1], log.read(self.path))[0]
+
+    def test_gate_refusal_starts_foreman_in_same_tick_on_freest_builder_even_full(self):
+        for capacity, expected in ((3, "a"), (4, "a"), (5, "z"), (0, "a")):
+            with self.subTest(capacity=capacity):
+                self.path = self.home / f"capacity-{capacity}.jsonl"
+                self.append(*refusal_history()[:2],
+                            dict(ev="run.started", task="other/a", run="other/a-1", host="z"),
+                            dict(ev="run.started", task="other/b", run="other/b-1", host="z"))
+                hosts = {"z": Host("z", "fake@z", ("builder",), places=capacity),
+                         "a": Host("a", "fake@a", ("builder",), places=min(2, capacity)),
+                         "gate": self.hosts["gate"]}
+
+                def refuse(task, events, **kwargs):
+                    self.append(rejected("03", step="gate:files", findings="outside files"))
+                    return [gates.Finding("files", "outside files")]
+
+                self.screen.side_effect = refuse
+                self.examine.reset_mock()
+                actions = self.tick(hosts=hosts)
+                self.assertEqual([action.kind for action in actions], ["land", "examine", "collect", "collect"])
+                args = self.examine.call_args.args
+                self.assertEqual((args[0].step, args[0].findings, args[2]),
+                                 ("gate:files", "outside files", hosts[expected]))
+                self.assertEqual(args[3][-1]["ev"], "branch.rejected")
+                self.assertEqual(self.examine.call_args.kwargs, dict(sh=self.fake, log_path=self.path))
+                self.assertIn(f"examine draft/task gate:files {expected}\n", self.out.getvalue())
+                self.assertFalse(any(entry.get("kind") == "repair" for entry in log.read(self.path)))
+        self.land.assert_not_called()
+        self.assertEqual(log.read(), [])
+
+    def test_fix_lands_spec_then_next_tick_starts_with_section_in_brief(self):
+        refusal = self.decided(report("fix", "Repair the check.", "Keep  spaces."))
+        now = "2026-10-31T23:59:00.000Z"
+        text = repairs.section(refusal, day=now[:10], run_id=refusal.foreman,
+                               body="Repair the check.\nKeep  spaces.")
+
+        def landing(argv):
+            self.assertFalse(any(entry["ev"] == "refusal.settled" for entry in log.read(self.path)))
+            return 0
+
+        self.land.side_effect = landing
+        with patch.object(log, "now", return_value=now):
+            self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        tasks = plan.load(self.directory)[1]
+        self.commit.assert_called_once_with(refusal, tasks[REPAIR_TASK.id], text, self.home,
+                                            run_id=refusal.foreman, sh=self.fake)
+        self.land.assert_called_once_with(["repairs/foreman"])
+        self.assertEqual(log.read(self.path)[-1], dict(ts=now, ev="refusal.settled", task=REPAIR_TASK.id,
+                                                     run=refusal.foreman, verdict="fix", reason="Repair the check.",
+                                                     branch="repairs/foreman", section=text))
+        self.assertIn("remedy draft/task fix Repair the check.\n", self.out.getvalue())
+        self.assertEqual([action.kind for action in self.tick()], ["start"])
+        brief = (log.home() / "runs/draft/task-2/brief.md").read_text()
+        self.assertIn(text + "\n## The landing refused this branch", brief)
+        self.assertEqual(log.read(self.path)[-1]["kind"], "repair")
+        self.assertEqual(log.read(), [])
+
+    def test_already_committed_fix_settles_without_landing(self):
+        self.decided(report("fix", "Repair it."))
+        self.commit.return_value = None
+        self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        self.land.assert_not_called()
+        entry = log.read(self.path)[-1]
+        self.assertEqual((entry["ev"], entry["verdict"], entry["branch"]), ("refusal.settled", "fix", ""))
+        self.assertIn("Repair it.", entry["section"])
+
+    def test_refused_spec_landing_is_noted_and_remedied_again(self):
+        self.decided(report("fix", "Repair it."))
+        self.land.return_value = 1
+        self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        self.assertEqual(log.read(self.path)[-1]["text"], "remedy draft/task failed: landing refused")
+        self.assertFalse(any(entry["ev"] == "refusal.settled" for entry in log.read(self.path)))
+        self.assertEqual(repairs.refusals(plan.load(self.directory)[1], log.read(self.path))[0].state, "decided")
+        self.land.return_value = 0
+        self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        self.assertEqual(self.commit.call_count, 2)
+        self.assertEqual(self.land.call_count, 2)
+        self.assertEqual(log.read(self.path)[-1]["ev"], "refusal.settled")
+
+    def test_retry_settles_and_next_tick_lands_same_branch(self):
+        self.decided(report("retry", "A flake."))
+        self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        self.commit.assert_not_called()
+        self.land.assert_not_called()
+        entry = log.read(self.path)[-1]
+        self.assertEqual((entry["verdict"], entry["reason"], entry["branch"], entry["section"]),
+                         ("retry", "A flake.", "", ""))
+        self.assertEqual([action.kind for action in self.tick()], ["land"])
+        self.land.assert_called_once_with([REPAIR_TASK.id, "--task", REPAIR_TASK.id])
+
+    def test_retry_readies_same_fabrig_tip_with_untry_before_push(self):
+        write_plan(self.directory, "draft", tasks=("task",), repo="fabrig")
+        self.decided(report("retry", "A flake."))
+        self.fake.rules.insert(0, (["git", "rev-parse", "--verify"], Result(0, "tip1\n")))
+        self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+        self.assertEqual([action.kind for action in self.tick()], ["ready"])
+        commands = self.fake.argvs()
+        untry = ssh("fake@gate", ["fab", "queue", "untry", REPAIR_TASK.id])
+        push = ["git", "push", "origin", f"tip1:refs/heads/ready/{REPAIR_TASK.id}"]
+        self.assertLess(commands.index(untry), commands.index(push))
+        self.assertEqual(log.read(self.path)[-1]["tip"], "tip1")
+        self.land.assert_not_called()
+        self.commit.assert_not_called()
+
+    def test_none_or_unreadable_report_starts_with_refusal_alone_next_tick(self):
+        for form in ("invalid", "missing", "directory", "encoding"):
+            with self.subTest(form=form):
+                self.path = self.home / f"none-{form}.jsonl"
+                self.decided("Done: cannot choose\n" if form == "invalid" else None)
+                report_path = log.home() / "runs/draft/task/foreman-1/report.md"
+                if report_path.is_dir():
+                    report_path.rmdir()
+                elif form != "invalid":
+                    report_path.unlink(missing_ok=True)
+                if form == "directory":
+                    report_path.mkdir()
+                if form == "encoding":
+                    sibling = report_path.with_name("report.md.new")
+                    sibling.write_bytes(b"\xff")
+                    sibling.replace(report_path)
+                self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+                entry = log.read(self.path)[-1]
+                self.assertEqual((entry["verdict"], entry["branch"], entry["section"]), ("none", "", ""))
+                actions = self.tick()
+                self.assertEqual([action.kind for action in actions], ["start"])
+                rejection = next(entry for entry in log.read(self.path) if entry["ev"] == "branch.rejected")
+                self.assertEqual(actions[0].rejection, rejection)
+                brief = (log.home() / "runs/draft/task-2/brief.md").read_text()
+                self.assertIn("## The landing refused this branch", brief)
+                self.assertNotIn("## Repair", brief)
+        self.commit.assert_not_called()
+        self.land.assert_not_called()
+
+    def test_failed_commit_or_checkout_never_settles(self):
+        for failure in ("commit", "checkout", "empty"):
+            with self.subTest(failure=failure):
+                self.path = self.home / f"failed-{failure}.jsonl"
+                self.decided(report("fix", "Repair it."))
+                self.commit.reset_mock()
+                if failure == "commit":
+                    self.commit.side_effect = RuntimeError("cannot commit")
+                else:
+                    self.fake.rules[0] = (["git", "rev-parse", "--show-toplevel"],
+                                          Result(128 if failure == "checkout" else 0))
+                self.assertEqual([action.kind for action in self.tick()], ["remedy"])
+                self.assertFalse(any(entry["ev"] == "refusal.settled" for entry in log.read(self.path)))
+                self.assertEqual(log.read(self.path)[-1]["ev"], "note")
+                self.assertEqual(self.commit.call_count, int(failure == "commit"))
+        self.land.assert_not_called()
+
+    def test_stale_refusal_or_foreman_is_recomputed_before_acting(self):
+        for status in ("foreman", "decided", "other foreman"):
+            with self.subTest(status=status):
+                self.path = self.home / f"stale-{status}.jsonl"
+                self.append(*refusal_history(status="foreman" if status == "foreman" else "decided"))
+                decide_repairs = dispatch.repair_actions
+
+                def stale(tasks, events):
+                    actions = decide_repairs(tasks, events)
+                    if status == "other foreman":
+                        self.append(*foreman_run("06", run_id="draft/task/foreman-2", outcome="done", ended="07"))
+                    else:
+                        self.append(dict(task_run("06", n=2), host="builder"))
+                    return actions
+
+                with patch.object(dispatch, "repair_actions", side_effect=stale):
+                    self.tick()
+                self.assertIn("refusal for draft/task", log.read(self.path)[-1]["text"])
+        self.examine.assert_not_called()
+        self.commit.assert_not_called()
+        self.land.assert_not_called()
+
+    def test_question_then_refusal_actions_share_snapshot_before_fresh_call_decisions(self):
+        write_plan(self.directory, "draft", tasks=("task", "a"))
+        self.decided(report("fix", "Repair it."))
+        self.append(*question_history("a"))
+        order = []
+
+        def question(*args, **kwargs):
+            order.append("foreman")
+            self.append(dict(ev="note", text="foreman started"))
+
+        def commit(*args, **kwargs):
+            order.append("remedy")
+            return None
+
+        def calls(plan, tasks, events, *args):
+            order.append("calls")
+            self.assertIn("refusal.settled", [entry["ev"] for entry in events])
+            self.assertIn("foreman started", [entry.get("text") for entry in events])
+            return []
+
+        with patch.object(foreman, "start", side_effect=question), \
+             patch.object(dispatch, "foreman_actions", wraps=dispatch.foreman_actions) as questions, \
+             patch.object(dispatch, "repair_actions", wraps=dispatch.repair_actions) as refusals, \
+             patch.object(dispatch, "call_actions", side_effect=calls):
+            self.commit.side_effect = commit
+            self.assertEqual([action.kind for action in self.tick()], ["foreman", "remedy"])
+        self.assertEqual(order, ["foreman", "remedy", "calls"])
+        self.assertIs(questions.call_args.args[1], refusals.call_args.args[1])
+        self.assertNotIn("foreman started", [entry.get("text") for entry in refusals.call_args.args[1]])

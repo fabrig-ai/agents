@@ -168,7 +168,7 @@ def foreman_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Actio
 
 
 def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action]:
-    """Start a refusal's foreman or act on its verdict, one action per open refusal of
+    """Return actions to start refusal foremen or act on verdicts, one per open refusal of
     fab.repairs.refusals(tasks, events), in its order (docs/design/fab.md, 13.1):
     - foreman: Action("examine", task=<task>, branch=<refused branch>, detail="<step>
       <branch>");
@@ -177,7 +177,15 @@ def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action
       settled fix or none, or a fallback; a settled retry folds as done, so decide lands
       or readies it again).
     Pure; only refusals of tasks in tasks are considered."""
-    raise NotImplementedError
+    actions = []
+    for refusal in repairs.refusals(tasks, events):
+        if refusal.state == "foreman":
+            actions.append(Action("examine", task=refusal.task, branch=refusal.branch,
+                                  detail=f"{refusal.step} {refusal.branch}"))
+        elif refusal.state == "decided":
+            actions.append(Action("remedy", task=refusal.task, run=refusal.foreman,
+                                  detail=refusal.foreman))
+    return actions
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:
@@ -221,7 +229,9 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
        last run ended infra. A task that already has MAX_RUNS runs gets park instead of start,
-       whatever the target and the places.
+       whatever the target and the places. An open refusal permits neither start nor park
+       until settled fix or none, or fallback. Settled fixes add their section to the start's
+       rejection; settled retries fold as done and go through step 2.
     4. design: when fewer tasks are runnable or rejected than plan.low times the flow's
        current target (its starting target without prior events), one design action whose
        detail lists, in plan order, parts not designed whose needs are designed or done.
@@ -244,7 +254,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
 
     candidates = [identifier for status in ("rejected", "runnable")
                   for identifier, view in views.items() if view.status == status]
-    actions.extend(_starts(candidates, views, events, free, limit - occupied))
+    refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)}
+    actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
 
     if len(candidates) < plan.low * limit:
         design = _design_action(plan, tasks, views, hosts, len(candidates))
@@ -272,10 +283,17 @@ def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, st
 
 
 def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
-            free: dict[str, int], budget: int) -> list[Action]:
-    """Reserve places up to the draft's remaining target, parking exhausted tasks for free."""
+            free: dict[str, int], budget: int, refusals: Mapping[str, repairs.Refusal]) -> list[Action]:
+    """Reserve places or park exhausted tasks only after their refusal permits a run.
+
+    Settled fixes carry their section in the rejection; none and fallback keep it alone.
+    """
     actions = []
     for identifier in candidates:
+        refusal = refusals.get(identifier)
+        if refusal is not None and not (refusal.state == "fallback" or
+                refusal.state == "settled" and refusal.verdict in ("fix", "none")):
+            continue
         view = views[identifier]
         # Rebase runs are mechanical (the model's foreman writes them) and do not count.
         kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
@@ -291,6 +309,8 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
             continue
         host = min(available, key=lambda name: (-free[name], name))
         kind, rejection = _start_kind(view, events)
+        if refusal is not None and refusal.state == "settled" and refusal.verdict == "fix":
+            rejection = {**rejection, "section": refusal.section}
         actions.append(Action("start", task=identifier, host=host, run_kind=kind,
                               detail=f"{kind} {host}", rejection=rejection))
         free[host] -= 1
@@ -300,7 +320,8 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
 
 
 def _start_kind(view: state.TaskView, events: list[dict]) -> tuple[str, dict | None]:
-    """Choose implement, repair or rebase, preserving a refusal since the last run as context."""
+    """Choose implement, repair or rebase using repairs.REBASE_STEPS for an open refusal,
+    preserving the rejection since the last run as context."""
     history = [event for event in reversed(events) if event.get("task") == view.id]
     kind = "implement"
     rejection = None
@@ -309,7 +330,7 @@ def _start_kind(view: state.TaskView, events: list[dict]) -> tuple[str, dict | N
     last = next((event for event in history if event.get("ev") in ("branch.rejected", "run.started")), {})
     if view.status == "rejected" or last.get("ev") == "branch.rejected":
         rejection = next(event for event in history if event.get("ev") == "branch.rejected")
-        kind = "rebase" if rejection.get("step") in ("rebase", "merge") else "repair"
+        kind = "rebase" if rejection.get("step") in repairs.REBASE_STEPS else "repair"
     else:
         ended = next((event for event in history if event.get("ev") == "run.ended"), {})
         if ended.get("outcome") == "infra":
@@ -437,9 +458,11 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
 
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
-    """Take a task, foreman or call-chain action, isolating failures and logging each finish
-    outcome. Call units use the plan's draft and subject. Foremen print their asking run
-    and builder; failed settlements leave questions unanswered for the next tick."""
+    """Take task, question, refusal or call-chain actions, logging failures as notes.
+
+    Foremen print their asking run or refused step and builder; remedies print verdict and
+    reason. Failed settlements remain open for the next tick. Finish always logs its outcome.
+    """
     detail = action.detail
     outcome = "failed"
     try:
@@ -458,6 +481,10 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 detail = _foreman(action, tasks, hosts, sh=sh, log_path=log_path)
             case "settle":
                 _settle(action, tasks, plan_dir, sh=sh, log_path=log_path)
+            case "examine":
+                detail = _examine(action, tasks, hosts, sh=sh, log_path=log_path)
+            case "remedy":
+                detail = _remedy(action, tasks, plan_dir, sh=sh, log_path=log_path)
             case "vet":
                 _vet(action, plan, checkout, hosts, sh=sh, log_path=log_path)
             case "hold":
@@ -484,7 +511,8 @@ def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = 
 
     Fetch each checkout once; print load failures without logging and skip retired plans.
     Import the queue and measure builders once, then let each plan decide on fresh events.
-    Plans collect only their own runs and spend builders' calm extras once per tick.
+    Plans collect their runs and spend builders' calm extras once per tick; after decisions,
+    question and refusal actions share one log snapshot and precede fresh call decisions.
     Collect unowned runs last and refresh the page once. Return load, plan and stray
     actions in order; no loaded plan means no import, measure or page.
     """
@@ -569,14 +597,16 @@ def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
 def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
                hosts: Mapping[str, Host], calm: Mapping[str, bool], *, sh: Runner,
                log_path: Path | None) -> list[Action]:
-    """Take one plan's decisions, foremen, then calls, reading events anew at each step."""
+    """Take decisions, then question and refusal actions from one fresh snapshot in that
+    order, then calls decided from the resulting log."""
     actions = decide(plan, tasks, log.read(log_path), hosts, calm)
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
-    questions = foreman_actions(tasks, log.read(log_path))
-    for action in questions:
+    events = log.read(log_path)
+    settlements = foreman_actions(tasks, events) + repair_actions(tasks, events)
+    for action in settlements:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
-    actions.extend(questions)
+    actions.extend(settlements)
     design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
     followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
     actions.extend(followups)
@@ -677,20 +707,71 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
             sh: Runner, log_path: Path | None) -> None:
     """Commit and land a settled answer before recording it; failures leave it retryable.
 
-    Resolve the plan's git checkout through the runner, refusing a non-checkout. An answer
+    Share checkout resolution with refusal remedies, refusing a non-checkout. An answer
     already recorded by commit needs no landing. Read the collected report locally and log
     its first answer line with both the asking and foreman runs after success."""
     question = _question(action, tasks, log.read(log_path), "settled")
-    result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(plan_dir), check=True)
-    if not result.out.strip():
-        raise ValueError("plan is not a git checkout")
+    checkout = _spec_checkout(plan_dir, sh=sh)
     answer = foreman.answer((log.home() / "runs" / action.run / "report.md").read_text())
-    branch = foreman.commit(question, tasks[action.task], answer, Path(result.out.strip()),
+    branch = foreman.commit(question, tasks[action.task], answer, checkout,
                             run_id=action.run, day=log.now()[:10], sh=sh)
     if branch is not None:
         _land_branch([branch])
     log.append("question.answered", path=log_path, task=question.task, by=action.run,
                run=question.run, answer=answer.splitlines()[0])
+
+
+def _spec_checkout(plan_dir: Path, *, sh: Runner) -> Path:
+    """Resolve the plan's checkout root for question or refusal spec commits."""
+    result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(plan_dir), check=True)
+    if not result.out.strip():
+        raise ValueError("plan is not a git checkout")
+    return Path(result.out.strip())
+
+
+def _refusal(action: Action, tasks: Mapping[str, Task], events: list[dict],
+             status: str) -> repairs.Refusal:
+    """Recompute the task's open refusal, refusing stale state or a different foreman."""
+    for refusal in repairs.refusals(tasks, events):
+        if refusal.task == action.task and refusal.state == status and (
+                status == "foreman" or refusal.foreman == action.run):
+            return refusal
+    raise ValueError(f"no {status} refusal for {action.task} {action.run}")
+
+
+def _examine(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
+             sh: Runner, log_path: Path | None) -> str:
+    """Recompute a pending refusal and start its foreman on the freest builder, even full."""
+    events = log.read(log_path)
+    refusal = _refusal(action, tasks, events, "foreman")
+    host = _builder(hosts, events)
+    repairs.start(refusal, tasks[action.task], host, log.read(log_path), sh=sh, log_path=log_path)
+    return f"{refusal.step} {host.name}"
+
+
+def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
+            sh: Runner, log_path: Path | None) -> str:
+    """Settle a decided refusal from its collected report, treating unreadable as empty.
+
+    Land a fix's spec section before recording it; retry and none need no commit.
+    Failures leave the refusal decided for the next tick. Return verdict and reason.
+    """
+    refusal = _refusal(action, tasks, log.read(log_path), "decided")
+    try:
+        report = (log.home() / "runs" / action.run / "report.md").read_text()
+    except (OSError, UnicodeError):
+        report = ""
+    verdict, reason, body = repairs.remedy(refusal, report)
+    branch, section = None, ""
+    if verdict == "fix":
+        section = repairs.section(refusal, day=log.now()[:10], run_id=action.run, body=body)
+        branch = repairs.commit(refusal, tasks[action.task], section,
+                                _spec_checkout(plan_dir, sh=sh), run_id=action.run, sh=sh)
+        if branch is not None:
+            _land_branch([branch])
+    log.append("refusal.settled", path=log_path, task=refusal.task, run=action.run,
+               verdict=verdict, reason=reason, branch=branch or "", section=section)
+    return f"{verdict} {reason}"
 
 
 def _hold(action: Action, *, log_path: Path | None) -> None:
