@@ -41,12 +41,15 @@ COUNT = re.compile(r"^(\S+): count (\d+), baseline (\d+)(?:; lower with .*)?$")
 
 @dataclass(frozen=True)
 class Ratchet:
-    """One form's actual counts in a touched top-level tree, missing sides zero."""
+    """One form's actual counts in a touched top-level tree, missing sides zero. new: the
+    base does not count the form (a new tree, or a form the branch adds to the ratchet),
+    so its tip count is a baseline, not a rise."""
 
     tree: str
     form: str
     base: int
     tip: int
+    new: bool = False
 
 
 @dataclass(frozen=True)
@@ -304,7 +307,7 @@ def render(digest: Digest) -> str:
         (f"Functions over {SIZE_CAP} lines (flag)",
          [f"- `{entry.module}:{entry.start}` {entry.name}: {entry.lines} lines" for entry in digest.long]),
         ("Old forms by tree", [f"- `{entry.tree}` `{entry.form}`: {entry.base} -> {entry.tip} "
-                               f"({entry.tip - entry.base:+d})" for entry in digest.ratchets]),
+                               f"({'new' if entry.new else f'{entry.tip - entry.base:+d}'})" for entry in digest.ratchets]),
     ]
     for title, entries in sections:
         lines.extend(["", f"## {title}"])
@@ -425,6 +428,6 @@ def ratchets(base: Path, tip: Path, paths: Sequence[str], *, sh: Runner = run) -
         if scripts[0] and roots[1].exists() and not scripts[1]:
             raise ValueError(f"{tree}: old_forms.py removed")
         before, after = [_counts(root, sh=sh) if exists else {} for root, exists in zip(roots, scripts)]
-        found.extend(Ratchet(tree, form, before.get(form, 0), after.get(form, 0))
+        found.extend(Ratchet(tree, form, before.get(form, 0), after.get(form, 0), form not in before)
                      for form in sorted(before.keys() | after.keys()))
     return found

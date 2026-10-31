@@ -275,7 +275,19 @@ class RatchetsTest(unittest.TestCase):
             atomic.write(root / "tip/new/scripts/old-forms.txt", "form 0\n")
             fake = FakeRunner().on(["python3"], Result(1, err="form: count 1, baseline 0\nRule.\n"))
             self.assertEqual(digest.ratchets(root / "base", root / "tip", ["new/a.rs"], sh=fake),
-                             [digest.Ratchet("new", "form", 0, 1)])
+                             [digest.Ratchet("new", "form", 0, 1, True)])
+
+    def test_a_form_the_base_does_not_count_is_new(self):
+        with tmp_home() as root:
+            atomic.write(root / "base/skein/scripts/old_forms.py", "# fake\n")
+            atomic.write(root / "base/skein/scripts/old-forms.txt", "old 2\n")
+            atomic.write(root / "tip/skein/scripts/old_forms.py", "# fake\n")
+            atomic.write(root / "tip/skein/scripts/old-forms.txt", "old 2\nadded 39\n")
+            fake = FakeRunner().on(["python3"], lambda call: Result(
+                1, err="old: count 2, baseline 0\n" + ("" if "/base/" in call.cwd else "added: count 39, baseline 0\n")))
+            self.assertEqual(digest.ratchets(root / "base", root / "tip", ["skein/a.rs"], sh=fake),
+                             [digest.Ratchet("skein", "added", 0, 39, True),
+                              digest.Ratchet("skein", "old", 2, 2, False)])
 
     def test_missing_baseline_removed_script_and_command_failures_raise(self):
         with tmp_home() as root:

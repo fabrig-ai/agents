@@ -47,6 +47,8 @@ class CheckTest(unittest.TestCase):
     def test_falls_and_equal_counts_pass_and_findings_work_in_repair_briefs(self):
         self.assertEqual(gates.check(summary(ratchets=(rust_digest.Ratchet("skein", "form", 2, 1),
                                                        rust_digest.Ratchet("other", "form", 0, 0)))), [])
+        # A form the base does not count yet is the branch adding it to the ratchet, not a rise.
+        self.assertEqual(gates.check(summary(ratchets=(rust_digest.Ratchet("skein", "io_resume", 0, 39, True),))), [])
         text = findings_text(gates.check(summary(ratchets=(rust_digest.Ratchet("skein", "form", 1, 2),))))
         self.assertEqual(text, "[gate:ratchet]\n- `skein`: `form` rose from 1 to 2\n")
 

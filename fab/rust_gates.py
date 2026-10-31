@@ -29,7 +29,7 @@ def check(digest: rust_digest.Digest) -> list[Finding]:
                 for path in digest.outside]
     findings.extend(Finding("ratchet", f"`{entry.tree}`: `{entry.form}` rose from "
                             f"{entry.base} to {entry.tip}")
-                    for entry in digest.ratchets if entry.tip > entry.base)
+                    for entry in digest.ratchets if entry.tip > entry.base and not entry.new)
     return findings
 
 
