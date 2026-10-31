@@ -803,11 +803,89 @@ things fab follows, whatever the clock says:
   on their story tests; QA walks the walkable slices (once QA is here); the
   last call retires the draft. Each is a part above or in section 14.
 
+### 13.11 The entry path to fabrig
+
+At the user's word (10-31): before the fabrig run (skein's component kit,
+phase 1), fab runs a plan that lives in fabrig, gates its Rust branches
+minimally, starts wide and early, and measures where the time and the
+weight go. The api gate (rustdoc JSON) is out of scope.
+
+- **A fabrig plan** is a plan directory inside a fabrig checkout, at any
+  depth (`skein/docs/plan/<draft>`), with `repo = "fabrig"`, listed in
+  `FAB_HOME/plans` (13.4). Its checkout on hel8 is the dispatcher's fabrig
+  clone, `FAB_HOME/repos/fabrig`; the tick fetches it once, as any checkout.
+  Its tasks build in slots and are readied to fabrig's queue (section 6).
+- **Its calls land through fabrig's queue,** never `fab land`: a skeleton,
+  contract, review, answer or retire call works in a worktree of the fabrig
+  clone on hel8 and pushes `calls/<id>`; once its chain approves, the tick
+  pushes `ready/calls/<id>` (as `_ready` does, with no receipt) and logs
+  `branch.ready`. `call.finished` is logged when the queue's record says the
+  branch landed (the import gives `branch.landed` for task `calls/<id>`). A
+  queue rejection counts as a review refusal of the chain: its findings go
+  to an amend call once, a second parks the subject. Answers (`answers/<run>`)
+  and repair sections (`repairs/<run>`) to a fabrig plan's specs are readied
+  the same way; `question.answered` and `refusal.settled` are logged when
+  their branch lands, and the task waits for them as it waits now.
+- **Its briefs speak Rust.** A call of a fabrig plan gets the role text's
+  fabrig variant (`fab/roles/skeleton-fabrig.md` and so on where the
+  wording differs: `todo!()` bodies, doc comments, the crate layout, `cargo
+  check -p <crate>` under heavy to fix its own compile errors) and an
+  inventory of the crates the part's design cites: their public items by
+  grep (`fab/rust_digest.py`), not `fab.calls.inventory`.
+- **Rust gates, minimal** (`fab/rust_gates.py`, beside `fab/gates.py`): on
+  a fabrig task branch, before it is readied, and on a fabrig skeleton's tip:
+  - `files`: every changed path within the task's globs (as section 12);
+  - `ratchet`: for each tree the branch touches that has
+    `scripts/old_forms.py`, its counts on the tip are not above the
+    base's (`python3 -I -B scripts/old_forms.py` from the tree's root;
+    only falls);
+  - `size` is a flag, not a gate: functions over 60 lines the branch adds
+    or grows are listed in the digest.
+  A failed gate logs `branch.rejected` with step `gate:<gate>` and
+  `findings`, as section 12, and the foreman's repair path takes it.
+- **The Rust digest** (`fab/rust_digest.py`, `FAB_HOME/digests/<run>.md`):
+  public items added and removed (`pub fn|struct|enum|trait|type|const|mod`
+  by grep over changed `.rs` files, base against tip), changed lines split
+  into production, tests (`tests/`, `#[cfg(test)]` modules, `*_tests.rs`)
+  and docs (`.md`), functions over 60 lines added or grown, paths outside
+  the task's files and the ratchet's deltas per tree. Deterministic Markdown
+  of at most 8,000 characters, as section 12's.
+- **Optimistic start:** a part's tasks start once its skeleton call has
+  ended done and its tip passes the checks (agents: `bin/fab test` and the
+  gates; fabrig: `fab precheck` and the Rust gates), with the Codex review
+  running alongside. The tasks are read from the call's branch tip, their
+  branches start from it, and they hold landing (or readying) until the
+  skeleton has landed. A refusal becomes an amend call as now; when the
+  amended skeleton lands, each started task's branch is rebased onto main
+  by a rebase run before it lands. A chain that parks parks its tasks.
+- **Start wide:** the flow target (13.2) starts at the plan's places (the
+  sum of its builders' `places`), not 2, and runs start up to the lesser of
+  the target and the runnable tasks. A first-attempt landing with the window
+  full grows it by one; a rejection or an `Infra:` outcome halves it
+  (rounded down, never below 1). A rebase conflict halves nothing.
+- **Direct mode** (`mode = "direct"`): a part of about 1-2 tasks with no
+  shared contract skips the skeleton. The cut writes its short task spec
+  itself, in the plan's `tasks/`, checked by the cut's review; the spec
+  then runs as any task: one Codex run, the checks, the landing. A direct
+  part is never marked `contract` and has no contract readers.
+- **The hand session's weight:** the code report counts the Claude Code
+  sessions listed in `FAB_HOME/hand-sessions` (`<session id> <draft>` per
+  line): each transcript `~/.claude/projects/*/<id>.jsonl` and its
+  `<id>/subagents/*.jsonl`, each assistant message's usage once (by request
+  id), weighed as calls are. It is shown apart, a Hand line beside Claude
+  and Codex, with the Claude to Codex weight both without and with it.
+- **Time per part:** the code report's Parts table gains each part's time
+  breakdown from the log: draft start (the plan's first call) to skeleton
+  landed, spec landed to first run started, runs (started to ended,
+  summed), run ended to checks (the gating or readying), checks to ready,
+  ready to landed; a boundary with no event is shown as `-`.
+
 ## 14. Later
 
 - (The self-critique is 13.1's, part `critique`, not later.)
 
-- fabrig's gates, over Rust and its public API against the skeleton.
+- fabrig's api gate, the public API against the skeleton (rustdoc JSON);
+  names, docs and clones over Rust (13.11 has the minimal gates).
 - Gates on the calls' own branches (skeletons, reviews), which have no task
   `files` to check against.
 - `fab report daily` on a timer on hel8, with the dispatcher's; reports

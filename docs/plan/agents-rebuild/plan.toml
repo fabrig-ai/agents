@@ -277,10 +277,10 @@ design = "docs/design/fab.md, 13.10"
 
 [[part]]
 id = "rust-gates"
-title = "Gates over Rust: the public API against the skeleton first, then size, names, docs and clones"
+title = "Gates over Rust, minimal: files and the old-forms ratchet, size as a digest flag; the Rust digest"
 mode = "feature"
 needs = ["gates"]
-design = "docs/design/fab.md, 12"
+design = "docs/design/fab.md, 12 and 13.11"
 
 [[part]]
 id = "events"
@@ -313,5 +313,25 @@ design = "docs/design/fab.md, 13.6"
 [[slice]]
 id = 6
 story = "A draft goes from its cut to landed code with design, acceptance and review by separate sessions, growing from two runs in flight to many"
-parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events", "surveys", "intake", "buffer-order", "rust-gates"]
+parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events", "surveys", "intake", "buffer-order"]
+walk = false
+
+[[part]]
+id = "fabrig-calls"
+title = "A plan in fabrig: its calls, answers and repairs land through fabrig's queue; briefs in Rust"
+mode = "feature"
+needs = ["plans", "designer", "foreman-repairs"]
+design = "docs/design/fab.md, 13.11"
+
+[[part]]
+id = "wide-start"
+title = "Start wide and early: the target at places, optimistic starts from a checked skeleton, direct mode"
+mode = "feature"
+needs = ["flow", "call-review"]
+design = "docs/design/fab.md, 13.11"
+
+[[slice]]
+id = 7
+story = "A plan living in fabrig runs from its cut to landed Rust through fabrig's queue, gated minimally, starting wide, measured per part"
+parts = ["fabrig-calls", "rust-gates", "wide-start", "accounting"]
 walk = false
