@@ -24,7 +24,7 @@ from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
-MAX_RUNS = 4  # a task with this many runs and still not landed parks for judgement
+MAX_RUNS = 4  # a task with this many runs (rebases aside) and still not landed parks for judgement
 ANSWER_AFTER = 30  # minutes the oldest open question waits before an answer call (the user, 10-30)
 ANSWER_AT = 4  # open questions that start an answer call at once
 REVIEW_AT = 10  # tasks landed since the last review call that start one at once
@@ -224,7 +224,9 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
     actions = []
     for identifier in candidates:
         view = views[identifier]
-        if len(view.runs) >= MAX_RUNS:
+        # Rebase runs are mechanical (the model's foreman writes them) and do not count.
+        kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
+        if sum(kinds.get(run_id) != "rebase" for run_id in view.runs) >= MAX_RUNS:
             actions.append(Action("park", task=identifier,
                                   run=view.runs[-1],
                                   detail=f"{MAX_RUNS} runs without landing; needs judgement"))

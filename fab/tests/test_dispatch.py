@@ -1198,3 +1198,16 @@ class BlockingTest(unittest.TestCase):
     def test_nothing_moving_while_work_remains_blocks(self):
         tasks = {"draft/a": self.tasks["draft/a"]}
         self.assertTrue(dispatch.blocking(tasks, [self.asked], [self.asked]))
+
+
+class RebaseRunsTest(unittest.TestCase):
+    def test_rebase_runs_do_not_count_toward_max_runs(self):
+        spec = make_plan(part("core"))
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
+        events = []
+        for n in range(1, dispatch.MAX_RUNS + 1):
+            kind = "implement" if n == 1 else "rebase"
+            events += [dict(started("a", n), kind=kind), ended("a", n)]
+        events.append(event("branch.rejected", "a", step="rebase", tip="t", log="conflict"))
+        actions = dispatch.decide(spec, {"draft/a": task("a")}, events, hosts)
+        self.assertNotIn("park", [action.kind for action in actions])
