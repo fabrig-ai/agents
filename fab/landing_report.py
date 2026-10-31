@@ -31,6 +31,8 @@ FIGURES = (  # (key, label), in the report's order
     ("rejected", "branches rejected"),
     ("collateral", "rejections later landed unchanged"),
     ("false_red_rate", "false-red rate, %"),
+    ("retried", "branches retried after a collateral red"),
+    ("reused", "batches landed on a precheck receipt"),
     ("latency_median", "minutes ready to landed, median"),
     ("latency_p90", "minutes ready to landed, 90th percentile"),
     ("waiting", "ready branches waiting at the end"),
@@ -172,6 +174,17 @@ def step_rows(queue: list[dict], window: Window) -> list[tuple]:
     return rows
 
 
+def _repairs(landed: list[dict], rejections: dict[str, list[str]]) -> tuple[int, list[float]]:
+    """Earlier rejections counted per landed branch and minutes since each last rejection."""
+    rounds, repairs = 0, []
+    for record in landed:
+        earlier = [ts for ts in rejections.get(record["branch"], []) if ts < record["ts"]]
+        rounds += len(earlier)
+        if earlier:
+            repairs.append(minutes(max(earlier), record["ts"]))
+    return rounds, repairs
+
+
 def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict[str, Figure]:
     """Every FIGURES key for the window, from sources.queue and sources.log records whose ts it
     holds (except where said):
@@ -179,11 +192,13 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
       window's hours. branches_per_batch: their branches' mean; None when no batch.
     - utilisation: busy_seconds of every batch record, summed, as a percentage of the window.
     - green, red, conflict, error: batch records by outcome (error ones count even with no
-      branches). red_share: red over batches, a percentage; None when no batch.
+      branches); collateral batches have none of these outcomes. red_share: red over batches,
+      a percentage; None when no batch.
     - landed, rejected: the queue's `landed` and `rejected` records.
     - collateral: rejected records whose branch and tip a later `landed` record in
       sources.queue carries. false_red_rate: collateral over rejected, a percentage; None when
       none rejected.
+    - retried: the queue's `collateral` records. reused: green batch records with a receipt field.
     - latency_median, latency_p90: fab.report.quantile 0.5 and 0.9 of latencies.
     - waiting, oldest_wait: how many waiting, and the largest minutes (None when none).
     - bisections, bisection_runs, bisection_minutes: from bisections, counted and summed.
@@ -209,12 +224,7 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
             rejections.setdefault(record["branch"], []).append(record["ts"])
     collateral = sum(last_landed.get((record["branch"], record["tip"]), "") > record["ts"]
                      for record in rejected)
-    rounds, repairs = 0, []
-    for record in landed:
-        earlier = [ts for ts in rejections.get(record["branch"], []) if ts < record["ts"]]
-        rounds += len(earlier)
-        if earlier:
-            repairs.append(minutes(max(earlier), record["ts"]))
+    rounds, repairs = _repairs(landed, rejections)
     latency = latencies(sources.log, sources.queue, window)
     waits = waiting(sources.log, sources.queue, window)
     splits = bisections(sources.queue, window)
@@ -237,6 +247,8 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
         "rejected": len(rejected),
         "collateral": collateral,
         "false_red_rate": collateral / len(rejected) * 100 if rejected else None,
+        "retried": sum(record.get("ev") == "collateral" for record in records),
+        "reused": sum(batch.get("outcome") == "green" and "receipt" in batch for batch in all_batches),
         "latency_median": quantile(latency, 0.5),
         "latency_p90": quantile(latency, 0.9),
         "waiting": len(waits),
@@ -256,6 +268,8 @@ def signals(current: Mapping[str, Figure], previous: Mapping[str, Figure],
     """The draft's signals (landing-pipeline.md, 4) that need no target, in this order:
     - collateral above 0: `<n> rejections later landed unchanged`; "the red's cause found and
       ledgered; a flake goes to its owner"; "ops, the test's owner".
+    - retried above 0: `<n> branches retried after a collateral red`; "a flake goes to its
+      owner"; "ops, the test's owner".
     - error above 0: `<n> batches in error`; "restart through the tool; the cause ledgered with
       a remedy in the tool"; "ops".
     - oldest_wait above 60 and above previous: `oldest ready wait <m> minutes (prev <p>)`;
@@ -271,6 +285,10 @@ def signals(current: Mapping[str, Figure], previous: Mapping[str, Figure],
         result.append(Signal(f"{show(collateral)} rejections later landed unchanged",
                              "the red's cause found and ledgered; a flake goes to its owner",
                              "ops, the test's owner"))
+    retried = current.get("retried") or 0
+    if retried > 0:
+        result.append(Signal(f"{show(retried)} branches retried after a collateral red",
+                             "a flake goes to its owner", "ops, the test's owner"))
     errors = current.get("error") or 0
     if errors > 0:
         result.append(Signal(f"{show(errors)} batches in error",

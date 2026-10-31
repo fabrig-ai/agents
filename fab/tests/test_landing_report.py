@@ -172,13 +172,14 @@ class LandingReportTest(unittest.TestCase):
             "utilisation": 240 / 3600 * 100,
             "green": 1, "red": 2, "conflict": 1, "error": 2, "red_share": 40.0,
             "landed": 2, "rejected": 2, "collateral": 1, "false_red_rate": 50.0,
+            "retried": 0, "reused": 0,
             "latency_median": 3.0, "latency_p90": 5.0, "waiting": 2, "oldest_wait": 70.0,
             "bisections": 1, "bisection_runs": 2, "bisection_minutes": 2.0,
             "repair_rounds": 1.5, "repair_minutes": 4.0, "lane_wait": 2.0, "disk_wait": 1.0,
         })
         self.assertEqual(set(actual), {key for key, _ in landing.FIGURES})
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
-                  "collateral", "waiting", "bisections", "bisection_runs"}
+                  "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
         for key, value in actual.items():
             with self.subTest(key=key):
                 self.assertIs(type(value), int if key in counts else float)
@@ -187,7 +188,7 @@ class LandingReportTest(unittest.TestCase):
         sources = Sources([], [], {})
         empty = landing.figures(sources, {}, WINDOW)
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
-                  "collateral", "waiting", "bisections", "bisection_runs"}
+                  "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
         absent = {"branches_per_batch", "red_share", "false_red_rate", "latency_median",
                   "latency_p90", "oldest_wait", "repair_rounds", "repair_minutes"}
         for key, _ in landing.FIGURES:
@@ -210,11 +211,37 @@ class LandingReportTest(unittest.TestCase):
         self.assertEqual(figures["repair_rounds"], 0.0)
         self.assertIsNone(figures["repair_minutes"])
 
+    def test_landing_report_counts_collateral_records_and_green_receipt_batches_in_window(self):
+        queue = [batch("23:59", ["old"], receipt="old", ts=ts("23:59", "2026-10-28")),
+                 batch("00:01", ["a", "b"], "collateral"),
+                 {"ts": ts("00:01"), "ev": "collateral", "branch": "a", "tip": "a1"},
+                 {"ts": ts("00:01"), "ev": "collateral", "branch": "b", "tip": "b1"},
+                 batch("00:02", ["a"], receipt="receipt-a"),
+                 batch("00:03", ["b"], "red", receipt="receipt-b"),
+                 batch("00:04", ["c"], "error", receipt="receipt-c"),
+                 batch("00:05", ["d"], "conflict", receipt="receipt-d"),
+                 batch("00:06", ["e"]),
+                 batch("01:00", ["later"], receipt="later"),
+                 {"ts": ts("01:00"), "ev": "collateral", "branch": "later", "tip": "later"}]
+        figures = landing.figures(Sources([], queue, {}), {}, WINDOW)
+        self.assertEqual((figures["retried"], figures["reused"]), (2, 1))
+        self.assertEqual([figures[key] for key in ("batches", "green", "red", "conflict", "error")],
+                         [6, 2, 1, 1, 1])
+        self.assertEqual(figures["collateral"], 0)
+        self.assertEqual(landing.bisections(queue, WINDOW), [])
+        keys = [key for key, _ in landing.FIGURES]
+        start = keys.index("false_red_rate")
+        self.assertEqual(keys[start:start + 3], ["false_red_rate", "retried", "reused"])
+
+    def test_landing_report_retried_signal_absent_at_zero(self):
+        self.assertEqual(landing.signals({"retried": 0}, {}, []), [])
+
     def test_landing_report_signals_in_order_with_actions_and_owners(self):
-        current = {"collateral": 2, "error": 3, "oldest_wait": 90.0, "disk_wait": 1.25}
+        current = {"collateral": 2, "retried": 4, "error": 3, "oldest_wait": 90.0, "disk_wait": 1.25}
         self.assertEqual(landing.signals(current, {"oldest_wait": 61.0}, ["queue: offline", "heavy: offline"]), [
             Signal("2 rejections later landed unchanged",
                    "the red's cause found and ledgered; a flake goes to its owner", "ops, the test's owner"),
+            Signal("4 branches retried after a collateral red", "a flake goes to its owner", "ops, the test's owner"),
             Signal("3 batches in error", "restart through the tool; the cause ledgered with a remedy in the tool", "ops"),
             Signal("oldest ready wait 90.0 minutes (prev 61.0)", "look for a stuck batch; else capacity", "ops"),
             Signal("1.2 minutes of disk waits at the gate", "the gate's disk: its target, its headroom", "ops"),
