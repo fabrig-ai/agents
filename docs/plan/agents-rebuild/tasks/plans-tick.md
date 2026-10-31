@@ -44,9 +44,17 @@ every function you change to say what it now does.
   2. When no plan loaded, return the actions so far. There is no import,
      no measure and no page.
   3. **One queue import** (`_import_queue`) over every loaded plan's tasks
-     together. Its `since` is the log's newest `queue_ts` of any plan, so
-     importing per plan would drop the later plans' records. Then **one
-     `fab.flow.measure`**.
+     together, then **one `fab.flow.measure`**. The import keeps a cursor
+     per draft, never one for the log: a draft's cursor is the newest
+     `queue_ts` of the log's records whose task is the draft's
+     (`fab.drafts.under`), or `""` when it has none. Its `since` is the
+     oldest cursor of the loaded drafts. A record whose task is in no
+     loaded plan is left, as now, and is read again on a later tick, so a
+     plan that failed to load, or is newly listed, gets the records it
+     missed when it next loads. The import's key, as now, keeps a record
+     read twice from being logged twice. A draft with no imported record
+     reads the queue's whole record each tick until its first one; that
+     record is one short line per batch, landing and rejection.
   4. **Each plan in order** takes what one plan's tick takes today:
      decide, its actions, the foreman's, then the calls'. It decides on
      `log.read(log_path)` read at its turn, so the runs that earlier plans
@@ -98,7 +106,14 @@ Write the tests with `fab/tests/support.py`'s `write_plan`,
 - `fab/tests/test_dispatch.py`, `tick` with `support.FakeRunner`:
   - two plans, one listed and one given, tick in that order;
   - two plans in one checkout make one fetch;
-  - one queue import imports both drafts' records;
+  - one queue import imports both drafts' records, its `since` the older
+    of the two drafts' cursors;
+  - recovery: plan `two`'s plan.toml does not parse for a tick in which
+    `one` imports a record newer than `two`'s; when `two` loads again,
+    the next tick imports `two`'s older record, once, and logs none of
+    `one`'s again;
+  - a plan newly listed beside one with imported records reads from `""`
+    and imports its records older than the other's cursor;
   - one probe ssh per builder;
   - places are shared: a builder with one place and a runnable task in
     each plan starts only the first plan's;
@@ -121,9 +136,21 @@ Write the tests with `fab/tests/support.py`'s `write_plan`,
   - `main` with two PLAN_DIRs, and `--dry-run` over two plans.
 - `fab/tests/test_calls.py`: `last_review` with and without `draft`;
   `review_brief` lists what landed since its own draft's last done review.
-- Existing tests are adjusted only for the unit names and for a load
-  failure that is now an action, not a raise. `designer-tick`'s "neither
-  plan.toml nor a cut call" test is one of those.
+- Existing tests change only where they pin a behaviour this task
+  changes, and then to the new behaviour, keeping what they test where
+  it still holds:
+  - unit names: `fab.drafts.unit` for the per-role count;
+  - one skeleton call (and one contract call) at a time: now design calls
+    up to the flow target, skeleton and contract sharing it;
+  - collection, `blocking`, the answer, review and amend limits and the
+    review's last review counting every draft's runs and calls: now only
+    the plan's own, so such a test gives its runs and calls the plan's
+    draft, or asserts that another draft's do not count;
+  - the queue import's `since`: now the oldest draft cursor;
+  - a load failure that is now an action, not a raise. `designer-tick`'s
+    "neither plan.toml nor a cut call" test is one of those.
+  No other existing test changes. The commit names the tests changed and
+  which of these each follows.
 - `bin/fab test` passes. `test_dispatch.py` and `test_calls.py` stay
   within their budgets.
 

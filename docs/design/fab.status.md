@@ -137,7 +137,8 @@
   tick PLAN_DIR` ticks one plan and collects every run in flight. It
   starts one skeleton call at a time (one contract call beside it once
   `designer-tick` lands), in units numbered by role. Its answer and review
-  limits, and the review's last-review time, count every draft's calls.
+  limits, and the review's last-review time, count every draft's calls,
+  and its queue import reads from the log's newest record of any draft.
 - **Accounting is a skeleton:** `fab/accounting.py` holds 13.5's weights,
   the draft's calls and runs and the code report's Claude and Codex
   figures; `fab.calls.Usage` and `claude_usage` the reading of claude's

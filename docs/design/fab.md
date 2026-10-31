@@ -586,7 +586,10 @@ before it lands (13.1).
   draft, in that order, under the tick's one lock (`fab/drafts.py`; the
   list is `fab.channel.plan_dirs`'). One fetch per checkout, one import of
   the queue's record over every plan's tasks, and one measure of the
-  builders (13.2) serve them all. Then each plan decides on the log as the
+  builders (13.2) serve them all. The import reads from the oldest of the
+  plans' cursors, each the newest record it imported for its draft, so a
+  plan that could not load, or is newly listed, gets the records it
+  missed when it next loads. Then each plan decides on the log as the
   plans before it left it.
 - **Places are shared across plans:** a run started by one plan fills a
   place the next plan sees. A calm builder's one extra place goes to one
