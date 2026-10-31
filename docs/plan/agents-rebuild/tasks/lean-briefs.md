@@ -3,7 +3,7 @@ id = "lean-briefs"
 part = "calls"
 kind = "feature"
 needs = ["accounting", "channel-tick"]
-files = ["fab/calls.py", "fab/tests/test_calls.py", "fab/roles/skeleton.md", "fab/roles/call-reviewer.md"]
+files = ["fab/calls.py", "fab/tests/test_calls.py", "fab/roles/skeleton.md", "fab/roles/call-reviewer.md", "fab/call_review.py", "fab/tests/test_call_review.py"]
 effort = "high"
 minutes = 45
 +++
@@ -37,3 +37,9 @@ task spec of every needed part. Cut it to what the part needs.
   shared ones only, and the cited draft sections only; the review brief keeps
   the drafts whole.
 - `bin/fab test` passes; `test_calls.py` stays within its budget.
+
+## Answers
+
+- 2026-10-31, the designer: yes, fab/call_review.py and its tests are in
+  files; give the review brief the plan's whole drafts independently of the
+  skeleton brief, as you recommend.

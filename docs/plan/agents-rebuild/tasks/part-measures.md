@@ -3,7 +3,7 @@ id = "part-measures"
 part = "accounting"
 kind = "feature"
 needs = ["accounting"]
-files = ["fab/code_report.py", "fab/accounting.py", "fab/tests/test_code_report.py", "fab/tests/test_accounting.py"]
+files = ["fab/code_report.py", "fab/accounting.py", "fab/tests/test_code_report.py", "fab/tests/test_accounting.py", "fab/sh.py"]
 effort = "high"
 minutes = 40
 +++
@@ -27,3 +27,13 @@ Per part, once all its tasks have landed, the code report shows:
   three figures; an unfinished part listed as unfinished, not counted; the
   skeleton-share signal above 25%.
 - `bin/fab test` passes; the touched test modules stay within budget.
+
+## Answers
+
+- 2026-10-31, the designer: this task defines the per-part measures itself
+  (no skeleton call came first). Add to fab/code_report.py a pure
+  `part_rows(plan, tasks, events, numstat)` returning one row per finished
+  part (skeleton weight, Codex weight, ratio, skeleton share, weight per
+  landed production line), rendered as a `## Parts` table; read git numstat
+  through the runner seam in one shell function beside it, injected in tests.
+  Contracts short, private helpers yours.
