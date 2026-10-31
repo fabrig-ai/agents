@@ -2,7 +2,8 @@
 
 The metrics are the code-producing draft's (docs/design/draft/code-producing-pipeline.md,
 3) that the log records: flow, task size in runs and minutes, questions, repairs, waits and
-Claude and Codex usage (fab.accounting). Every function here is pure; `render` puts them together for one window.
+Claude and Codex usage (fab.accounting). The measures are pure; `render` reads git through
+`_part_numstat` and puts them together for one window.
 
 A draft's records are those whose task is `<draft>/...`; its calls and their review runs are
 fab.accounting's draft_calls and draft_runs.
@@ -14,12 +15,14 @@ from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
+from pathlib import Path
 
-from fab import accounting, report
+from fab import accounting, digest, report
 from fab.calls import open_questions
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.report import Figure, Signal, Sources, Window
+from fab.sh import Runner, run
 from fab.state import fold
 
 IDLE_GAP = 10  # minutes with none of the draft's runs in flight, while work remains, that make a gap
@@ -297,6 +300,157 @@ def parts(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Win
     return rows
 
 
+def part_rows(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
+              numstat: Mapping[str, tuple[int | None, int | None]]) -> list[tuple]:
+    """Finished parts in plan order: (part, skeleton weight M, task Codex weight M, ratio,
+    skeleton share, Claude weight/line, Codex weight/line). Skeleton weight includes its
+    Claude calls and Codex reviews; task runs are implement, repair and rebase only.
+    numstat maps part to (skeleton additions, landed production lines); missing or zero
+    denominators give None. Per-line weights are token weights, not millions. Pure."""
+    views = fold(tasks, events)
+    rows = []
+    for part in plan.parts:
+        members = {task.id for task in tasks.values() if task.part == part}
+        if not members or any(views[identifier].status != "landed" for identifier in members):
+            continue
+        calls, roots = _part_calls(f"{plan.draft}/{part}", events)
+        claude = sum((accounting.call_weight(event) or 0.0 for event in calls), 0.0)
+        starts = {event.get("run"): event for event in events if event.get("ev") == "run.started"}
+        codex = reviews = 0.0
+        for event in events:
+            if event.get("ev") != "run.ended":
+                continue
+            started = starts.get(event.get("run"), {})
+            task = event.get("task", started.get("task"))
+            kind = started.get("kind", event.get("kind", "review" if task in roots else "implement"))
+            weight = accounting.run_weight(event) or 0.0
+            if task in members and kind in ("implement", "repair", "rebase"):
+                codex += weight
+            elif task in roots and kind == "review":
+                reviews += weight
+        skeleton = claude + reviews
+        added, lines = numstat.get(part, (None, None))
+        rows.append((part, skeleton / accounting.MILLION, codex / accounting.MILLION,
+                     skeleton / codex if codex else None,
+                     added / lines if added is not None and lines else None,
+                     claude / lines if lines else None,
+                     (codex + reviews) / lines if lines else None))
+    return rows
+
+
+def _part_calls(subject: str, events: list[dict]) -> tuple[list[dict], set[str]]:
+    """The part's design calls, amendments and root ids, including historical ended-only calls."""
+    records = [event for event in events if event.get("ev") in ("call.started", "call.ended")]
+    roots = {event["call"] for event in records if event.get("subject") == subject
+             and event.get("role") in ("skeleton", "contract", "review") and event.get("call")}
+    calls = set(roots)
+    for event in records:
+        if event.get("amends") in roots and event.get("call"):
+            calls.add(event["call"])
+    ended = [event for event in records if event.get("ev") == "call.ended"
+             and (event.get("call") in calls or event.get("subject") == subject
+                  and event.get("role") in ("skeleton", "contract", "amend", "review"))]
+    return ended, roots
+
+
+def _part_numstat(plan: Plan, tasks: Mapping[str, Task], events: list[dict], *,
+                  sh: Runner = run) -> dict[str, tuple[int | None, int | None]]:
+    """Read skeleton additions and final production lines for finished parts through sh.
+    Review base/tip identifies the amended skeleton; an ended-only skeleton uses its
+    landed commit and parent. Final lines compare the empty tree to the last task's main.
+    Union task globs, classify as digest does; unavailable history stays None. No fetch."""
+    def lines(base, tip, files, cwd):
+        result = sh(["git", "diff", "--numstat", "-z", "--no-renames", base, tip, "--",
+                     *(f":(glob){path}" for path in files)], cwd=cwd)
+        return _production_lines(result.out) if result.ok else None
+
+    found = {}
+    for row in part_rows(plan, tasks, events, {}):
+        part = row[0]
+        members = {task.id: task for task in tasks.values() if task.part == part}
+        files = sorted({path for task in members.values() for path in task.files})
+        if not files:
+            continue
+        # Task paths are <checkout>/docs/plan/<draft>/tasks/<name>.md.
+        path = Path(next(iter(members.values())).path).absolute()
+        if len(path.parents) < 5 or path.parents[3].name != "docs":
+            continue
+        cwd = str(path.parents[4])
+        _, roots = _part_calls(f"{plan.draft}/{part}", events)
+        reviews = [event for event in events if event.get("ev") == "run.started"
+                   and event.get("task") in roots and event.get("kind") == "review"
+                   and event.get("base") and event.get("tip")]
+        landings = [event for event in events if event.get("ev") == "branch.landed"
+                    and event.get("task") in members]
+        branches = {event["branch"] for event in events if event.get("ev") == "call.started"
+                    and event.get("call") in roots and event.get("branch")}
+        skeletons = [event for event in events if event.get("ev") == "branch.landed"
+                     and event.get("branch") in branches and event.get("tip")]
+        added = landed_lines = None
+        if reviews:
+            added = lines(reviews[-1]["base"], reviews[-1]["tip"], files, cwd)
+        elif skeletons:
+            tip = skeletons[-1]["tip"]
+            added = lines(tip + "^", tip, files, cwd)
+        if landings and landings[-1].get("main"):
+            empty = sh(["git", "hash-object", "-t", "tree", "--stdin"], cwd=cwd, input="")
+            if empty.ok and empty.out.strip():
+                landed_lines = lines(empty.out.strip(), landings[-1]["main"], files, cwd)
+        found[part] = added, landed_lines
+    return found
+
+
+def _production_lines(numstat: str) -> int | None:
+    """Added production lines from a NUL numstat; malformed output is unavailable."""
+    total = 0
+    for record in numstat.split("\0"):
+        if not record:
+            continue
+        fields = record.split("\t", 2)
+        if len(fields) != 3:
+            return None
+        added, removed, path = fields
+        if added == removed == "-":
+            continue
+        if not added.isdecimal() or not removed.isdecimal():
+            return None
+        if digest.classify(path) == "production":
+            total += int(added)
+    return total
+
+
+def _part_section(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Window,
+                  measured: list[tuple]) -> list[str]:
+    activity = {row[0]: row for row in parts(plan, tasks, events, window)}
+    measures = {row[0]: row[1:] for row in measured}
+    return ["## Parts", "Measures cover the whole log; activity covers the report window.",
+            "Skeleton share target: 10-20%. Skeleton weight includes Claude design calls and Codex reviews.",
+            "Weights per line are in token units; unfinished parts have no measures.",
+            *report.table(("Part", "Tasks", "Landed", "Runs", "Codex minutes", "Questions", "Status",
+                           "Skeleton weight (M)", "Task Codex weight (M)", "Skeleton/Codex",
+                           "Skeleton share", "Claude weight/line", "Codex weight/line"),
+                          _part_cells(plan, activity, measures))]
+
+
+def _part_cells(plan: Plan, activity: Mapping[str, tuple], measures: Mapping[str, tuple]) -> list[tuple]:
+    rows = []
+    for part in plan.parts:
+        counts = activity.get(part, (part, 0, 0, 0, 0.0, 0))
+        weights = measures.get(part, (None,) * 6)
+        rows.append((*counts[:4], report.show(counts[4]), counts[5],
+                     "finished" if part in measures else "unfinished",
+                     *(report.show(value) for value in weights[:3]),
+                     f"{weights[3]:.1%}" if weights[3] is not None else "-",
+                     *(report.show(value) for value in weights[4:])))
+    return rows
+
+
+def _part_signals(rows: list[tuple]) -> list[Signal]:
+    return [Signal(f"{row[0]} skeleton share {row[4]:.1%}, above 25%",
+                   "keep the skeleton to contracts; target 10-20%", "the skeleton author")
+            for row in rows if row[4] is not None and row[4] > 0.25]
+
+
 def signals(current: Mapping[str, Figure], previous: Mapping[str, Figure],
             unread: list[str]) -> list[Signal]:
     """The draft's signals (code-producing-pipeline.md, 4) that need no target, in this order:
@@ -344,13 +498,14 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     - `## Idle gaps`: a table Start, Minutes, Cause from gaps.
     - `## Stops, longest first`: a table Kind, Task, Start, Minutes, Open (yes or no), Detail
       from stops.
-    - `## Parts`: a table Part, Tasks, Landed, Runs, Codex minutes, Questions from parts.
+    - `## Parts`: activity and finished-part measures; skeleton shares over 25% add a signal.
     - `## Calls`: a table Call, Role, Subject, Minutes, Turns, Peak context, Weight (M),
       Over target from fab.accounting.call_rows, numbers through fab.report.show.
     - `## Rejections by step`: a table Step, Count of the window's branch.rejected by step,
       most first, then by step.
     Minutes are shown through fab.report.show; sections are separated by one blank line."""
     events = sources.log
+    measured = part_rows(plan, tasks, events, _part_numstat(plan, tasks, events))
     current = figures(plan, tasks, events, sources.heavy, hosts, window)
     previous = figures(plan, tasks, events, sources.heavy, hosts, window.previous())
     history = [event for event in events if _belongs(plan.draft, event)]
@@ -367,7 +522,8 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
         [f"# Code report: {plan.draft}, {window.start[:10]}",
          f"{window.start} to {window.end}; each figure beside the previous window's.", first],
         ["## Figures", *report.figure_table(FIGURES, current, previous)],
-        ["## Signals", *report.signal_lines(signals(current, previous, sources.unread))],
+        ["## Signals", *report.signal_lines(signals(current, previous, sources.unread)
+                                           + _part_signals(measured))],
         ["## Hours", *report.table(("Hour", "In flight", "Started", "Ready", "Landed"),
             ((hour.start[11:13] + ":00", hour.peak, hour.started, hour.ready, hour.landed)
              for hour in hourly(plan.draft, events, window)))],
@@ -378,8 +534,7 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
             ((stop.kind, stop.task, stop.start, report.show(stop.minutes),
               "yes" if stop.open else "no", stop.detail)
              for stop in stops(plan.draft, events, window)))],
-        ["## Parts", *report.table(("Part", "Tasks", "Landed", "Runs", "Codex minutes", "Questions"),
-            ((*row[:4], report.show(row[4]), row[5]) for row in parts(plan, tasks, events, window)))],
+        _part_section(plan, tasks, events, window, measured),
         ["## Calls", *report.table(("Call", "Role", "Subject", "Minutes", "Turns", "Peak context",
                                    "Weight (M)", "Over target"),
             ((*row[:3], *(report.show(value) for value in row[3:7]), row[7])

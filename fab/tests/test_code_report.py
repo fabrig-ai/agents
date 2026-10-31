@@ -1,10 +1,13 @@
 import unittest
+from dataclasses import replace
+from unittest.mock import patch
 
 from fab import code_report as code
 from fab import hosts, report
 from fab.heavy import EX_TEMPFAIL
 from fab.plan import Part, Plan, Task
-from fab.tests.support import tmp_home
+from fab.sh import Result
+from fab.tests.support import FakeRunner, tmp_home
 
 
 def ts(clock, day="2026-10-29"):
@@ -356,3 +359,152 @@ class CodeReportTest(unittest.TestCase):
         rendered = code.render(self.plan, self.tasks, report.Sources(records, [], {}), self.hosts,
                                report.Window(ts("00:00"), ts("01:00")))
         self.assertTrue(rendered.endswith("| z | 2 |\n| a | 1 |\n| b | 1 |\n"))
+
+
+class PartMeasuresTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.plan, self.tasks, self.hosts = fixture()
+        self.repo = self.home / "checkout"
+        self.tasks = {name: replace(task, path=str(self.repo / "docs/plan/demo" / task.path),
+                                   files=("fab/core*.py", "fab/tests/test_core.py", "docs/core.md"))
+                      for name, task in self.tasks.items()}
+        self.records = [
+            event("00:00", "call.started", None, call="root", role="skeleton", subject="demo/core",
+                  branch="calls/root"),
+            event("00:01", "call.ended", None, call="root", role="skeleton", subject="demo/core",
+                  tokens="1000000/0/0", cache_write=800000),
+            event("00:02", "run.started", "root", run="review-1", kind="review", base="base", tip="first"),
+            event("00:03", "run.ended", "root", run="review-1", outcome="done", tokens="1000000/0/0"),
+            event("00:04", "call.started", None, call="amend", role="amend", amends="root"),
+            event("00:05", "call.ended", None, call="amend", tokens="1000000/0/0"),
+            event("00:06", "run.started", "root", run="review-2", kind="review", base="base", tip="amended"),
+            event("00:07", "run.ended", "root", run="review-2", outcome="done", tokens="1000000/0/0"),
+            event("00:08", "run.started", run="implement", kind="implement"),
+            event("00:09", "run.ended", run="implement", outcome="done", tokens="2000000/0/0"),
+            event("00:10", "run.started", run="repair", kind="repair"),
+            event("00:11", "run.ended", run="repair", outcome="done", tokens="1000000/0/0"),
+            event("00:12", "run.started", "demo/b", run="rebase", kind="rebase"),
+            event("00:13", "run.ended", "demo/b", run="rebase", outcome="done", tokens="2000000/0/0"),
+            landed("00:14"),
+            event("00:15", "branch.landed", "demo/b", tip="last", main="final-main"),
+        ]
+        self.sh = FakeRunner().on(["git", "hash-object"], Result(0, "empty-tree\n"))
+        self.sh.on(["git", "diff", "--numstat", "-z", "--no-renames", "base", "amended"],
+                   Result(0, "30\t5\tfab/core.py\0"
+                          "900\t0\tfab/tests/test_core.py\0"
+                          "800\t0\tdocs/core.md\0-\t-\tfab/image.bin\0"))
+        self.sh.on(["git", "diff", "--numstat", "-z", "--no-renames", "empty-tree", "final-main"],
+                   Result(0, "70\t0\tfab/core.py\0"
+                          "30\t0\tfab/core_extra.py\0"
+                          "1000\t0\tfab/tests/test_core.py\0"))
+
+    def test_part_measures_finished_weights_share_and_per_line(self):
+        numstat = code._part_numstat(self.plan, self.tasks, self.records, sh=self.sh)
+        self.assertEqual(numstat, {"core": (30, 100)})
+        self.assertEqual(code.part_rows(self.plan, self.tasks, self.records, numstat),
+                         [("core", 5.0, 5.0, 1.0, 0.3, 30000.0, 70000.0)])
+        paths = [":(glob)docs/core.md", ":(glob)fab/core*.py", ":(glob)fab/tests/test_core.py"]
+        self.assertEqual(self.sh.argvs(), [
+            ["git", "diff", "--numstat", "-z", "--no-renames", "base", "amended", "--", *paths],
+            ["git", "hash-object", "-t", "tree", "--stdin"],
+            ["git", "diff", "--numstat", "-z", "--no-renames", "empty-tree", "final-main", "--", *paths],
+        ])
+        self.assertTrue(all(call.cwd == str(self.repo) for call in self.sh.calls))
+        self.assertEqual(self.sh.calls[1].input, "")
+
+    def test_part_measures_unfinished_and_empty_parts_are_not_measured(self):
+        unfinished = self.records[:-1]
+        self.assertEqual(code.part_rows(self.plan, self.tasks, unfinished, {"core": (30, 100)}), [])
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, unfinished, sh=self.sh), {})
+        self.assertEqual(self.sh.calls, [])
+
+    def test_part_measures_count_only_part_design_and_task_run_kinds(self):
+        unrelated = [
+            event("00:16", "call.ended", None, role=role, subject=subject, tokens="9000000/0/0")
+            for role, subject in (("skeleton", "demo/core2"), ("answer", "demo/core"),
+                                  ("review", "demo/review"), ("skeleton", "other/core"))]
+        for kind in ("foreman", "tests", "accept", "review"):
+            unrelated += [event("00:16", "run.started", "demo/c", run=kind, kind=kind),
+                          event("00:17", "run.ended", "demo/c", run=kind, outcome="done", tokens="9000000/0/0")]
+        # A part's test run is also excluded, even when its task belongs to the finished part.
+        unrelated += [event("00:16", "run.started", run="tests-core", kind="tests"),
+                      event("00:17", "run.ended", run="tests-core", outcome="done", tokens="9000000/0/0"),
+                      landed("00:18")]
+        self.assertEqual(code.part_rows(self.plan, self.tasks, self.records + unrelated, {"core": (30, 100)}),
+                         [("core", 5.0, 5.0, 1.0, 0.3, 30000.0, 70000.0)])
+
+    def test_part_measures_missing_history_and_zero_denominators(self):
+        records = [landed("00:01"), landed("00:02", "demo/b")]
+        for counts, share in (((None, None), None), ((0, 0), None), ((0, 100), 0.0)):
+            with self.subTest(counts=counts):
+                row = code.part_rows(self.plan, self.tasks, records, {"core": counts})[0]
+                self.assertEqual(row[:4], ("core", 0.0, 0.0, None))
+                self.assertEqual(row[4], share)
+                self.assertEqual(row[5:], (0.0, 0.0) if counts[1] else (None, None))
+        row = code.part_rows(self.plan, self.tasks, self.records, {})[0]
+        self.assertEqual(row[4:], (None, None, None))
+        self.assertEqual(row[1:4], (5.0, 5.0, 1.0))
+
+    def test_part_measures_numstat_failures_binary_and_malformed_records(self):
+        for output, expected in (("", 0), ("-\t-\tfab/blob\0", 0),
+                                 ("10\t0\tfab/a\tb.py\0", 10),
+                                 ("4\t2\tfab/core.py\0torn", None),
+                                 ("bad\t0\tfab/core.py\0", None),
+                                 ("-2\t0\tfab/core.py\0", None)):
+            with self.subTest(output=output):
+                self.assertEqual(code._production_lines(output), expected)
+        failed = FakeRunner().on(["git", "diff"], Result(1, err="missing revision"))
+        failed.on(["git", "hash-object"], Result(0, "empty-tree\n"))
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, self.records, sh=failed),
+                         {"core": (None, None)})
+
+    def test_part_measures_render_finished_unfinished_and_share_signal(self):
+        window = report.Window(ts("00:00"), ts("01:00"))
+        with patch.object(code, "_part_numstat", return_value={"core": (30, 100)}):
+            rendered = code.render(self.plan, self.tasks, report.Sources(self.records, [], {}),
+                                   self.hosts, window)
+        self.assertIn("| core | 2 | 2 | 3 | 0.0 | 0 | finished | 5.0 | 5.0 | 1.0 | 30.0% | 30000.0 | 70000.0 |", rendered)
+        self.assertIn("| ui | 1 | 0 | 0 | 0.0 | 0 | unfinished | - | - | - | - | - | - |", rendered)
+        self.assertIn("| empty | 0 | 0 | 0 | 0.0 | 0 | unfinished | - | - | - | - | - | - |", rendered)
+        self.assertIn("core skeleton share 30.0%, above 25%", rendered)
+        self.assertIn("target 10-20%", rendered)
+
+    def test_part_measures_share_signal_strictly_above_threshold(self):
+        for added, signal in ((10, False), (20, False), (25, False), (26, True)):
+            with self.subTest(added=added):
+                rows = code.part_rows(self.plan, self.tasks, self.records, {"core": (added, 100)})
+                self.assertEqual(bool(code._part_signals(rows)), signal)
+        self.assertEqual(code._part_signals(code.part_rows(self.plan, self.tasks, self.records, {})), [])
+
+    def test_part_measures_plan_order_and_missing_skeleton(self):
+        records = [*self.records, landed("00:16", "demo/c")]
+        self.assertEqual([row[0] for row in code.part_rows(self.plan, self.tasks, records, {})],
+                         ["core", "ui"])
+        self.assertEqual(code.part_rows(self.plan, self.tasks, records, {"ui": (None, 100)})[1],
+                         ("ui", 0.0, 0.0, None, None, 0.0, 0.0))
+
+    def test_part_measures_skeleton_landing_fallback_and_no_files(self):
+        records = [event("00:00", "call.started", None, call="root", role="contract",
+                         subject="demo/core", branch="calls/root"),
+                   event("00:01", "branch.landed", "calls/root", branch="calls/root", tip="skeleton", main="skeleton"),
+                   *self.records[-2:]]
+        sh = FakeRunner().on(["git", "hash-object"], Result(0, "empty-tree\n"))
+        sh.on(["git", "diff"], Result(0, "12\t0\tfab/core.py\0"))
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, records, sh=sh), {"core": (12, 12)})
+        self.assertEqual(sh.argvs()[0][5:7], ["skeleton^", "skeleton"])
+        no_files = {name: replace(task, files=()) for name, task in self.tasks.items()}
+        self.assertEqual(code._part_numstat(self.plan, no_files, records, sh=FakeRunner()), {})
+
+    def test_part_measures_review_ending_without_start_is_attributed_to_root(self):
+        records = [record for record in self.records
+                   if not (record["ev"] == "run.started" and record["task"] == "root")]
+        self.assertEqual(code.part_rows(self.plan, self.tasks, records, {"core": (30, 100)}),
+                         [("core", 5.0, 5.0, 1.0, 0.3, 30000.0, 70000.0)])
+
+    def test_part_measures_missing_branch_never_uses_a_task_as_skeleton(self):
+        records = [event("00:00", "call.started", None, call="root", role="skeleton", subject="demo/core"),
+                   *self.records[-2:]]
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, records, sh=self.sh),
+                         {"core": (None, 100)})
+        self.assertEqual(len(self.sh.calls), 2)
