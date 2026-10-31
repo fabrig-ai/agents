@@ -8,8 +8,9 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import gate, log, queue
+from fab import gate, log, queue, receipts
 from fab.sh import Failed, Result, run
+from fab.tests.landing_checks import MAIN, TIP, kept, receipt, receipt_text
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
 
@@ -54,6 +55,13 @@ class GitTest(unittest.TestCase):
         context = tmp_home()
         self.home = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
+        # Disposable repositories do not need git's automatic maintenance after pushes or merges.
+        settings = patch.dict(os.environ, {'GIT_CONFIG_COUNT': '3',
+                              'GIT_CONFIG_KEY_0': 'receive.autogc', 'GIT_CONFIG_VALUE_0': 'false',
+                              'GIT_CONFIG_KEY_1': 'maintenance.auto', 'GIT_CONFIG_VALUE_1': 'false',
+                              'GIT_CONFIG_KEY_2': 'gc.auto', 'GIT_CONFIG_VALUE_2': '0'})
+        settings.start()
+        self.addCleanup(settings.stop)
         self.origin, self.repo = git_pair(self.home)
         self.base = git(self.repo, 'rev-parse', 'HEAD')
         self.data = self.home / 'runtime'
@@ -64,6 +72,8 @@ class GitTest(unittest.TestCase):
         self.q = queue.Queue(self.repo, home=self.data, sh=self.runner, load=self.load)
 
     def runner(self, argv, **kwargs):
+        if argv[0] in ('true', 'false'):
+            return Result(0 if argv[0] == 'true' else 1)
         return run(argv, env={**os.environ, **GIT_ENV}, **kwargs)
 
     def load(self, repo):
@@ -76,7 +86,8 @@ class GitTest(unittest.TestCase):
         self.assertEqual(lane, 'gate')
         self.check_calls.append((selected, paths, meta))
         bad = repo / 'bad.txt'
-        return [gate.Step('check', ('false' if bad.exists() else 'true',), str(repo))]
+        return [gate.Step('fmt', ('true',), str(repo)),
+                gate.Step('check', ('false' if bad.exists() else 'true',), str(repo))]
 
     def commit(self, files):
         for name, content in files.items():
@@ -113,6 +124,55 @@ class GitTest(unittest.TestCase):
         self.assertEqual({entry['tip'] for entry in self.records('landed')}, {b.tip for b in branches})
         self.assert_clean()
 
+    def test_single_receipt_lands_with_only_fmt_for_the_queues_package_selection(self):
+        branch = self.branch('draft/a', {'pkg/src/lib.rs': 'pub fn a() {}'})
+        destination = kept(self.data, receipt(branch.tip, self.base))
+        self.q.state['batches_since_full'] = 2
+        self.assertTrue(self.q.cycle())
+        self.assert_landed([branch])
+        batch, = self.records('batch')
+        self.assertEqual(batch['receipt'], str(destination))
+        self.assertEqual(batch['selection'], ['pkg'])
+        self.assertEqual([step.rsplit(':', 2)[0] for step in batch['steps']], ['fmt'])
+        self.assertEqual(self.q.state['batches_since_full'], 3)
+        self.assertEqual(self.check_calls[0][0], {'pkg'})
+        self.assertEqual(self.check_calls[0][2]['workspace_root'], str(self.repo))
+        self.assertGreaterEqual(len(self.loads), 1)
+        self.assertNotIn('[check]', Path(batch['log']).read_text())
+
+    def test_unusable_receipts_and_periodic_full_batch_run_check(self):
+        branch = self.branch('draft/a', {'pkg/src/lib.rs': 'pub fn a() {}'}, publish=False)
+        merged, conflicts = queue.build_batch(self.repo, [branch], self.base, sh=self.runner)
+        self.assertEqual((merged, conflicts), ([branch], []))
+        detail = self.data / 'checks.log'
+        values = (None, receipt(branch.tip, MAIN), receipt(branch.tip, self.base, outcome='red'),
+                  receipt(branch.tip, self.base), receipt(branch.tip, self.base))
+        for index, value in enumerate(values):
+            with self.subTest(case=index):
+                if value is not None:
+                    kept(self.data, value)
+                self.q.state['batches_since_full'] = self.q.full_every - 1 if index == 3 else 0
+                self.q._force_full = index == 4
+                record = {}
+                green, outcomes, _ = self.q._checks(
+                    self.base, ['pkg/src/lib.rs'], detail, record, merged)
+                self.assertTrue(green)
+                self.assertEqual([step.name for step in outcomes], ['fmt', 'check'])
+                self.assertNotIn('receipt', record)
+                if index >= 3:
+                    self.assertEqual(record['selection'], 'full')
+                    self.assertEqual(self.q.state['batches_since_full'], 0)
+        self.q.state['batches_since_full'] = 2
+        self.q._force_full = False
+        record = {}
+        green, outcomes, selected = self.q._checks(
+            self.base, ['Cargo.toml'], detail, record, merged)
+        self.assertTrue(green)
+        self.assertEqual(selected, 'full')
+        self.assertEqual([step.name for step in outcomes], ['fmt'])
+        self.assertEqual(record['receipt'], str(receipts.path(self.data, branch.tip)))
+        self.assertEqual(self.q.state['batches_since_full'], 3)
+
     def test_candidates_and_green_batch_of_two(self):
         a = self.branch('draft/a', {'a.txt': 'a'}, timestamp=1700000000)
         b = self.branch('draft/b', {'b.txt': 'b'}, timestamp=1600000000)
@@ -122,13 +182,17 @@ class GitTest(unittest.TestCase):
         self.assertEqual(queue.candidates(self.repo, {}, sh=self.runner), [b, a])
         self.assertEqual(queue.candidates(self.repo, {b.name: b.tip, a.name: 'old'}, sh=self.runner), [a])
         branches = [b, a]
+        for branch in branches:
+            kept(self.data, receipt(branch.tip, self.base))
         self.assertTrue(self.q.cycle())
         self.assert_landed(branches)
         self.assertFalse(self.q.cycle())
         batch = self.records('batch')[0]
         self.assertEqual((batch['outcome'], batch['parent'], batch['selection']), ('green', self.base, 'full'))
         self.assertEqual(batch['branches'], [b.name, a.name])
-        self.assertTrue(batch['steps'][0].startswith('check:0:'))
+        self.assertNotIn('receipt', batch)
+        self.assertTrue(batch['steps'][0].startswith('fmt:0:'))
+        self.assertTrue(batch['steps'][1].startswith('check:0:'))
         self.assertRegex(Path(batch['log']).name, r'^\d{8}T\d{6}Z\.log$')
         self.assertIn('[check] true', Path(batch['log']).read_text())
         restored = queue.Queue(self.repo, home=self.data, sh=self.runner, load=self.load)
@@ -207,20 +271,21 @@ class GitTest(unittest.TestCase):
         self.assert_clean()
 
     def test_build_batch_ratchet_conflict_recounts_or_rejects(self):
-        script = ('from pathlib import Path\n'
-                  'import sys\n'
-                  'p = Path("scripts/old-forms.txt")\n'
-                  'if Path("raise-count").exists():\n'
-                  '    print("count raised")\n'
-                  '    sys.exit(1)\n'
-                  'sibling = p.with_name(p.name + ".new")\n'
-                  'sibling.write_text("7\\n")\n'
-                  'sibling.replace(p)\n')
-        self.base = self.commit({'jig/scripts/old-forms.txt': '10\n', 'jig/scripts/old_forms.py': script})
+        self.base = self.commit({'jig/scripts/old-forms.txt': '10\n'})
+
+        def recount(call):
+            self.assertEqual(call.argv[-1], '--write')
+            if (self.repo / 'jig/raise-count').exists():
+                return Result(1, 'count raised\n')
+            write(self.repo / 'jig/scripts/old-forms.txt', '7\n')
+            return Result(0)
+
+        fake = FakeRunner().on(['python3', '-I', '-B'], recount).on(
+            [], lambda call: self.runner(call.argv, cwd=call.cwd))
         a = self.branch('draft/a', {'jig/scripts/old-forms.txt': '9\n'}, publish=False)
         b = self.branch('draft/b', {'jig/scripts/old-forms.txt': '8\n'}, publish=False)
         c = self.branch('draft/c', {'jig/scripts/old-forms.txt': '6\n', 'jig/raise-count': 'yes'}, publish=False)
-        merged, conflicts = queue.build_batch(self.repo, [a, b, c], self.base, sh=self.runner)
+        merged, conflicts = queue.build_batch(self.repo, [a, b, c], self.base, sh=fake)
         self.assertEqual(merged, [a, b])
         self.assertEqual(conflicts, [(c, 'count raised\n')])
         self.assertEqual((self.repo / 'jig/scripts/old-forms.txt').read_text(), '7\n')
@@ -233,6 +298,74 @@ class ShellTest(unittest.TestCase):
         context = tmp_home()
         self.home = context.__enter__()
         self.addCleanup(context.__exit__, None, None, None)
+
+    def test_reused_full_selection_counts_and_commits_baseline_before_only_fmt(self):
+        repo = self.home / 'clone'
+        branch = queue.Branch('draft/a', TIP, 0)
+        fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+            ['git', 'diff', '--name-only', '-z'], Result(0, 'jig/scripts/old-forms.txt\0'))
+        q = queue.Queue(repo, sh=fake)
+        q.state['batches_since_full'] = 2
+        destination = kept(q.home, receipt())
+        with patch('fab.queue.build_batch', return_value=([branch], [])), \
+                patch('fab.gate.changed_paths', return_value=['Cargo.toml']), \
+                patch('fab.gate.ratchet_steps', return_value=[
+                    gate.Step('ratchet:jig', ('ratchet', '--write'), str(repo))]), \
+                patch('fab.gate.check_steps', return_value=[
+                    gate.Step('fmt', ('fmt',), str(repo)),
+                    gate.Step('check', ('check',), str(repo))]) as checks:
+            self.assertTrue(q.attempt([branch]))
+        self.assertEqual(checks.call_args.args[1:4], ('full', ['Cargo.toml'], None))
+        calls = fake.argvs()
+        self.assertLess(calls.index(['ratchet', '--write']),
+                        calls.index(['git', 'commit', '-m', 'Lower old-form baselines']))
+        self.assertLess(calls.index(['git', 'commit', '-m', 'Lower old-form baselines']),
+                        calls.index(['fmt']))
+        self.assertNotIn(['check'], calls)
+        batch, = [entry for entry in log.read(q.log_path) if entry['ev'] == 'batch']
+        self.assertEqual((batch['selection'], batch['receipt']), ('full', str(destination)))
+        self.assertEqual([step.rsplit(':', 2)[0] for step in batch['steps']], ['ratchet:jig', 'fmt'])
+        self.assertEqual(q.state['batches_since_full'], 3)
+
+    def test_red_fmt_or_ratchet_rejects_reused_tip_with_that_step(self):
+        branch = queue.Branch('draft/a', TIP, 0)
+        for failed in ('fmt', 'ratchet:jig'):
+            with self.subTest(failed=failed):
+                fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+                    ['false'], Result(1))
+                q = queue.Queue(self.home / 'clone', home=self.home / failed, sh=fake)
+                kept(q.home, receipt())
+                ratchets = [gate.Step('ratchet:jig', ('false',), str(q.repo))] if failed != 'fmt' else []
+                with patch('fab.queue.build_batch', return_value=([branch], [])), \
+                        patch('fab.gate.changed_paths', return_value=['Cargo.toml']), \
+                        patch('fab.gate.ratchet_steps', return_value=ratchets), \
+                        patch('fab.gate.check_steps', return_value=[
+                            gate.Step('fmt', ('false',), str(q.repo)),
+                            gate.Step('check', ('check',), str(q.repo))]):
+                    self.assertFalse(q.attempt([branch]))
+                rejected, batch = log.read(q.log_path)
+                self.assertEqual((rejected['ev'], rejected['branch'], rejected['step']),
+                                 ('rejected', branch.name, failed))
+                self.assertEqual(q.state['tried'], {branch.name: branch.tip})
+                self.assertEqual(batch['outcome'], 'red')
+                self.assertIn('receipt', batch)
+                self.assertEqual([step.rsplit(':', 2)[0] for step in batch['steps']], [failed])
+                self.assertNotIn(['check'], fake.argvs())
+
+    def test_receipt_cli_keeps_stdin_without_constructing_queue(self):
+        text = receipt_text(receipt())
+        with patch('fab.queue.Queue', side_effect=AssertionError('queue constructed')), \
+                patch('sys.stdin', io.StringIO(text)):
+            self.assertEqual(queue.main(['receipt', TIP]), 0)
+        self.assertEqual(receipts.load(log.home(), TIP), receipt())
+        self.assertEqual(receipts.path(log.home(), TIP).read_text(), text)
+
+    def test_receipt_cli_refusal_reports_error_and_keeps_nothing(self):
+        with patch('sys.stdin', io.StringIO(receipt_text(receipt(main='short')))), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(queue.main(['receipt', TIP]), 1)
+        self.assertEqual(errors.getvalue(), 'fab queue: main must be a full lowercase SHA\n')
+        self.assertFalse(receipts.path(log.home(), TIP).exists())
 
     def test_untry_only_writes_request_and_cycle_consumes_each_once_before_fetch(self):
         fake = FakeRunner()
@@ -298,7 +431,8 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(list((q.home / 'queue-untry').iterdir()), [])
 
     def test_untry_requires_a_branch_and_other_commands_reject_one(self):
-        for argv in (['untry'], ['untry', '..'], ['untry', ''], ['once', 'draft/a']):
+        for argv in (['untry'], ['receipt'], ['untry', '..'], ['untry', ''],
+                     ['once', 'draft/a'], ['run', TIP], ['plan', TIP], ['log', TIP]):
             with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), \
                     self.assertRaises(SystemExit) as error:
                 queue.main(argv)

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, gate, log, slots
+from fab import atomic, gate, log, receipts, slots
 from fab.sh import Runner, run
 
 
@@ -249,7 +249,7 @@ class Queue:
         outcomes = []
         if merged:
             paths = gate.changed_paths(self.repo, base=parent, sh=self.sh)
-            green, outcomes, _ = self._checks(parent, paths, detail, record)
+            green, outcomes, _ = self._checks(parent, paths, detail, record, merged)
             if green:
                 self._publish(parent)
         cleanup_error = None
@@ -268,11 +268,15 @@ class Queue:
         return green
 
     def _checks(self, parent: str, paths: Sequence[str], detail: Path,
-                record: dict) -> tuple[bool, list[gate.StepResult], str | set[str]]:
+                record: dict, merged: Sequence[Branch]) -> tuple[bool, list[gate.StepResult], str | set[str]]:
         """Select and check the candidate, committing lowered baselines and counting full checks."""
         load = gate.loader(self.load, sh=self.sh)
-        selected = "full" if self._force_full or self.state["batches_since_full"] + 1 >= self.full_every else \
-            gate.select(self.repo, paths, base=parent, sh=self.sh, load=load)
+        full = self._force_full or self.state["batches_since_full"] + 1 >= self.full_every
+        reuse = not full and len(merged) == 1 and receipts.reusable(
+            receipts.load(self.home, merged[0].tip), merged[0].tip, parent)
+        if reuse:
+            record["receipt"] = str(receipts.path(self.home, merged[0].tip))
+        selected = "full" if full else gate.select(self.repo, paths, base=parent, sh=self.sh, load=load)
         record["selection"] = gate.shown(selected)
         outcomes = gate.run_steps(gate.ratchet_steps(self.repo, paths, write=True), detail, sh=self.sh)
         green = all(step.green for step in outcomes)
@@ -285,12 +289,15 @@ class Queue:
             if self._git("status", "--porcelain").out:
                 raise RuntimeError("ratchet left changes outside its baselines")
             meta = load(self.repo) if isinstance(selected, set) else None
-            outcomes += gate.run_steps(gate.check_steps(self.repo, selected, paths, meta, lane="gate"),
-                                       detail, sh=self.sh)
+            checks = gate.check_steps(self.repo, selected, paths, meta, lane="gate")
+            if reuse:
+                checks = [step for step in checks if step.name == "fmt"]
+            outcomes += gate.run_steps(checks, detail, sh=self.sh)
             green = all(step.green for step in outcomes)
         record["steps"] = gate.step_texts(outcomes)
-        self.state["batches_since_full"] = 0 if selected == "full" else self.state["batches_since_full"] + 1
-        if not green and selected == "full":
+        self.state["batches_since_full"] = (
+            0 if selected == "full" and not reuse else self.state["batches_since_full"] + 1)
+        if not green and selected == "full" and not reuse:
             self._force_full = True
         return green, outcomes, selected
 
@@ -377,14 +384,14 @@ def main(argv: list[str]) -> int:
     `fab queue receipt TIP` (keep the precheck receipt on stdin for TIP, fab.receipts.store
     with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1)."""
     parser = argparse.ArgumentParser(prog="fab queue")
-    parser.add_argument("command", choices=("run", "once", "plan", "log", "untry"))
+    parser.add_argument("command", choices=("run", "once", "plan", "log", "untry", "receipt"))
     parser.add_argument("branch", nargs="?")
     parser.add_argument("--repo", type=Path, default=log.home() / "repos/fabrig")
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--since")
     args = parser.parse_args(argv)
-    if (args.command == "untry") != (args.branch is not None):
-        parser.error("untry requires BRANCH; other commands take no branch")
+    if (args.command in ("untry", "receipt")) != (args.branch is not None):
+        parser.error("untry requires BRANCH; receipt requires TIP; other commands take no branch")
     if args.command == "untry" and (not args.branch or args.branch.startswith(".")):
         parser.error("untry requires a branch name")
     if args.batch < 1:
@@ -395,6 +402,9 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(entry, ensure_ascii=False))
         return 0
     try:
+        if args.command == "receipt":
+            receipts.store(log.home(), args.branch, sys.stdin.read())
+            return 0
         if args.command == "untry":
             path = log.home() / "queue-untry" / args.branch.replace("/", "%2F")
             atomic.write(path, "")
