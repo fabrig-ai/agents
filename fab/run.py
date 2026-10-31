@@ -76,14 +76,16 @@ def role_text(repo: str) -> str:
 
 
 def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report: str,
-          rejection: dict | None = None) -> str:
+          rejection: dict | None = None, trunk: str = "main") -> str:
     """The brief Codex gets: the role text, then a `# Your task` section listing run, branch,
     base, report path, the files it may change and the expected minutes, then the spec's body.
+    A non-main trunk adds a Trunk fact after Base, naming origin/<trunk>.
     A rejection adds the failed step and queue log between the facts and body; start supplies
     its log text in `text`. A non-empty rejection section is quoted verbatim after the
     facts, followed by a blank line before the refusal. Only the last matching step, at
     most 120 lines, is included."""
     files = ", ".join(task.files) or "(none)"
+    trunk_fact = f"- Trunk: `origin/{trunk}`\n" if trunk != "main" else ""
     refusal, section = "", ""
     if rejection is not None:
         section = rejection.get("section", "")
@@ -105,6 +107,7 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
             f"- Run: {run_id}\n"
             f"- Branch: `{branch}`\n"
             f"- Base: `{base}`\n"
+            f"{trunk_fact}"
             f"- Report: write it to `{report}`\n"
             f"- Files you may change: {files}\n"
             f"- Expected: about {task.minutes} implementer-minutes\n\n"
@@ -166,23 +169,25 @@ def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
 
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),
-          sh: Runner = run, log_path: Path | None = None, rejection: dict | None = None) -> str:
+          sh: Runner = run, log_path: Path | None = None, rejection: dict | None = None,
+          trunk: str = "main") -> str:
     """Start a run of task on host and log run.started; return the run id.
 
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
-    (implement, review, rebase: a new branch from origin/main; repair: the existing
+    (implement, review, rebase: a new branch from origin/<trunk>; repair: the existing
     origin/<branch>); write the brief to FAB_HOME/runs/<run>/brief.md; then
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
     The brief is also kept on this machine at FAB_HOME/runs/<run>/brief.md. run.started carries
-    run, task, kind, host, dir (the worktree), branch, base ("origin/main"), codex (the id),
-    state (codex-run's state directory) and report (the builder's report path).
+    run, task, kind, host, dir (the worktree), branch, base ("origin/<trunk>", or the checked
+    skeleton tip), codex (the id), state (codex-run's state directory) and report (the builder's
+    report path).
 
     A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
     idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
     naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
-    (`git switch -C <branch> origin/main`; repair: `origin/<branch>`). dir is the slot, and
+    (`git switch -C <branch> origin/<trunk>`; repair: `origin/<branch>`). dir is the slot, and
     run.started also carries slot (the number). The launcher is `fab codex start` (same
     arguments and output as codex-run task) once LAUNCHER says so.
 
@@ -198,14 +203,14 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     worktree = root / "wt" / run_id
     directory = root / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
-    base = "origin/main"
+    base = f"origin/{trunk}"
     from fab import call_review
     source = call_review.task_source(task, events)
     if source is not None and kind != "rebase":
         base = source[0]["tip"]
     rejection = _rejection(rejection, sh=sh)
     text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
-                 report=str(report_path), rejection=rejection)
+                 report=str(report_path), rejection=rejection, trunk=trunk)
 
     def remote(argv, *, input=None):
         return sh(ssh(host.ssh, argv), input=input, check=True)
@@ -213,7 +218,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     repo = fetch_clone(host, task.repo, sh=sh)
     if rejection is not None and "skeleton" in rejection:
         text = _rebase_brief(task, host, repo, events, rejection, run_id=run_id,
-                             branch=branch, report=str(report_path), sh=sh)
+                             branch=branch, report=str(report_path), sh=sh, trunk=trunk)
     try:
         return _prepare_and_launch(task, host, kind, sh, run_id=run_id, branch=branch,
                                    base=base, root=root, repo=repo, worktree=worktree,
@@ -517,16 +522,16 @@ def _gate_log(record: dict, *, sh: Runner) -> str:
 
 
 def _rebase_brief(task: Task, host: Host, repo: Path, events: Iterable[dict], rejection: dict, *,
-                  run_id: str, branch: str, report: str, sh: Runner) -> str:
-    """Keep the task's commits while moving its checked skeleton base onto amended main."""
+                  run_id: str, branch: str, report: str, sh: Runner, trunk: str = "main") -> str:
+    """Keep the task's commits while moving its checked skeleton base onto the amended trunk."""
     previous = next(event["branch"] for event in reversed(list(events))
                     if event.get("ev") == "run.started" and event.get("task") == task.id)
     diff = sh(ssh(host.ssh, ["git", "-C", str(repo), "diff", rejection["old_tip"], rejection["tip"]]),
               check=True).out
     instructions = ("## Rebase after the skeleton amendment\n\n"
                     f"On your branch `{branch}`, run `git reset --hard origin/{previous}`, "
-                    f"then `git rebase --onto origin/main {rejection['old_tip']}`. "
+                    f"then `git rebase --onto origin/{trunk} {rejection['old_tip']}`. "
                     "Resolve conflicts, check the result, and push your branch.\n\n"
                     "The skeleton's amendment:\n\n```diff\n" + diff + "\n```\n\n")
-    return brief(task, role_text(task.repo), run_id=run_id, branch=branch, base="origin/main",
-                 report=report, rejection={**rejection, "section": instructions})
+    return brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=f"origin/{trunk}",
+                 report=report, rejection={**rejection, "section": instructions}, trunk=trunk)

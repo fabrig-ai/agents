@@ -147,7 +147,7 @@ def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
 
 
 def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
-          sh: Runner = run, log_path: Path | None = None) -> str:
+          sh: Runner = run, log_path: Path | None = None, trunk: str = "main") -> str:
     """Start the foreman run of refusal on host (a builder) and return its run id.
 
     1. The run id fab.run.next_run(fab.foreman.task_field(task.id), events): the question
@@ -157,7 +157,7 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
        record holding step, log and tip, and findings when refusal.findings is not empty.
     3. fab.run.launch_detached(host, run_id, task.repo, "origin/<refusal.branch>", sh=sh,
        log_path=log_path, task=fab.foreman.task_field(task.id), kind=KIND,
-       branch=refusal.branch, base="origin/main", brief=brief(...), effort=EFFORT,
+       branch=refusal.branch, base="origin/<trunk>", brief=brief(...), effort=EFFORT,
        refused=refusal.tip, step=refusal.step), the brief's report being
        `<fab.run.remote_home(host)>/runs/<run>/report.md`, where fab.run.launch puts it.
        The branch, not the tip: fab land's tip after its rebase was never pushed.
@@ -173,7 +173,7 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
     compiled = brief(refusal, task, run_id=run_id, report=report, spec=spec, text=text, role=role)
     return runs.launch_detached(host, run_id, task.repo, f"origin/{refusal.branch}", sh=sh,
                                 log_path=log_path, task=foreman.task_field(task.id), kind=KIND,
-                                branch=refusal.branch, base="origin/main", brief=compiled,
+                                branch=refusal.branch, base=f"origin/{trunk}", brief=compiled,
                                 effort=EFFORT, refused=refusal.tip, step=refusal.step)
 
 
@@ -234,13 +234,13 @@ def with_section(spec: str, text: str, *, run_id: str) -> str:
 
 
 def commit(refusal: Refusal, task: Task, text: str, checkout: Path, *, run_id: str,
-           sh: Runner = run) -> str | None:
+           sh: Runner = run, trunk: str = "main") -> str | None:
     """Record text, the section of the foreman run run_id, in the task's spec and return the
-    branch to land, or None when origin/main already records it.
+    branch to land, or None when origin/<trunk> already records it.
 
     fab.spec_edit.commit(task, checkout, <with_section of the spec, text, run_id>,
     branch="repairs/<run_id>", message="Write <task.id>'s <refusal.kind> from its refusal
-    at <refusal.step>", worktree=FAB_HOME/runs/<run_id>/wt, sh=sh)."""
+    at <refusal.step>", worktree=FAB_HOME/runs/<run_id>/wt, sh=sh, trunk=trunk)."""
     if task.repo == "fabrig":
         relative = Path(task.path).resolve().relative_to(checkout.resolve())
         result = sh(["git", "show", f"refs/remotes/origin/repairs/{run_id}:{relative.as_posix()}"],
@@ -252,7 +252,7 @@ def commit(refusal: Refusal, task: Task, text: str, checkout: Path, *, run_id: s
         task, checkout, lambda spec: with_section(spec, text, run_id=run_id),
         branch=f"repairs/{run_id}",
         message=f"Write {task.id}'s {refusal.kind} from its refusal at {refusal.step}",
-        worktree=log.home() / "runs" / run_id / "wt", sh=sh)
+        worktree=log.home() / "runs" / run_id / "wt", sh=sh, trunk=trunk)
 
 
 def _refusal(event: dict, position: int, retried: bool, foremen: dict, ends: dict,

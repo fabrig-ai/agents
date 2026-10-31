@@ -60,6 +60,39 @@ class SpecEditTest(unittest.TestCase):
             self.assertEqual((checkout / TASK.path).read_text(), SPEC)
             self.assert_clean(checkout, worktree)
 
+    def test_commit_reads_spec_from_trunk_worktree(self):
+        for trunk in ("main", "component-kit/integration"):
+            with self.subTest(trunk=trunk), tmp_home() as home:
+                checkout = home / "checkout"
+                worktree = home / "fab/runs/edit/wt"
+                task = replace(TASK, path=str(checkout / TASK.path))
+                atomic.write(checkout / TASK.path, "checkout spec\n")
+                source = SPEC + f"\nSpec on {trunk}.\n"
+
+                def add(call):
+                    self.assertEqual(call.argv, ["git", "worktree", "add", "-B", BRANCH,
+                                                 str(worktree), f"origin/{trunk}"])
+                    atomic.write(worktree / TASK.path, source)
+                    return Result(0)
+
+                fake = FakeRunner().on(["git", "worktree", "add"], add)
+                seen = []
+
+                def edit(spec):
+                    seen.append(spec)
+                    return spec + "\nAnswer.\n"
+
+                self.assertEqual(spec_edit.commit(task, checkout, edit, branch=BRANCH,
+                                 message="Record the answer", worktree=worktree, sh=fake,
+                                 trunk=trunk), BRANCH)
+                self.assertEqual(seen, [source])
+                self.assertEqual((worktree / TASK.path).read_text(), source + "\nAnswer.\n")
+                self.assertEqual(fake.argvs()[-3:],
+                                 [["git", "push", "-q", "--force", "origin", f"HEAD:refs/heads/{BRANCH}"],
+                                  ["git", "worktree", "remove", "--force", str(worktree)],
+                                  ["git", "branch", "-D", BRANCH]])
+                self.assertEqual((checkout / TASK.path).read_text(), "checkout spec\n")
+
     def test_unchanged_spec_pushes_nothing_and_cleans(self):
         with tmp_home() as home:
             origin, checkout, task = checkout_with_spec(home)

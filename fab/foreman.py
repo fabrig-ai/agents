@@ -97,14 +97,14 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
 
 
 def brief(question: Question, task: Task, *, run_id: str, report: str, spec: str,
-          asking: str) -> str:
+          asking: str, trunk: str = "main") -> str:
     """The foreman run's brief, its sections in this order, joined by blank lines and ending
     with a newline:
 
     1. The role text, ROLE's.
     2. `# Your question`: one line each, `- Run: <run_id>`, `- Task: <task.id> (spec
        \\`<task.path>\\`)`, `- Asked by: <question.run>`, `- Report: write it to
-       \\`<report>\\``, then the line `Your checkout is the task's repository at main,
+       \\`<report>\\``, then the line `Your checkout is the task's repository at <trunk>,
        read-only.`
     3. `# The run's report`: asking, the asking run's whole report, in a ```text fence.
     4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim.
@@ -112,7 +112,7 @@ def brief(question: Question, task: Task, *, run_id: str, report: str, spec: str
     Pure: the caller reads the files."""
     facts = [f"- Run: {run_id}", f"- Task: {task.id} (spec `{task.path}`)",
              f"- Asked by: {question.run}", f"- Report: write it to `{report}`",
-             "Your checkout is the task's repository at main, read-only."]
+             f"Your checkout is the task's repository at {trunk}, read-only."]
     sections = [ROLE.read_text().rstrip("\n"), "# Your question\n\n" + "\n".join(facts),
                 "# The run's report\n\n```text\n" + asking.removesuffix("\n") + "\n```",
                 "# The task spec\n\n" + spec]
@@ -120,7 +120,7 @@ def brief(question: Question, task: Task, *, run_id: str, report: str, spec: str
 
 
 def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
-          sh: Runner = run, log_path: Path | None = None) -> str:
+          sh: Runner = run, log_path: Path | None = None, trunk: str = "main") -> str:
     """Start the foreman run of question on host (a builder) and return its run id.
 
     1. The run id fab.run.next_run(task_field(task.id), events): `<task>/foreman-<n>`.
@@ -128,9 +128,9 @@ def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
        FAB_HOME/runs/<question.run>/report.md (fab.run.collect's copy), or question.text
        when that cannot be read. A spec that cannot be read raises OSError and starts
        nothing.
-    3. fab.run.launch_detached(host, run_id, task.repo, "origin/main", sh=sh,
+    3. fab.run.launch_detached(host, run_id, task.repo, "origin/<trunk>", sh=sh,
        log_path=log_path, task=task_field(task.id), kind=KIND, branch=task.id,
-       base="origin/main", brief=brief(...), effort=EFFORT, asked=question.run), the
+       base="origin/<trunk>", brief=brief(...), effort=EFFORT, asked=question.run), the
        brief's report being `<fab.run.remote_home(host)>/runs/<run>/report.md`, where
        fab.run.launch puts it.
     fab.run.collect ends the run as any other: its run.ended carries the outcome questions
@@ -142,10 +142,10 @@ def start(question: Question, task: Task, host: Host, events: Iterable[dict], *,
     except (OSError, UnicodeError):
         asking = question.text
     report = str(Path(runs.remote_home(host)) / "runs" / run_id / "report.md")
-    text = brief(question, task, run_id=run_id, report=report, spec=spec, asking=asking)
-    return runs.launch_detached(host, run_id, task.repo, "origin/main", sh=sh,
+    text = brief(question, task, run_id=run_id, report=report, spec=spec, asking=asking, trunk=trunk)
+    return runs.launch_detached(host, run_id, task.repo, f"origin/{trunk}", sh=sh,
                                 log_path=log_path, task=task_field(task.id), kind=KIND,
-                                branch=task.id, base="origin/main", brief=text,
+                                branch=task.id, base=f"origin/{trunk}", brief=text,
                                 effort=EFFORT, asked=question.run)
 
 
@@ -197,10 +197,10 @@ def with_answer(spec: str, *, day: str, question: Question, answer: str, run: st
 
 
 def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id: str,
-           day: str, sh: Runner = run) -> str | None:
+           day: str, sh: Runner = run, trunk: str = "main") -> str | None:
     """Record the answer through fab.spec_edit.commit with with_answer as its edit.
 
-    Return answers/<run_id> to land, or None when origin/main already records the answer;
+    Return answers/<run_id> to land, or None when origin/<trunk> already records the answer;
     the worktree is FAB_HOME/runs/<run_id>/wt. Commands and outcomes are spec_edit's.
     """
     if task.repo == "fabrig":
@@ -214,7 +214,7 @@ def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id:
         task, checkout, lambda spec: with_answer(spec, day=day, question=question,
                                                 answer=text, run=run_id),
         branch=f"answers/{run_id}", message=f"Answer {task.id}'s question from its options",
-        worktree=log.home() / "runs" / run_id / "wt", sh=sh)
+        worktree=log.home() / "runs" / run_id / "wt", sh=sh, trunk=trunk)
 
 
 def _question(event: dict, position: int, starts: dict, ends: dict, foremen: dict,

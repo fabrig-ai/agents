@@ -34,11 +34,11 @@ def check(digest: rust_digest.Digest) -> list[Finding]:
 
 
 def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
-           log_path: Path | None = None) -> list[Finding]:
+           log_path: Path | None = None, trunk: str = "main") -> list[Finding]:
     """Gate the task's last run.started branch, as fab.gates.screen does.
 
     Under FAB_HOME/land-<repo>.lock, clone if needed, fetch, resolve the remote tip and
-    merge base with origin/main, numstat and archive both full trees. Run old_forms.py in
+    merge base with origin/<trunk>, numstat and archive both full trees. Run old_forms.py in
     each touched tree on both sides, build the digest and atomically write
     FAB_HOME/digests/<run>.md. Release the lock before logging branch.rejected with task,
     branch, tip, step gate:<first gate>, log the digest path and findings_text.
@@ -62,7 +62,7 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
         sh(["git", "fetch", "origin", "--prune"], cwd=str(repo), check=True)
         tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
                  cwd=str(repo), check=True).out.strip()
-        base = sh(["git", "merge-base", "refs/remotes/origin/main", tip],
+        base = sh(["git", "merge-base", f"refs/remotes/origin/{trunk}", tip],
                   cwd=str(repo), check=True).out.strip()
         changes = rust_digest.changes(repo, base, tip, sh=sh)
         with tempfile.TemporaryDirectory(dir=home) as directory:

@@ -349,10 +349,24 @@ class StartTest(RepairsTestCase):
                              str(root / "wt" / run_id), str(root / "runs" / run_id / "report.md")])
             self.assertTrue(all(call.argv[5] == HOST.ssh for call in fake.calls))
             started, = log.read()
+            self.assertEqual(started["base"], "origin/main")
             self.assertEqual({key: started[key] for key in ("task", "kind", "branch", "refused", "step")},
                              dict(task=FOREMAN, kind="foreman", branch="draft/task-r1",
                                   refused="tip1", step="test"))
             self.assertIn(SPEC, (home / "fab/runs" / run_id / "brief.md").read_text())
+
+    def test_start_keeps_refused_branch_and_logs_trunk_base(self):
+        with tmp_home() as home:
+            spec = home / "task.md"
+            atomic.write(spec, SPEC)
+            fake = starter()
+            run_id = repairs.start(refusal(branch="draft/task-r1"), replace(TASK, path=str(spec)),
+                                    HOST, [], sh=fake, trunk="component-kit/integration")
+            root = Path(run.remote_home(HOST))
+            self.assertEqual(command(fake.calls[3]), ["git", "-C", str(root / "repos/agents"),
+                             "worktree", "add", "--detach", str(root / "wt" / run_id),
+                             "origin/draft/task-r1"])
+            self.assertEqual(log.read()[0]["base"], "origin/component-kit/integration")
 
     def test_unreadable_spec_starts_nothing(self):
         with tmp_home() as home:
@@ -472,6 +486,23 @@ class CommitTest(RepairsTestCase):
             self.assertFalse(any("commit" in argv or "push" in argv for argv in commands))
             self.assertFalse((home / "fab/runs" / RUN / "wt").exists())
             self.assertEqual(git(checkout, "branch", "--list", branch), "")
+
+    def test_commit_uses_trunk_for_spec_worktree(self):
+        for trunk in ("main", "component-kit/integration"):
+            with self.subTest(trunk=trunk), tmp_home() as home:
+                checkout = home / "checkout"
+                task = replace(TASK, path=str(checkout / TASK.path))
+                worktree = log.home() / "runs" / RUN / "wt"
+                atomic.write(worktree / TASK.path, SPEC)
+                fake = FakeRunner()
+                text = repairs.section(refusal(), day="today", run_id=RUN, body="fix x")
+                branch = repairs.commit(refusal(), task, text, checkout, run_id=RUN,
+                                         sh=fake, trunk=trunk)
+                self.assertEqual(branch, f"repairs/{RUN}")
+                self.assertEqual(fake.argvs()[1], ["git", "worktree", "add", "-B", branch,
+                                                   str(worktree), f"origin/{trunk}"])
+                self.assertEqual((worktree / TASK.path).read_text(),
+                                 repairs.with_section(SPEC, text, run_id=RUN))
 
     def test_fabrig_section_reuses_pushed_branch_before_landing(self):
         """Real git verifies the section's pushed commit survives worktree cleanup."""

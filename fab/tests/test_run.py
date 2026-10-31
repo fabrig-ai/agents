@@ -94,6 +94,16 @@ class RunPureTest(unittest.TestCase):
         self.assertTrue(text.endswith(TASK.body))
         self.assertNotIn("## The landing refused this branch", text)
 
+    def test_brief_adds_only_non_main_trunk_after_base(self):
+        facts = dict(run_id="draft/task-1", branch=TASK.id, base="checked-tip", report="/report.md")
+        plain = run.brief(TASK, "role", **facts)
+        self.assertNotIn("- Trunk:", plain)
+        self.assertEqual(run.brief(TASK, "role", **facts, trunk="main"), plain)
+        self.assertEqual(run.brief(TASK, "role", **facts, trunk="component-kit/integration"),
+                         plain.replace("- Base: `checked-tip`\n",
+                                       "- Base: `checked-tip`\n"
+                                       "- Trunk: `origin/component-kit/integration`\n"))
+
     def test_brief_quotes_section_verbatim_between_facts_and_refusal(self):
         rejection = {"step": "test", "log": "red", "text": "failure"}
         facts = dict(run_id="draft/task-2", branch=TASK.id, base="origin/main", report="/report.md")
@@ -287,6 +297,50 @@ class RunStartTest(unittest.TestCase):
                                   "host": HOST.name, "dir": str(worktree), "branch": branch,
                                   "base": "origin/main", "codex": "codex-123",
                                   "state": "/state/codex-123", "report": str(directory / "report.md")})
+
+    def test_start_uses_trunk_in_worktrees_slots_briefs_and_events(self):
+        for repo in ("agents", "fabrig"):
+            for kind in run.KINDS:
+                with self.subTest(repo=repo, kind=kind), tmp_home():
+                    fake = starter()
+                    task = replace(TASK, repo=repo)
+                    run_id = run.start(task, HOST, kind=kind, events=[started()], sh=fake,
+                                       trunk="component-kit/integration")
+                    entry, = log.read()
+                    branch = entry["branch"]
+                    base = "origin/component-kit/integration"
+                    self.assertEqual(entry["base"], base)
+                    text = (log.home() / "runs" / run_id / "brief.md").read_text()
+                    self.assertIn(f"- Base: `{base}`\n- Trunk: `{base}`\n", text)
+                    self.assertEqual(fake.calls[-2].input, text)
+                    commands = [command(call) for call in fake.calls]
+                    source = f"origin/{branch}" if kind == "repair" else base
+                    if repo == "fabrig":
+                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch",
+                                       "-C", branch, source], commands)
+                    elif kind == "repair":
+                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
+                                       "--detach", str(ROOT / "wt" / run_id), source], commands)
+                    else:
+                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
+                                       "-b", branch, str(ROOT / "wt" / run_id), source], commands)
+
+    def test_skeleton_rebase_instructions_and_base_use_trunk(self):
+        for trunk in ("main", "component-kit/integration"):
+            with self.subTest(trunk=trunk), tmp_home():
+                fake = starter()
+                rejection = dict(step="rebase", findings="amended", skeleton="root",
+                                 old_tip="old-skeleton", tip="new-skeleton")
+                run_id = run.start(TASK, HOST, kind="rebase", events=[started()], sh=fake,
+                                   rejection=rejection, trunk=trunk)
+                text = (log.home() / "runs" / run_id / "brief.md").read_text()
+                base = f"origin/{trunk}"
+                self.assertIn(f"git rebase --onto {base} old-skeleton", text)
+                self.assertIn("git reset --hard origin/draft/task", text)
+                self.assertIn(f"- Base: `{base}`", text)
+                self.assertEqual(log.read()[0]["base"], base)
+                self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "diff",
+                               "old-skeleton", "new-skeleton"], [command(call) for call in fake.calls])
 
     def test_start_fabrig_medium_effort_and_explicit_log(self):
         with tmp_home() as home:
@@ -1049,21 +1103,22 @@ class RefusalTextTest(unittest.TestCase):
 
 class OptimisticRunTest(unittest.TestCase):
     def test_checked_tip_is_base_in_worktrees_slots_briefs_and_events(self):
-        for repo in ("agents", "fabrig"):
-            with self.subTest(repo=repo), tmp_home():
-                task = replace(TASK, repo=repo)
-                events = [dict(ev="call.started", call="root", role="skeleton", subject="draft/part", branch="calls/root"),
-                          dict(ev="call.ended", call="root", outcome="done"),
-                          dict(ev="call.checked", call="root", root="root", subject="draft/part", outcome="green",
-                               tip="checked-tip", tasks=[task.id])]
-                fake = starter()
-                run_id = run.start(task, HOST, events=events, sh=fake)
-                entry = log.read()[-1]
-                self.assertEqual(entry["base"], "checked-tip")
-                self.assertIn("- Base: `checked-tip`", (log.home() / "runs" / run_id / "brief.md").read_text())
-                commands = [command(call) for call in fake.calls]
-                if repo == "fabrig":
-                    self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "-C", task.id, "checked-tip"], commands)
-                else:
-                    self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-b", task.id,
-                                   str(ROOT / "wt" / run_id), "checked-tip"], commands)
+        for trunk in ("main", "component-kit/integration"):
+            for repo in ("agents", "fabrig"):
+                with self.subTest(repo=repo, trunk=trunk), tmp_home():
+                    task = replace(TASK, repo=repo)
+                    events = [dict(ev="call.started", call="root", role="skeleton", subject="draft/part", branch="calls/root"),
+                              dict(ev="call.ended", call="root", outcome="done"),
+                              dict(ev="call.checked", call="root", root="root", subject="draft/part", outcome="green",
+                                   tip="checked-tip", tasks=[task.id])]
+                    fake = starter()
+                    run_id = run.start(task, HOST, events=events, sh=fake, trunk=trunk)
+                    entry = log.read()[-1]
+                    self.assertEqual(entry["base"], "checked-tip")
+                    self.assertIn("- Base: `checked-tip`", (log.home() / "runs" / run_id / "brief.md").read_text())
+                    commands = [command(call) for call in fake.calls]
+                    if repo == "fabrig":
+                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "-C", task.id, "checked-tip"], commands)
+                    else:
+                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-b", task.id,
+                                       str(ROOT / "wt" / run_id), "checked-tip"], commands)

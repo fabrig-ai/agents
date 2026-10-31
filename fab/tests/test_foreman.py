@@ -241,6 +241,19 @@ class StartTest(unittest.TestCase):
                               "report": str(ROOT / "runs" / RUN / "report.md")})
             self.assertEqual(log.read(), [])
 
+    def test_start_detaches_at_trunk_and_names_it_in_base_and_brief(self):
+        with tmp_home() as home:
+            spec = home / "spec.md"
+            atomic.write(spec, SPEC)
+            fake = _starter()
+            foreman.start(QUESTION, replace(TASK, path=str(spec)), HOST, (), sh=fake,
+                          trunk="component-kit/integration")
+            self.assertEqual(fake.calls[3].argv, ssh(HOST.ssh,
+                ["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "--detach",
+                 str(ROOT / "wt" / RUN), "origin/component-kit/integration"]))
+            self.assertEqual(log.read()[0]["base"], "origin/component-kit/integration")
+            self.assertIn("repository at component-kit/integration, read-only.", fake.calls[-2].input)
+
     def test_missing_asking_report_uses_question_text(self):
         with tmp_home() as home:
             spec = home / "spec.md"
@@ -364,6 +377,23 @@ class CommitTest(unittest.TestCase):
             self.assertFalse(any(argv[1] in ("commit", "push") or "commit" in argv
                                  for argv, _ in commands))
             self.assert_clean(checkout)
+
+    def test_commit_uses_trunk_for_spec_worktree(self):
+        for trunk in ("main", "component-kit/integration"):
+            with self.subTest(trunk=trunk), tmp_home() as home:
+                checkout = home / "checkout"
+                task = replace(TASK, path=str(checkout / TASK.path))
+                worktree = log.home() / "runs" / RUN / "wt"
+                atomic.write(worktree / TASK.path, SPEC)
+                fake = FakeRunner()
+                branch = foreman.commit(QUESTION, task, "Choose A.", checkout, run_id=RUN,
+                                         day="today", sh=fake, trunk=trunk)
+                self.assertEqual(branch, f"answers/{RUN}")
+                self.assertEqual(fake.argvs()[1], ["git", "worktree", "add", "-B", branch,
+                                                   str(worktree), f"origin/{trunk}"])
+                self.assertEqual((worktree / TASK.path).read_text(),
+                                 foreman.with_answer(SPEC, day="today", question=QUESTION,
+                                                     answer="Choose A.", run=RUN))
 
     def test_fabrig_answer_reuses_pushed_branch_before_landing(self):
         """Real git verifies the push leaves a remote-tracking ref after local cleanup."""

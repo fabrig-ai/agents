@@ -1,7 +1,7 @@
 """A task spec changed on a branch of the plan's repository, for the tick to land (13.1).
 
 The foreman's answers (fab.foreman) and its repair and rebase sections (fab.repairs) are
-written into task specs the same way: a worktree of the plan's checkout at origin/main, the
+written into task specs the same way: a worktree of the plan's checkout at origin/<trunk>, the
 spec edited there, one commit pushed to a branch that the tick lands with `fab land`.
 """
 
@@ -16,16 +16,16 @@ from fab.sh import Runner, run
 
 
 def commit(task: Task, checkout: Path, edit: Callable[[str], str], *, branch: str,
-           message: str, worktree: Path, sh: Runner = run) -> str | None:
-    """Commit edit(<the task's spec on origin/main>) on branch and push it; return branch,
-    or None when edit leaves the spec unchanged (origin/main records the change already).
+           message: str, worktree: Path, sh: Runner = run, trunk: str = "main") -> str | None:
+    """Commit edit(<the task's spec on origin/<trunk>>) on branch and push it; return branch,
+    or None when edit leaves the spec unchanged (origin/<trunk> records the change already).
 
     checkout is the plan's repository on this machine (a clone with origin; the tick's plan
     checkout); worktree a path under FAB_HOME that does not exist yet. The spec's path is
     Path(task.path).resolve() relative to checkout.resolve(); a spec outside the checkout is
     a ValueError before any command. Each git command with check=True:
     1. `git fetch origin` in checkout;
-    2. `git worktree add -B <branch> <worktree> origin/main` in checkout (-B: an earlier
+    2. `git worktree add -B <branch> <worktree> origin/<trunk>` in checkout (-B: an earlier
        attempt's branch is reset);
     3. the spec at that path, read in the worktree; new = edit(spec); equal to the spec
        means None, with nothing committed or pushed;
@@ -43,7 +43,7 @@ def commit(task: Task, checkout: Path, edit: Callable[[str], str], *, branch: st
 
     try:
         git("fetch", "origin")
-        git("worktree", "add", "-B", branch, str(worktree), "origin/main")
+        git("worktree", "add", "-B", branch, str(worktree), f"origin/{trunk}")
         path = worktree / relative
         spec = path.read_text()
         new = edit(spec)

@@ -107,6 +107,13 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(len([argv for argv in self.fake.argvs() if argv[:1] == ["python3"]]), 2)
         self.assertFalse(any(argv[1] in ("checkout", "worktree", "push") for argv in self.fake.argvs()))
 
+    def test_screen_uses_merge_base_with_plan_trunk(self):
+        self.assertEqual(gates.screen(TASK, self.events, sh=self.fake, log_path=self.path,
+                                       trunk="component-kit/integration"), [])
+        self.assertEqual(self.fake.argvs()[2],
+                         ["git", "merge-base", "refs/remotes/origin/component-kit/integration", TIP])
+        self.assertIn(f"Base: `{BASE[:12]}`", self.written.read_text())
+
     def test_ratchet_rise_with_unchanged_baselines_rejects_after_unlock(self):
         self.current["tip"] = 3
         append = log.append
