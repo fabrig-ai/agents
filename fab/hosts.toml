@@ -18,7 +18,7 @@ slots = 8
 slot_bound_gb = 25
 kache_gb = 50
 headroom_gb = 10
-builds = 3
+builds = 4
 
 [hetzner9]
 ssh = "free@2.29.101.185"
@@ -30,7 +30,7 @@ slots = 6
 slot_bound_gb = 25
 kache_gb = 50
 headroom_gb = 10
-builds = 2
+builds = 4
 
 [hetzner8]
 ssh = "free@2.29.110.236"
