@@ -44,16 +44,20 @@ the tasks of contract parts, then the rest by their part's slice. Fill
   - `group`: each of the four groups, a consolidation that is also refused
     and of a contract part, a task whose part is not in the plan;
   - `order`: a part in two slices ranks by the first; within a slice, parts
-    in plan order; equal keys keep the candidates' order; a part in no
-    slice and a part not in the plan after every slice; candidates and
-    tasks unchanged; a candidate missing from tasks is a KeyError.
+    in plan order; equal group, slice and part go in the specs' order
+    (`tasks`' order) whatever the candidates' order; a part in no slice and
+    a part not in the plan after every slice; candidates and tasks
+    unchanged; a candidate missing from tasks is a KeyError.
 - `fab/tests/test_plan.py`: `consolidation` parsed, defaulted to false, and
   a string value a PlanError.
 - `fab/tests/test_dispatch.py`, with plans from `sliced` and specs from
   `spec`: with room for one start, a consolidation starts before a rejected
   task; a rejected task of slice 2 before a runnable task of slice 1; a
   runnable task whose last run ended infra keeps its slice's place; a
-  contract part's task before a slice 1 task; a park at MAX_RUNS is still
+  contract part's task before a slice 1 task; of two refused tasks of one
+  part, a rejected task whose spec comes later starts after a runnable
+  task whose spec comes earlier and whose next run carries a refusal (a
+  `branch.rejected` since its last run); a park at MAX_RUNS is still
   given whatever the order. Every existing test passes unchanged.
 - `bin/fab test` passes; `test_buffer.py` takes well under a second and
   `test_dispatch.py` stays within its budget.

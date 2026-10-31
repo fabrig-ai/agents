@@ -16,6 +16,9 @@ class ExemplarTest(BufferTestCase):
         # A refused consolidation stays a consolidation; candidates are only those given.
         self.assertOrder(the_plan, tasks, ["merge", "early-b", "late-a"],
                          refused=["merge"], candidates=ids("late-a", "early-b", "merge"))
+        # Equal keys go in the specs' order, not the candidates' (rejected ones come first).
+        self.assertOrder(the_plan, tasks, ["late-a", "late-fix"], refused=["late-a", "late-fix"],
+                         candidates=ids("late-fix", "late-a"))
 
 
 if __name__ == "__main__":

@@ -31,12 +31,15 @@ def order(plan: Plan, tasks: Mapping[str, Task], candidates: Iterable[str],
           refused: Collection[str] = ()) -> list[str]:
     """candidates (task ids, each a key of tasks) in the order runs start for them.
 
-    A stable sort of candidates by three keys, so equal keys keep candidates' order:
+    A sort of candidates by four keys:
     1. the index in GROUPS of group(plan, tasks[id], id in refused);
     2. the position in plan.slices of the first slice whose parts hold the task's part;
        len(plan.slices) when none does (a part in no slice, or not in the plan);
-    3. the position of the task's part in plan.parts; len(plan.parts) when it is not there.
-    Every group sorts by keys 2 and 3 alike: a repair of a slice 1 part goes before a repair
+    3. the position of the task's part in plan.parts; len(plan.parts) when it is not there;
+    4. the position of id in tasks (the specs' order), so candidates' own order never
+       decides: the dispatcher lists rejected tasks before runnable ones, and a later
+       rejected spec must not go before an earlier refused runnable one.
+    Every group sorts by keys 2 to 4 alike: a repair of a slice 1 part goes before a repair
     of a slice 2 part. Returns a new list; candidates and tasks are not changed. A
     candidate missing from tasks is a KeyError.
     """
