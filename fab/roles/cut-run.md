@@ -104,7 +104,7 @@ push), `## Report`.
   needs = ["<task>", ...]
   files = ["<glob>", ...]
   effort = "high"    # or medium
-  minutes = 30
+  minutes = <your estimate of its implementer-minutes>
   ```
 
   An implementer reads only fab's implementer text, its spec, the notes it
