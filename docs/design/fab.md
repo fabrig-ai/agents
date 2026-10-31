@@ -103,7 +103,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `part`, `kind` (feature, interface, migration, repair, rebase or docs),
   `repo`, `needs` (tasks that land first), `files` (globs it may change),
   `effort` (medium or high) and `minutes` (the expected implementer time,
-  20-30 for a feature task). The body says what to fill, how it is accepted,
+  as 13.2 sizes them: one module or concept, about 400-500 production lines,
+  30-60 minutes; in this repository, with its fast tests, tasks may come out
+  smaller, which does not carry over to fabrig). The body says what to fill, how it is accepted,
   and the pre-approved options with their defaults.
 - **A task's status is computed:** `waiting` (a need has not landed),
   `runnable`, `running`, `parked` (a question is open, or the run failed and
@@ -112,6 +114,15 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   it runnable again. `fab.state.fold` derives it from the specs and the log.
 - **A part is designed** once its skeleton and task specs have landed, and
   **done** once all its tasks have landed (`fab.state.part_statuses`).
+- **A part's design waits for its needs to be designed, not done,** as the
+  user's timeline has it: a contract's readers are pulled when its skeleton
+  lands, not when its bodies are filled. A need that must be done first (a
+  design that depends on measured behaviour) is listed in the part's
+  `needs_landed` instead; a probe's readers wait for its decision. Tasks
+  still wait for the tasks they need to land.
+- **Design keeps just ahead of the flow:** the ready-task buffer is measured
+  against the flow's current target for runs in flight (13.2), not against
+  the builders' nominal places.
 
 ## 5. Runs
 
@@ -679,8 +690,8 @@ things fab follows, whatever the clock says:
 
 ## 14. Later
 
-- The self-critique: a read-only Codex run against the skeleton and the taste
-  file before ready, its findings fixed by the implementer.
+- (The self-critique is 13.1's, part `critique`, not later.)
+
 - fabrig's gates, over Rust and its public API against the skeleton.
 - Gates on the calls' own branches (skeletons, reviews), which have no task
   `files` to check against.

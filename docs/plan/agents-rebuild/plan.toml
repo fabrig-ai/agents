@@ -269,6 +269,13 @@ needs = ["dispatch"]
 design = "docs/design/fab.md, 13.10"
 
 [[part]]
+id = "rust-gates"
+title = "Gates over Rust: the public API against the skeleton first, then size, names, docs and clones"
+mode = "feature"
+needs = ["gates"]
+design = "docs/design/fab.md, 12"
+
+[[part]]
 id = "events"
 title = "Events start the tick, coalesced; the timer only a 10-minute backstop"
 mode = "feature"
@@ -306,5 +313,5 @@ design = "docs/design/fab.md, 13.6"
 [[slice]]
 id = 6
 story = "A draft goes from its cut to landed code with design, acceptance and review by separate sessions, growing from two runs in flight to many"
-parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events", "surveys", "intake", "buffer-order"]
+parts = ["call-review", "acceptance", "critique", "foreman", "foreman-repairs", "flow", "designer", "plans", "accounting", "probe", "user-channel", "landing-checks", "events", "surveys", "intake", "buffer-order", "rust-gates"]
 walk = false

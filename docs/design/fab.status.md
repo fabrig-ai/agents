@@ -137,3 +137,10 @@
   whole-workspace build from a swept slot. Repeated scoped builds within one
   task are not measured yet; heavy.jsonl and the sweep's freed bytes will
   show them.
+- **Repairs and rebases are started by the dispatcher** on the refused task
+  itself, until `foreman-repairs` lands; then the foreman writes them
+  (13.1), as the user's model has it.
+- **Design waits for implementation:** `fab.dispatch.decide` makes a part
+  eligible only when every task of its needs has landed, and sizes the
+  buffer against nominal places; section 4 now says otherwise, and the task
+  `design-eligibility` brings the code to it.
