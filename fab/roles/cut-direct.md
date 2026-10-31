@@ -13,17 +13,27 @@ come before the ones above where they differ.
   you write the contract tasks, and use their findings for the site tasks.
 - **Decide** what the draft leaves to the implementer's lead: pick the
   recommended option of each question, record the choice and why in
-  `notes/decisions.md`, and bind it in the specs. Only what is the user's
-  (budgets, machines, what is hard to reverse) is a `[[question]]`.
+  `notes/decisions.md`, and bind it in the specs. A question the brief or
+  the kickoff tells the lead to settle (pick the recommended option) is
+  yours: decide it, never a `[[question]]`. Only what is the user's and
+  that no source settles (budgets, machines) is one, and no task waits for
+  it: nothing answers it during the run.
 - **Contract tasks first,** small: the public surface with its
   signatures binding, its bodies and tests. Every task that only uses a
   contract names it in `needs` and starts from the merged contract. If one
   task would block more than three others, split it so they start sooner.
 - **One crate family per site task,** each owning disjoint files. Two
   tasks that must change the same files are ordered by `needs`.
+- **Keep the critical path short.** The longest chain of `needs`, counted in
+  implementer-minutes, sets the run's length: write it down in
+  `notes/decisions.md` and keep it near the longest single task plus its
+  contract. A task waits only for the tasks whose code it builds on or
+  whose files it shares, never for a whole part; a task that would wait for
+  more than three others is split by family so most of it starts early.
 - **Counted forms:** when the draft sets counts that may only fall, a first
   task adds them to the tree's `scripts/old_forms.py` ratchet, every other
-  task needs it (so no branch predates the counts it must not raise), and
+  spec lists it in `needs` (so no branch predates the counts it must not
+  raise; it is a minutes-long task), and
   every task lowers `scripts/old-forms.txt` with `--write`. The tick
   recounts that file when merges meet on it.
 - **Shared notes** go once in the plan's `notes/`: `common.md` (the
