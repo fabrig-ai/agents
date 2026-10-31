@@ -454,11 +454,15 @@ def _part_numstat(plan: Plan, tasks: Mapping[str, Task], events: list[dict], *,
         files = sorted({path for task in members.values() for path in task.files})
         if not files:
             continue
-        # Task paths are <checkout>/docs/plan/<draft>/tasks/<name>.md.
+        # Task paths end in docs/plan/<draft>/tasks/<name>.md at any checkout depth.
         path = Path(next(iter(members.values())).path).absolute()
         if len(path.parents) < 5 or path.parents[3].name != "docs":
             continue
-        cwd = str(path.parents[4])
+        checkout = next((parent for parent in path.parents[1:]
+                         if (parent / ".git").exists()), None)
+        if checkout is None:
+            continue
+        cwd = str(checkout)
         _, roots = _part_calls(f"{plan.draft}/{part}", events)
         reviews = [event for event in events if event.get("ev") == "run.started"
                    and event.get("task") in roots and event.get("kind") == "review"

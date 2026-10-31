@@ -400,6 +400,7 @@ class PartMeasuresTest(unittest.TestCase):
         self.home = self.enterContext(tmp_home())
         self.plan, self.tasks, self.hosts = fixture()
         self.repo = self.home / "checkout"
+        (self.repo / ".git").mkdir(parents=True)
         self.tasks = {name: replace(task, path=str(self.repo / "docs/plan/demo" / task.path),
                                    files=("fab/core*.py", "fab/tests/test_core.py", "docs/core.md"))
                       for name, task in self.tasks.items()}
@@ -446,6 +447,35 @@ class PartMeasuresTest(unittest.TestCase):
         ])
         self.assertTrue(all(call.cwd == str(self.repo) for call in self.sh.calls))
         self.assertEqual(self.sh.calls[1].input, "")
+
+    def test_part_measures_nested_plan_uses_checkout_root_and_repository_paths(self):
+        for prefix in ("skein", "components/skein"):
+            with self.subTest(prefix=prefix):
+                tasks = {name: replace(task, path=str(self.repo / prefix / "docs/plan/demo" /
+                                                      "tasks" / Path(task.path).name))
+                         for name, task in self.tasks.items()}
+                before = len(self.sh.calls)
+                self.assertEqual(code._part_numstat(self.plan, tasks, self.records, sh=self.sh),
+                                 {"core": (30, 100)})
+                calls = self.sh.calls[before:]
+                self.assertEqual(len(calls), 3)
+                self.assertTrue(all(call.cwd == str(self.repo) for call in calls))
+                for call in (calls[0], calls[2]):
+                    self.assertEqual(list(call.argv)[-4:],
+                                     ["--", ":(glob)docs/core.md", ":(glob)fab/core*.py",
+                                      ":(glob)fab/tests/test_core.py"])
+
+    def test_part_measures_checkout_can_have_a_git_file(self):
+        (self.repo / ".git").rmdir()
+        atomic.write(self.repo / ".git", "gitdir: /fake/worktrees/checkout\n")
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, self.records, sh=self.sh),
+                         {"core": (30, 100)})
+        self.assertTrue(all(call.cwd == str(self.repo) for call in self.sh.calls))
+
+    def test_part_measures_without_checkout_does_not_read_git(self):
+        (self.repo / ".git").rmdir()
+        self.assertEqual(code._part_numstat(self.plan, self.tasks, self.records, sh=self.sh), {})
+        self.assertEqual(self.sh.calls, [])
 
     def test_part_measures_unfinished_and_empty_parts_are_not_measured(self):
         unfinished = self.records[:-1]
