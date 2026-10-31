@@ -93,6 +93,34 @@ class ChainsTest(unittest.TestCase):
         self.assertEqual(chain.state, "amend")
         self.assertEqual(chain.refusals, ("review-1",))
 
+    def test_queue_refusal_amends_once_then_holds_after_second_approval(self):
+        first = _event("branch.rejected", task=CHAIN.branch, branch=CHAIN.branch,
+                       tip="first", step="cargo", log="/queue/first", findings="compile error")
+        history = [*_review_events(outcome="done"), first]
+        chain = self.chain(*history)
+        self.assertEqual(chain.state, "amend")
+        self.assertEqual(len(chain.refusals), 1)
+        self.assertEqual(self.chain(*history, first), chain)
+        with tmp_home():
+            text = review.amend_brief(chain, call_id="amend", branch=CHAIN.branch, report="/report")
+        self.assertEqual(text.count("Step: cargo"), 1)
+        self.assertIn("compile error", text)
+        self.assertIn("Log: /queue/first", text)
+        history += _amend_events() + _review_events("review-2", "done")
+        self.assertEqual(self.chain(*history).state, "approved")
+        second = dict(first, tip="second", step="test", log="/queue/second")
+        chain = self.chain(*history, second)
+        self.assertEqual((chain.state, chain.reason), ("hold", "refused after its amendment"))
+        self.assertEqual(len(chain.refusals), 2)
+        reset = [_event("call.parked", call=CHAIN.root),
+                 _event(channel.ANSWERED, subject=CHAIN.subject)]
+        self.assertEqual(self.chain(*history, second, *reset).state, "review")
+
+    def test_queue_refusals_ignore_other_branches_and_missing_steps(self):
+        events = [_event("branch.rejected", branch="calls/other", step="test"),
+                  _event("branch.rejected", branch=CHAIN.branch)]
+        self.assertEqual(self.chain(*_review_events(outcome="done"), *events).state, "approved")
+
     def test_question_review_is_a_refusal(self):
         self.assertEqual(self.chain(*_review_events(outcome="question")).state, "amend")
 
@@ -432,6 +460,27 @@ class StartTest(unittest.TestCase):
             self.assertIn(channel.SECTION, text)
             self.assertIn("Answer (-): Buy capacity", text)
             self.assertNotIn("Ignore", text)
+
+    def test_fabrig_review_reads_the_nested_plan_at_the_tip(self):
+        with tmp_home():
+            fake = _review_runner()
+            fake.on(["git", "ls-tree"], Result(0, "README.md\nskein/docs/plan/draft/plan.toml\n"))
+            fake.on(["git", "show", "tip-sha:skein/docs/plan/draft/plan.toml"],
+                    Result(0, 'sources = ["skein/docs/draft.md"]'))
+            fake.on(["git", "show", "tip-sha:skein/docs/draft.md"], Result(0, "Rust draft."))
+            with patch.object(run, "launch_detached", return_value="review-id") as launch:
+                review.start(CHAIN, "fabrig", Path("/checkout"), HOST, (), sh=fake)
+            self.assertEqual(launch.call_args.args[2], "fabrig")
+            self.assertIn("Rust draft.", launch.call_args.kwargs["brief"])
+            self.assertNotIn(["git", "show", "tip-sha:docs/plan/draft/plan.toml"], fake.argvs())
+
+    def test_fabrig_review_refuses_missing_or_ambiguous_plan_paths(self):
+        for paths in ("README.md\n", "one/docs/plan/draft/plan.toml\ntwo/docs/plan/draft/plan.toml\n"):
+            with self.subTest(paths=paths), tmp_home():
+                fake = _review_runner().on(["git", "ls-tree"], Result(0, paths))
+                with patch.object(run, "launch_detached") as launch, self.assertRaisesRegex(ValueError, "expected one plan"):
+                    review.start(CHAIN, "fabrig", Path("/checkout"), HOST, (), sh=fake)
+                launch.assert_not_called()
 
     def test_start_carries_whole_drafts_at_tip_independently_of_call_excerpts(self):
         sources = ("docs/draft/code.md", "docs/draft/landing.md", "docs/draft/execution.md")

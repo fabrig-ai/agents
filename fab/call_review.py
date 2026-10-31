@@ -9,6 +9,7 @@ subject parks for the user. The calls of one branch and their review runs are a 
 
 from __future__ import annotations
 
+import json
 import tomllib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
@@ -80,7 +81,7 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
         kind = event.get("ev", "")
         if kind in ("call.started", "call.ended"):
             _fold_call(event, position, started, owners, folded)
-        elif kind in ("run.started", "run.ended"):
+        elif kind in ("run.started", "run.ended", "branch.rejected"):
             _fold_review(event, position, folded, reviews)
         elif kind == "call.finished" and event.get("call") in owners:
             owners[event["call"]]["finished"] = True
@@ -222,7 +223,14 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     draft = chain.subject if chain.role == "answer" else chain.subject.rsplit("/", 1)[0]
     if chain.role == "decision":
         draft = draft.rsplit("/", 1)[0]
-    plan = tomllib.loads(git("show", f"{tip}:docs/plan/{draft}/plan.toml"))
+    plan_path = f"docs/plan/{draft}/plan.toml"
+    if repo == "fabrig":
+        paths = git("ls-tree", "-r", "--name-only", tip).splitlines()
+        matches = [path for path in paths if path == plan_path or path.endswith("/" + plan_path)]
+        if len(matches) != 1:
+            raise ValueError(f"expected one plan for {draft}, found {len(matches)}")
+        plan_path = matches[0]
+    plan = tomllib.loads(git("show", f"{tip}:{plan_path}"))
     drafts = []
     for source in plan.get("sources", ()):
         path = Path(source)
@@ -311,17 +319,30 @@ def _findings(refusals: tuple[str, ...]) -> str:
     """Quote each refusal once, with a bounded excerpt and an unreadable-report marker."""
     findings = []
     for run_id in refusals:
-        try:
-            text = (log.home() / "runs" / run_id / "report.md").read_text()
-        except (OSError, UnicodeError):
-            text = "(report missing)"
-        findings.append(f"## {run_id}\n\n" + "\n".join(text.splitlines()[:FINDINGS_LINES]))
+        heading = run_id
+        if run_id.startswith("queue:"):
+            rejection = json.loads(run_id.removeprefix("queue:"))
+            heading = "Queue rejection"
+            text = (f"Step: {rejection['step']}\n" + rejection.get("findings", "") +
+                    f"\nLog: {rejection.get('log', '(missing)')}")
+        else:
+            try:
+                text = (log.home() / "runs" / run_id / "report.md").read_text()
+            except (OSError, UnicodeError):
+                text = "(report missing)"
+        findings.append(f"## {heading}\n\n" + "\n".join(text.splitlines()[:FINDINGS_LINES]))
     return "\n\n".join(findings) if findings else "(none)"
 
 
 def _fold_review(event: dict, position: int, folded: dict, reviews: dict) -> None:
     """Attach review runs and their first complete ending to an existing root."""
-    if event["ev"] == "run.started" and event.get("kind") == KIND:
+    if event["ev"] == "branch.rejected" and all(key in event for key in ("branch", "step")):
+        refusal = "queue:" + json.dumps(event, sort_keys=True)
+        for chain in folded.values():
+            if chain["branch"] == event["branch"] and refusal not in chain["refusals"]:
+                chain["reviews"].append({"position": position, "outcome": "failed"})
+                chain["refusals"].append(refusal)
+    elif event["ev"] == "run.started" and event.get("kind") == KIND:
         root, run_id = event.get("task"), event.get("run")
         if root in folded and run_id is not None and run_id not in reviews:
             review = {"position": position, "outcome": None}
