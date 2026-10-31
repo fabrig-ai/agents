@@ -191,7 +191,8 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
     idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
     naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
-    (`git switch -C <branch> origin/<trunk>`; repair: `origin/<branch>`). dir is the slot, and
+    (`git switch --discard-changes -C <branch> origin/<trunk>`, then `git clean -fdq`, so an
+    earlier run's edits never carry over; repair: `origin/<branch>`). dir is the slot, and
     run.started also carries slot (the number). The launcher is `fab codex start` (same
     arguments and output as codex-run task) once LAUNCHER says so.
 
@@ -270,7 +271,10 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         worktree = root.parent / "slots" / str(slot)
         remote(["git", "-C", str(worktree), "fetch", "origin"])
         source = f"origin/{branch}" if kind == "repair" else base
-        remote(["git", "-C", str(worktree), "switch", "-C", branch, source])
+        # A slot keeps only its build cache between runs: an earlier run's uncommitted edits
+        # and untracked files go (ignored files, target/ among them, stay warm).
+        remote(["git", "-C", str(worktree), "switch", "--discard-changes", "-C", branch, source])
+        remote(["git", "-C", str(worktree), "clean", "-fdq"])
     elif kind == "repair":
         source = f"origin/{branch}"
         remote(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), source])

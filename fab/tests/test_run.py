@@ -317,8 +317,9 @@ class RunStartTest(unittest.TestCase):
                     commands = [command(call) for call in fake.calls]
                     source = f"origin/{branch}" if kind == "repair" else base
                     if repo == "fabrig":
-                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch",
+                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes",
                                        "-C", branch, source], commands)
+                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "clean", "-fdq"], commands)
                     elif kind == "repair":
                         self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
                                        "--detach", str(ROOT / "wt" / run_id), source], commands)
@@ -378,17 +379,18 @@ class RunStartTest(unittest.TestCase):
                 slot = ROOT.parent / "slots/2"
                 directory = ROOT / "runs" / run_id
                 commands = [command(call) for call in fake.calls]
-                self.assertEqual(commands[3:7], [
+                self.assertEqual(commands[3:8], [
                     ["fab", "slot", "list"],
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
-                    ["git", "-C", str(slot), "switch", "-C", branch, source]])
+                    ["git", "-C", str(slot), "switch", "--discard-changes", "-C", branch, source],
+                    ["git", "-C", str(slot), "clean", "-fdq"]])
                 expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort), "--model", run.MODEL]
                 if kind == "review":
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
                                                str(directory / "report.md")])
-                self.assertEqual(len(commands), 9)
+                self.assertEqual(len(commands), 10)
                 record, = log.read()
                 self.assertEqual({key: value for key, value in record.items() if key != "ts"},
                                  {"ev": "run.started", "run": run_id, "task": TASK.id, "kind": kind,
@@ -1155,7 +1157,7 @@ class OptimisticRunTest(unittest.TestCase):
                     self.assertIn("- Base: `checked-tip`", (log.home() / "runs" / run_id / "brief.md").read_text())
                     commands = [command(call) for call in fake.calls]
                     if repo == "fabrig":
-                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "-C", task.id, "checked-tip"], commands)
+                        self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes", "-C", task.id, "checked-tip"], commands)
                     else:
                         self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-b", task.id,
                                        str(ROOT / "wt" / run_id), "checked-tip"], commands)
