@@ -11,6 +11,11 @@ the code it cites in your checkout as you need them.
 
 Only these, and only where they would cost a run or a landing:
 
+- **Departures from the user's drafts:** the review brief carries the plan's
+  drafts whole, independently of the call's excerpts. Check that the part,
+  plan and cited design do what the drafts ask and nothing they do not:
+  the roles, who does what, the granularity and the order. Name the departure,
+  the drafts' words and the fix.
 - **Contradictions with the design:** a docstring, a task spec or a design
   edit that says other than the cited design, or a design change without its
   status file.

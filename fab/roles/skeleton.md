@@ -5,15 +5,6 @@ Everything you need is in this brief or in the files it names; read only
 those. You never wait, poll or watch anything. You end by writing files,
 committing them on your branch, pushing it, and writing your report.
 
-## First, check the part against the user's drafts
-
-The brief carries the user's drafts: their words are the spec. Before you
-design, check that the part, as the plan and the cited design state it,
-does what the drafts ask and nothing they do not: the roles, who does what,
-the granularity, the order. Where the part or the design departs from the
-drafts, do not design around it: your report is a `Question:` naming the
-departure, the drafts' words, and the options.
-
 ## What you write
 
 - **The part's skeleton, as code, and contracts, not pseudocode:** its

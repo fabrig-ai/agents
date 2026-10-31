@@ -43,8 +43,9 @@ def fixture(root):
         write(root / path, spec)
         tasks[f"demo/{name}"] = Task(f"demo/{name}", part, "feature", "agents", (),
                                       (f"fab/{name}.py",), "high", 25, f"# Spec {name}\nDo {name}.\n", path)
-    write(root / "design.md", "# Full design\n\n## 1. First\nContract.\n\n## 8. Last\nKeep all sections.\n")
+    write(root / "design.md", "# Full design\n\n## 1. First\nContract.\n\n## 2. Core\nUse `fab/api.py`.\n\n## 8. Last\nKeep all sections.\n")
     write(root / "fab/api.py", 'def primitive(value: int) -> str:\n    """Existing primitive."""\n    return str(value)\n')
+    write(root / "docs/plan/agents-rebuild/tasks/files.md", "# Fixed example\nA format example.\n")
     write(root / "docs/plan/demo/plan.toml", '\n'.join([
         'draft = "demo"', 'repo = "agents"',
         *[f'[[part]]\nid = "{part.id}"\ntitle = "{part.title}"\nmode = "{part.mode}"\n'
@@ -107,6 +108,17 @@ def _private(): pass
                          "## fab/a.py\n\n- `def a()` — A.\n- `class B` — B.\n\n## fab/z.py\n\n- `def z()` — ")
         self.assertEqual(calls.render_inventory([]), "")
 
+    def test_heading_spans_keep_children_and_ignore_fenced_headings(self):
+        text = ("# Draft\nIntro.\n\n## 1. Parent\nParent words.\n\n"
+                "### 1.1 Child\nChild words.\n~~~md\n## Fenced\n~~~\n\n## 2. Sibling\nOutside.\n")
+        headings = calls._headings(text)
+        self.assertEqual([(level, title) for level, title, _, _ in headings],
+                         [(1, "Draft"), (2, "1. Parent"), (3, "1.1 Child"), (2, "2. Sibling")])
+        selected = [(start, end) for _, title, start, end in headings if title in ("1. Parent", "1.1 Child")]
+        self.assertEqual(calls._excerpt(text, selected),
+                         "## 1. Parent\nParent words.\n\n### 1.1 Child\nChild words.\n~~~md\n## Fenced\n~~~")
+        self.assertEqual(calls._excerpt(text, []), "")
+
     def test_design_text_found_and_missing(self):
         with tmp_home() as root:
             write(root / "design.md", "# Design\nAll sections.\n")
@@ -168,7 +180,7 @@ class ReviewHistoryTest(unittest.TestCase):
 
 
 class BriefTest(unittest.TestCase):
-    def test_skeleton_sections_full_specs_and_part_statuses(self):
+    def test_skeleton_sections_one_spec_and_part_statuses(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
             text = calls.skeleton_brief(plan, "core", tasks,
@@ -182,13 +194,124 @@ class BriefTest(unittest.TestCase):
                              "- Id: core", "- Title: Call core", "- Mode: feature", "- Needs: base",
                              "- Design: design.md, 2 and 8", (root / "design.md").read_text(),
                              "## fab/api.py", "def primitive(value: int) -> str", "Existing primitive.",
-                             (root / tasks["demo/one"].path).read_text(),
-                             (root / tasks["demo/two"].path).read_text()):
+                             (root / tasks["demo/one"].path).read_text()):
                 self.assertIn(fragment, text)
+            self.assertNotIn("# Spec two", text)
             self.assertNotIn("# Spec three", text)
             partial = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed", "demo/two": "done"},
                                            root, call_id="c", branch="b", report="r")
             self.assertIn("| base | Base primitives | feature | - | designed |", partial)
+
+    def test_skeleton_two_needs_reach_only_cited_drafts_and_modules_and_one_example(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            sources = ("docs/draft/code.md", "docs/draft/landing.md", "docs/draft/execution.md")
+            drafts = (
+                "# Code\nUnselected introduction.\n\n## 1. Other\nOther code.\n\n"
+                "## 3. Metrics\nCode metrics.\n\n### 3.1 Detail\nNested metrics.\n\n"
+                "## 4. Signals\nUnselected signals.\n\n## 5. Reports\nCode reports.\n",
+                "# Landing\n\n## 3. Metrics\nUnselected landing metrics.\n\n"
+                "## 6. Reds\nLearn from reds.\n",
+                "# Execution\n\n## Skeletons\nUnselected skeletons.\n\n"
+                "## Questions\nAsk the user.\n\n## One mechanism\nA single mechanism.\n\n"
+                "## Example: `model.md`\nAn example flow.\n\n"
+                "## Later\nUnselected later.\n",
+            )
+            for source, text in zip(sources, drafts):
+                write(root / source, text)
+            plan = replace(plan, sources=sources)
+            plan.parts["core"] = replace(plan.parts["core"], title="Call core: Questions",
+                                          needs=("base", "next"))
+            tasks["demo/two"] = replace(tasks["demo/two"], files=("fab/base_*.py",))
+            tasks["demo/three"] = replace(tasks["demo/three"], part="next", files=("fab/needed.py",))
+            write(root / "design.md", "# Design\n\n## 1. Outside\n`fab/unrelated.py`; `docs/draft/code.md`, 4.\n\n"
+                  "## 2. Core\n`fab/api.py` and `fab.extra.public`; `docs/draft/code.md`, 3 and 5;\n"
+                  "`code.md`, 3.1; `landing.md`, 6. One mechanism applies.\n\n### 2.1 Child\n`fab/nested.py`.\n\n"
+                  '## 8. Flow\n`execution.md`, "Example".\n')
+            modules = {"api", "extra", "nested", "one", "base_extra", "needed",
+                       "sh", "log", "atomic", "plan", "state"}
+            for name in modules | {"unrelated", "own"}:
+                write(root / f"fab/{name}.py", f'def {name}():\n    """{name} primitive."""\n    pass\n')
+            tasks["demo/own"] = replace(tasks["demo/one"], id="demo/own", part="core", files=("fab/own.py",))
+            statuses = {key: "landed" for key in tasks}
+            # Reversing the tasks leaves the example's path order unchanged.
+            text = calls.skeleton_brief(plan, "core", dict(reversed(list(tasks.items()))), statuses, root,
+                                        call_id="c", branch="b", report="r")
+            inventory = text.split("# Inventory\n\n", 1)[1].split("\n\n# Task spec examples", 1)[0]
+            self.assertEqual({line for line in inventory.splitlines() if line.startswith("## ")},
+                             {f"## fab/{name}.py" for name in modules})
+            examples = text.split("# Task spec examples\n\n", 1)[1]
+            self.assertEqual(examples.count("+++"), 2)
+            self.assertIn((root / tasks["demo/one"].path).read_text(), examples)
+            self.assertNotIn("# Spec two", examples)
+            self.assertNotIn("# Spec three", examples)
+            excerpts = text.split("# The user's drafts\n\n", 1)[1].split("\n\n# Cited design", 1)[0]
+            for fragment in ("Code metrics.", "Code reports.", "Nested metrics.", "Learn from reds.",
+                             "Ask the user.", "A single mechanism.", "An example flow."):
+                self.assertIn(fragment, excerpts)
+            self.assertEqual(excerpts.count("Nested metrics."), 1)
+            for fragment in ("Unselected", "Other code."):
+                self.assertNotIn(fragment, excerpts)
+            whole = calls.review_brief(plan, tasks, [], root, call_id="r", branch="b", report="r")
+            for source, draft in zip(sources, drafts):
+                self.assertIn(f"## {source}\n\n{draft}", whole)
+
+    def test_skeleton_example_uses_only_first_need_landed_specs_or_fixed_fallback(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            for needs, statuses, expected in (
+                    (("base", "core"), {"demo/one": "done", "demo/three": "landed"}, "Fixed example"),
+                    (("base",), {"demo/one": "running", "demo/two": "landed"}, "Spec two"),
+                    (("core", "base"), {"demo/one": "landed", "demo/three": "landed"}, "Spec three"),
+                    ((), {"demo/one": "landed"}, "Fixed example")):
+                with self.subTest(needs=needs, statuses=statuses):
+                    plan.parts["next"] = replace(plan.parts["next"], needs=needs)
+                    text = calls.skeleton_brief(plan, "next", tasks, statuses, root,
+                                               call_id="c", branch="b", report="r")
+                    example = text.split("# Task spec examples\n\n", 1)[1]
+                    self.assertIn("# " + expected, example)
+                    self.assertEqual(sum(example.count("# " + title) for title in
+                                         ("Spec one", "Spec two", "Spec three", "Fixed example")), 1)
+
+    def test_fixed_example_can_come_from_fab_when_the_plan_checkout_lacks_it(self):
+        with tmp_home() as root:
+            plan_root = root / "plan"
+            plan, tasks = fixture(plan_root)
+            relative = Path("docs/plan/agents-rebuild/tasks/files.md")
+            (plan_root / relative).unlink()
+            write(root / "installed" / relative, "# Installed format example\nA fixed spec.\n")
+            with patch.object(calls, "__file__", str(root / "installed/fab/calls.py")):
+                text = calls.skeleton_brief(plan, "base", tasks, {}, plan_root,
+                                            call_id="c", branch="b", report="r")
+            self.assertIn("# Task spec examples\n\n## " + relative.as_posix() +
+                          "\n\n# Installed format example\nA fixed spec.\n", text)
+
+    def test_skeleton_dotted_design_section_and_named_parent_keep_children_only_once(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            source = "docs/draft/execution.md"
+            write(root / source, "# Execution\n\n## Feature mode\nParent.\n\n"
+                  "### Skeletons\nChild.\n```md\n## Questions\nFenced heading.\n```\n\n"
+                  "## Other\nUnselected other.\n")
+            write(root / "design.md", "# Design\n\n## 13. Flow\n\n### 13.1 Calls\n`fab/api.py`.\n\n"
+                  "### 13.10 Later\n`fab/unrelated.py`; `execution.md`, 2.\n")
+            plan = replace(plan, sources=(source, "not a file"))
+            plan.parts["core"] = replace(plan.parts["core"], title="Feature mode and Skeletons",
+                                          design="design.md, 13.1")
+            text = calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+            excerpts = text.split("# The user's drafts\n\n", 1)[1].split("\n\n# Cited design", 1)[0]
+            self.assertIn("Parent.", excerpts)
+            self.assertEqual(excerpts.count("Child."), 1)
+            self.assertIn("Fenced heading.", excerpts)
+            self.assertNotIn("Unselected other.", excerpts)
+            reached = calls._cited_design(root, "design.md, 13.1")
+            self.assertIn("`fab/api.py`", reached)
+            self.assertNotIn("fab/unrelated.py", reached)
+            # A design citation may name a draft section directly.
+            plan.parts["core"] = replace(plan.parts["core"], title="Core", design=source + ", 2")
+            write(root / source, "# Execution\n\n## 1. Other\nOutside.\n\n## 2. Calls\nDirect draft.\n")
+            text = calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+            self.assertIn("# The user's drafts\n\n## " + source + "\n\n## 2. Calls\nDirect draft.", text)
 
     def test_skeleton_and_contract_show_marker_readers_and_all_questions_in_order(self):
         with tmp_home() as root:
@@ -227,7 +350,8 @@ class BriefTest(unittest.TestCase):
         with tmp_home() as root:
             plan, _ = fixture(root)
             tasks = load_tasks(root / "docs/plan/demo/tasks", plan.draft, plan.repo)
-            skeleton = calls.skeleton_brief(plan, "core", tasks, {}, root, call_id="c", branch="b", report="r")
+            skeleton = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed"}, root,
+                                            call_id="c", branch="b", report="r")
             answer = calls.answer_brief([{"task": "demo/one", "run": "demo/one-1", "text": "Choose?"}],
                                          tasks, root, call_id="c", branch="b", report="r")
             for text in (skeleton, answer):
@@ -433,7 +557,7 @@ class StartTest(unittest.TestCase):
     def test_start_commands_artifacts_events_usage_and_outcome(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
-            text = calls.skeleton_brief(plan, "core", tasks, {}, root,
+            text = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed"}, root,
                                         call_id="preview", branch="preview", report="preview")
             result_json = "\n".join(json.dumps(event) for event in [
                 {"type": "assistant", "message": {"id": "main", "usage": {

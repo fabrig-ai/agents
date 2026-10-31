@@ -11,6 +11,7 @@ import argparse
 import ast
 import json
 import os
+import re
 import shlex
 import sys
 import time
@@ -147,8 +148,13 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     """The skeleton or contract author's brief: its role text; the call's facts; the plan's
     parts and slices with each part's status; the part to design (id, title, mode, needs,
     design citation, contract marker, questions and their answers, plus readers in plan
-    order for contract); the user's drafts; the cited design; the inventory; and the task
-    specs for its needs as format examples. Accepts skeleton or contract, else ValueError.
+    order for contract); only draft sections cited by the reached design sections or
+    named in the part's title or design; the cited design; inventory of modules cited by
+    those design sections, owned by its direct needs, and the shared sh, log, atomic, plan
+    and state primitives;
+    one example spec, the first landed task of its first need in path order, else
+    docs/plan/agents-rebuild/tasks/files.md (from fab's checkout when absent in root).
+    Accepts skeleton or contract, else ValueError.
     Raises ValueError past BRIEF_LIMIT, naming the largest section."""
     if role not in ("skeleton", "contract"):
         raise ValueError(f"unknown skeleton brief role {role!r}")
@@ -163,22 +169,122 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     for question in plan.questions:
         if part_id in question.parts:
             details += f"\n- Question {question.id}: {question.text}\n  Answer: {question.answer or '(open)'}"
-    examples = []
+    design = _cited_design(root, part.design)
+    modules = {f"fab/{name}.py" for name in ("sh", "log", "atomic", "plan", "state")}
+    modules.update(re.findall(r"\bfab/[\w]+\.py\b", design))
+    modules.update(f"fab/{name}.py" for name in re.findall(r"\bfab\.([\w]+)\b", design))
     for task in tasks.values():
         if task.part in part.needs:
-            path = Path(task.path)
-            label = path.relative_to(root) if path.is_absolute() else path
-            examples.append(f"## {task.id} ({label})\n\n{(root / path).read_text(encoding='utf-8')}")
+            for pattern in task.files:
+                modules.update(path.relative_to(root).as_posix() for path in root.glob(pattern)
+                               if path.suffix == ".py")
+    examples = sorted((task for task in tasks.values()
+                       if part.needs and task.part == part.needs[0]
+                       and statuses.get(task.id) == "landed"), key=lambda task: task.path)
+    path = Path(examples[0].path if examples else "docs/plan/agents-rebuild/tasks/files.md")
+    label = path.relative_to(root) if path.is_absolute() else path
+    heading = f"{examples[0].id} ({label})" if examples else str(label)
+    spec_path = root / path
+    if not examples and not spec_path.is_file():
+        spec_path = Path(__file__).resolve().parents[1] / path
+    example = f"## {heading}\n\n{spec_path.read_text(encoding='utf-8')}"
     return _brief([
         ("Role", ROLES[role].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
         ("Plan parts and slices", _parts_table(plan, tasks, statuses)),
         ("Part to design", details),
-        ("The user's drafts", drafts_text(plan, root)),
+        ("The user's drafts", _part_drafts(plan, part_id, root, design)),
         ("Cited design", design_text(root, part.design)),
-        ("Inventory", render_inventory(inventory(root))),
-        ("Task spec examples", "\n\n".join(examples) or "(none)"),
+        ("Inventory", render_inventory(entry for entry in inventory(root) if entry.module in modules)),
+        ("Task spec examples", example),
     ])
+
+
+def _headings(text: str) -> list[tuple[int, str, int, int]]:
+    """Markdown headings and their spans, including children but excluding fenced code."""
+    headings = []
+    offset, fence = 0, ""
+    for line in text.splitlines(keepends=True):
+        stripped = line.lstrip()
+        if stripped.startswith(("```", "~~~")):
+            marker = stripped[:3]
+            if not fence:
+                fence = marker
+            elif marker == fence:
+                fence = ""
+        match = re.match(r"(#{1,6}) +(.+?)\s*#*\s*$", line) if not fence else None
+        if match:
+            headings.append((len(match[1]), match[2], offset))
+        offset += len(line)
+    return [(level, title, start,
+             next((later for depth, _, later in headings[index + 1:] if depth <= level), len(text)))
+            for index, (level, title, start) in enumerate(headings)]
+
+
+def _section_number(title: str) -> str:
+    """The leading dotted section number, or an empty string for a named heading."""
+    match = re.match(r"(\d+(?:\.\d+)*)(?:\.?(?:\s|$))", title)
+    return match[1] if match else ""
+
+
+def _cited_design(root: Path, citation: str) -> str:
+    """Only the numbered design sections in a citation; a bare path reaches the whole file."""
+    text = design_text(root, citation)
+    _, comma, sections = citation.partition(",")
+    if not comma:
+        return text
+    numbers = set(re.findall(r"\d+(?:\.\d+)*", sections))
+    spans = [(start, end) for _, title, start, end in _headings(text)
+             if _section_number(title) in numbers]
+    return _excerpt(text, spans)
+
+
+def _excerpt(text: str, spans: list[tuple[int, int]]) -> str:
+    """Join selected heading spans in source order, without repeating nested sections."""
+    end = 0
+    parts = []
+    for start, stop in sorted(spans):
+        if stop > end:
+            parts.append(text[max(start, end):stop].rstrip())
+            end = stop
+    return "\n\n".join(parts)
+
+
+def _part_drafts(plan: Plan, part_id: str, root: Path, design: str) -> str:
+    """The draft sections reached by this part's title, citation and selected design."""
+    part = plan.parts[part_id]
+    named = f"{part.title}\n{part.design}\n{design}".replace("`", "").casefold()
+    excerpts = []
+    for source in plan.sources:
+        path = root / source
+        if not source or Path(source).is_absolute() or not path.is_file():
+            continue
+        text = path.read_text(encoding="utf-8")
+        numbers, mentions = set(), []
+        reference = r"(?<![\w/])(?:" + re.escape(source) + "|" + re.escape(path.name) + r")(?![\w./])"
+        context = part.design + "\n" + design
+        for match in re.finditer(reference, context):
+            tail = context[match.end():]
+            numbered = re.match(r"`?\s*,\s*(\d+(?:\.\d+)*(?:(?:\s+and\s+|\s*,\s*)\d+(?:\.\d+)*)*)", tail)
+            if numbered:
+                numbers.update(re.findall(r"\d+(?:\.\d+)*", numbered[1]))
+            quoted = re.match(r'`?\s*,\s*["“`]([^"”`]+)["”`]', tail)
+            if quoted:
+                mentions.append(quoted[1].casefold())
+        spans = []
+        for level, title, start, end in _headings(text):
+            if level == 1:
+                continue
+            number = _section_number(title)
+            heading = title.removeprefix(number).lstrip(". ").replace("`", "").casefold()
+            if ((number and number in numbers) or
+                    re.search(r"(?<!\w)" + re.escape(heading) + r"(?!\w)", named) or
+                    any(heading == mention or heading.startswith(mention + ":") for mention in mentions)):
+                spans.append((start, end))
+        excerpt = _excerpt(text, spans)
+        if excerpt:
+            excerpts.append(f"## {source}\n\n{excerpt}")
+    return "\n\n".join(excerpts) or "(none)"
 
 
 def _parts_table(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, str]) -> str:

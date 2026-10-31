@@ -1,3 +1,4 @@
+import json
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -407,7 +408,9 @@ class StartTest(unittest.TestCase):
                 ["git", "diff", "--stat", "base-sha", "tip-sha"],
                 ["git", "diff", "base-sha", "tip-sha"]])
             self.assertTrue(all(call.cwd == "/checkout" for call in fake.calls[:5]))
-            self.assertEqual(fake.calls[8].argv, ssh(HOST.ssh,
+            self.assertEqual(fake.calls[5].argv, ["git", "show", "tip-sha:docs/plan/draft/plan.toml"])
+            self.assertEqual(fake.calls[5].cwd, "/checkout")
+            self.assertEqual(fake.calls[9].argv, ssh(HOST.ssh,
                 ["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "--detach",
                  str(ROOT / "wt" / run_id), "tip-sha"]))
             directory = ROOT / "runs" / run_id
@@ -429,6 +432,61 @@ class StartTest(unittest.TestCase):
             self.assertIn(channel.SECTION, text)
             self.assertIn("Answer (-): Buy capacity", text)
             self.assertNotIn("Ignore", text)
+
+    def test_start_carries_whole_drafts_at_tip_independently_of_call_excerpts(self):
+        sources = ("docs/draft/code.md", "docs/draft/landing.md", "docs/draft/execution.md")
+        drafts = {source: f"# {source}\n\n## Cited\nCited words.\n\n## Other\nUncited {source}.\n"
+                  for source in sources}
+        subjects = {"skeleton": "draft/nested/part", "contract": "draft/nested/part",
+                    "answer": "draft/nested", "review": "draft/nested/review", "cut": "draft/nested/cut",
+                    "decision": "draft/nested/part/decision", "retire": "draft/nested/retire"}
+        for role, subject in subjects.items():
+            with self.subTest(role=role), tmp_home() as home:
+                original = "# The user's drafts\n\n## Cited\nCited words.\n"
+                atomic.write(home / "fab/calls" / CHAIN.root / "brief.md", original)
+                fake = _review_runner().on(["git", "show", "tip-sha:docs/plan/draft/nested/plan.toml"],
+                                           Result(0, "sources = " + json.dumps(sources)))
+                for source, draft in drafts.items():
+                    fake.on(["git", "show", f"tip-sha:{source}"], Result(0, draft))
+                chain = replace(CHAIN, role=role, subject=subject)
+                with patch.object(designer, "changed_designs", return_value=[]), \
+                     patch.object(run, "launch_detached", return_value="review-id") as launch:
+                    self.assertEqual(review.start(chain, "agents", Path("/checkout"), HOST, (), sh=fake),
+                                     "review-id")
+                text = launch.call_args.kwargs["brief"]
+                whole = text.split("# The user's drafts\n\n", 1)[1].split("# The call's brief\n\n", 1)[0]
+                for source, draft in drafts.items():
+                    self.assertIn(f"## {source}\n\n{draft}", whole)
+                self.assertTrue(text.endswith(original))
+                self.assertIn(["git", "show", "tip-sha:docs/plan/draft/nested/plan.toml"], fake.argvs())
+                self.assertTrue(all(call.cwd == "/checkout" for call in fake.calls))
+
+    def test_start_has_whole_drafts_even_when_call_brief_is_missing(self):
+        with tmp_home():
+            fake = _review_runner().on(["git", "show", "tip-sha:docs/plan/draft/plan.toml"],
+                                       Result(0, 'sources = ["docs/draft.md", "elsewhere", "/external", "../outside"]'))
+            fake.on(["git", "show", "tip-sha:docs/draft.md"], Result(0, "Whole draft.\n"))
+            fake.on(["git", "show", "tip-sha:elsewhere"], Result(128, err="not in tree"))
+            with patch.object(run, "launch_detached", return_value="review-id") as launch:
+                review.start(CHAIN, "agents", Path("/checkout"), HOST, (), sh=fake)
+            text = launch.call_args.kwargs["brief"]
+            self.assertIn("# The user's drafts\n\n## docs/draft.md\n\nWhole draft.\n", text)
+            for source in ("elsewhere", "/external", "../outside"):
+                self.assertIn(f"## {source}\n\n(not a file in this repository)", text)
+            self.assertIn("(brief missing:", text)
+            self.assertNotIn(["git", "show", "tip-sha:/external"], fake.argvs())
+            self.assertNotIn(["git", "show", "tip-sha:../outside"], fake.argvs())
+
+    def test_unreadable_or_malformed_plan_starts_nothing(self):
+        for result, error in ((Result(128, err="missing plan"), Failed),
+                              (Result(0, "not TOML"), ValueError)):
+            with self.subTest(result=result), tmp_home():
+                fake = _review_runner().on(["git", "show", "tip-sha:docs/plan/draft/plan.toml"], result)
+                with patch.object(run, "launch_detached") as launch, self.assertRaises(error):
+                    review.start(CHAIN, "agents", Path("/checkout"), HOST, (), sh=fake)
+                launch.assert_not_called()
+                self.assertEqual(log.read(), [])
+                self.assertTrue(all(argv[0] == "git" for argv in fake.argvs()))
 
     def test_retire_start_passes_changed_designs_at_the_reviewed_tip(self):
         """Consistency reviews list designs from the plan history at this branch's tip."""

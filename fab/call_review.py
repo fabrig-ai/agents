@@ -9,6 +9,7 @@ subject parks for the user. The calls of one branch and their review runs are a 
 
 from __future__ import annotations
 
+import tomllib
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -194,8 +195,11 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
        refs/remotes/origin/main <tip>`; stat `git diff --stat <base> <tip>`; diff
        `git diff <base> <tip>`. For retire, get designer.changed_designs(checkout,
        <subject before its last slash>, rev=tip, sh=sh) for the consistency brief.
-       A git failure raises fab.sh.Failed; a missing plan history raises ValueError.
-       Either starts nothing.
+       Read the plan and its whole sources independently with `git show <tip>:<path>`;
+       put them before the call's brief, even when that brief has only excerpts. Subjects
+       name the draft before the part or reserved suffix (answer names the draft itself).
+       Non-file sources get a note. A git failure reading the plan raises fab.sh.Failed;
+       malformed TOML or missing plan history raises ValueError. Either starts nothing.
     2. The run id fab.run.next_run(chain.root, events): `<root>-<n>`.
     3. fab.run.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
        branch=chain.branch, base=<base>, brief=brief(...), effort=EFFORT,
@@ -215,12 +219,27 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     diff = git("diff", base, tip)
     designs = (designer.changed_designs(checkout, chain.subject.rsplit("/", 1)[0], rev=tip, sh=sh)
                if chain.role == "retire" else ())
+    draft = chain.subject if chain.role == "answer" else chain.subject.rsplit("/", 1)[0]
+    if chain.role == "decision":
+        draft = draft.rsplit("/", 1)[0]
+    plan = tomllib.loads(git("show", f"{tip}:docs/plan/{draft}/plan.toml"))
+    drafts = []
+    for source in plan.get("sources", ()):
+        path = Path(source)
+        content = "(not a file in this repository)"
+        if source and not path.is_absolute() and ".." not in path.parts:
+            result = sh(["git", "show", f"{tip}:{source}"], cwd=str(checkout))
+            if result.ok:
+                content = result.out
+        drafts.append(f"## {source}\n\n{content}")
     events = list(events)
     run_id = runs.next_run(chain.root, events)
     root = Path(runs.remote_home(host))
     text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
                  report=str(root / "runs" / run_id / "report.md"), designs=designs,
                  answers=channel.answers_text(chain.subject, events))
+    before, marker, original = text.partition("# The call's brief\n\n")
+    text = before + "# The user's drafts\n\n" + ("\n\n".join(drafts) or "(none)") + "\n\n" + marker + original
     return runs.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
                                 branch=chain.branch, base=base, brief=text, effort=EFFORT,
                                 call=chain.latest, tip=tip, sh=sh, log_path=log_path)
