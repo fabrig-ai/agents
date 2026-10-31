@@ -147,9 +147,14 @@ def functions(module: str, text: str) -> list[Function]:
 
 def masked(text: str, tests: Sequence[tuple[int, int]]) -> str:
     """text with the lines that say nothing about a clone blanked, line numbers kept: every
-    line inside a span of tests, and every line whose stripped text, after a leading `pub` or
-    `pub(...)` and its space, starts with `use ` or is `mod <name>;`, or starts with `//`, or
-    is made only of BRACKETS characters. A blanked line becomes "", so fab.digest.clones,
-    which skips blank lines, never keys a window on one. The result ends with a newline when
-    text does. Pure."""
+    line inside a span of tests; every line whose stripped text, after a leading `pub` or
+    `pub(...)` and its space, starts with `use ` or is `mod <name>;`; every line whose
+    characters outside comments are only whitespace and BRACKETS characters, so a line of a
+    `//` comment, a line inside or opening or closing a block comment `/* */` (nested, doc
+    comments `///` and `/** */` among them) and a line of brackets alone are blanked. Comments
+    are found as tokens finds them: `//` or `/*` inside a string or char literal opens none. A
+    line with code beside a comment is kept whole, its comment included. text is one scan has
+    read, so its comments and literals close. A blanked line becomes "", so
+    fab.digest.clones, which skips blank lines, never keys a window on one. The result ends
+    with a newline when text does. Pure."""
     raise NotImplementedError

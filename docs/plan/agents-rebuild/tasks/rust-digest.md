@@ -41,9 +41,11 @@ returns. Share the detail's text with `_land` through one private helper.
   - `sources` and `inventory` on trees written by `tree`: a nested crate's
     files left to it, a test file left out, a crate missing from the tree;
   - `build` on two trees: an added and a removed crate (its items all
-    added or all removed), a new module, a long function grown past the cap
-    and an old long one untouched (not listed), a clone between two files,
-    a test span's copy not a clone, a path outside the task's files;
+    added or all removed), a new module, a function in an existing file
+    (not a new module) grown past the cap listed, an old long one untouched
+    (not listed), a clone between two files, a clone added to an existing
+    file, a test span's copy not a clone, a block comment repeated in two
+    files not a clone, a path outside the task's files;
   - `gather` with real git (`fabrig_repo`, `commit_branch`): a branch adding
     a crate (the base side created empty, no `git archive` of it), a branch
     deleting a file, and the exemplar.

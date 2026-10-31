@@ -67,16 +67,18 @@ def build(task: Task, run_id: str, branch: str, base_sha: str, tip_sha: str,
     """The digest of a fabrig branch from its changes (kinds from classify), its two trees
     (each holding the touched crates that exist at its side) and roots, the touched crates.
 
-    In order: changes sorted by path; fab.digest.outside(their paths, task.files); added,
-    removed and changed from fab.digest.compare(inventory(base, roots), inventory(tip,
-    roots)); modules: the production changes that owner places in roots with no such file
-    under base, sorted; long: fab.digest.long_functions(path, text under base or "", text
-    under tip, find=fab.rust.functions) for each such change that exists under tip; clones:
-    fab.digest.clones over every path of sources(tip, roots), each text
-    fab.rust.masked(text, fab.rust.scan(path, text).tests), with the added lines
-    (fab.digest.added_lines of base and tip text) of the same changes. Files are read as
-    UTF-8. A SyntaxError propagates. Digest's fields are filled as fab.digest.build fills
-    them, kind task.kind."""
+    The sources a branch changed are its production changes that owner places in roots, new
+    files and existing ones alike. In order: changes sorted by path;
+    fab.digest.outside(their paths, task.files); added, removed and changed from
+    fab.digest.compare(inventory(base, roots), inventory(tip, roots)); modules: the changed
+    sources with no such file under base, sorted; long: for every changed source that exists
+    under tip, new or grown, fab.digest.long_functions(path, its text under base or "" when
+    absent, its text under tip, find=fab.rust.functions), so an existing file's function grown
+    past the cap is listed; clones: fab.digest.clones over every path of sources(tip, roots),
+    each text fab.rust.masked(text, fab.rust.scan(path, text).tests), with the added lines
+    (fab.digest.added_lines of its base and tip text) of every changed source that exists
+    under tip. Files are read as UTF-8. A SyntaxError propagates. Digest's fields are filled
+    as fab.digest.build fills them, kind task.kind; long sorted by module and start."""
     raise NotImplementedError
 
 

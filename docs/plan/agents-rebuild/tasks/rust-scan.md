@@ -56,6 +56,12 @@ fabrig's branches.
     `mod x;`, `// comment`, `}`, `});` blanked; `let x = 1;` and a `pub fn`
     line kept; every line of a test span blanked; the trailing newline
     kept.
+  - `masked` and block comments, a regression test: every line of a
+    multi-line `/* */`, a nested one and a `/** */` doc block blanked, its
+    opening and closing lines too; `} /* end */` blanked;
+    `let x = 1; /* c */` kept whole; a `"/*"` string opens no comment. The
+    same block comment of `CLONE_LINES` + 2 lines written in two files is no
+    clone: `fab.digest.clones` over both masked texts gives none.
 - `bin/fab test` passes; `test_rust.py` takes under a second.
 
 ## Options, settled up front
