@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, foreman, log, state
+from fab import atomic, channel, foreman, log, state
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -325,9 +325,12 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     """Run a fresh call, keeping its own id, directory, brief, report and result artifacts.
 
     Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/main, or fetch origin and
-    reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts,
-    log call.started (including amends when supplied), run Claude without nested-session
-    environment markers, keep its stdout as stream.jsonl and its stderr as stderr.log, then
+    reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts
+    and insert the subject's user answers after them, before the next # section or at the
+    end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
+    brief before facts and answers are bound. Log call.started (including amends when
+    supplied), run Claude without nested-session environment markers, keep its stdout as
+    stream.jsonl and its stderr as stderr.log, then
     log call.ended with the report's outcome, claude_usage(stdout).log_fields() and the
     elapsed minutes. Nothing ends a call but TIMEOUT; a call cut short there is measured from
     what its stream holds. Remove the worktree even on failure; return {call, branch,
@@ -342,13 +345,8 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     worktree = directory / "wt"
     brief_path = directory / "brief.md"
     report_path = directory / "report.md"
-    marker = "# Call facts\n\n"
-    before, found, after = brief.partition(marker)
-    if found:
-        _, separator, rest = after.partition("\n\n# ")
-        brief = before + marker + _facts(call_id, branch, str(report_path))
-        if separator:
-            brief += separator + rest
+    brief = _bind_brief(brief, call_id, branch, str(report_path),
+                        channel.answers_text(subject, log.read(log_path)))
     if existing:
         sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
     sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
@@ -372,6 +370,22 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
     finally:
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
+
+
+def _bind_brief(text: str, call_id: str, branch: str, report: str, answers: str) -> str:
+    """Bind the run's facts and answers before the rest of its compiled brief."""
+    marker = "# Call facts\n\n"
+    before, found, after = text.partition(marker)
+    if found:
+        _, separator, rest = after.partition("\n# ")
+        text = before + marker + _facts(call_id, branch, report)
+        if answers:
+            text += "\n\n" + channel.SECTION + "\n\n" + answers
+        if separator:
+            text += "\n\n# " + rest
+    elif answers:
+        text = text.rstrip("\n") + "\n\n" + channel.SECTION + "\n\n" + answers + "\n"
+    return text
 
 
 def claude_usage(stream: str) -> Usage:

@@ -13,7 +13,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import calls, designer, log, run as runs
+from fab import calls, channel, designer, log, run as runs
 from fab.hosts import Host
 from fab.sh import Runner, run
 
@@ -53,9 +53,10 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
     the root, each with the first run.ended of the same run; an ended review run refused
     unless its outcome is done or infra.
 
-    The reset: a question.answered whose task is the chain's subject, later than the chain's
-    last call.parked (call the root). Amend calls, infra review runs and the parked mark count
-    only from the last reset on; `calls` and `refusals` keep the whole chain.
+    The reset: a call.answered whose subject is the chain's subject, later than the chain's
+    last call.parked (call the root). A question.answered resets nothing. Amend calls, infra
+    review runs and the parked mark count only from the last reset on; `calls` and
+    `refusals` keep the whole chain.
 
     The state is the first of these that holds:
     - finished: a call.finished names any call of the chain (its outcome aside; one logged by
@@ -84,9 +85,9 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
             owners[event["call"]]["finished"] = True
         elif kind == "call.parked" and event.get("call") in folded:
             folded[event["call"]]["parked"] = position
-        elif kind == "question.answered" and "task" in event:
+        elif kind == channel.ANSWERED and "subject" in event:
             for chain in folded.values():
-                if chain["subject"] == event["task"] and chain["parked"] >= 0:
+                if chain["subject"] == event["subject"] and chain["parked"] >= 0:
                     chain["reset"] = position
     result = {}
     for root, chain in folded.items():
@@ -98,7 +99,7 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
 
 
 def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: str,
-          report: str, designs: Sequence[str] = ()) -> str:
+          report: str, designs: Sequence[str] = (), answers: str = "") -> str:
     """The review run's brief, its sections in this order, joined by blank lines and ending
     with a newline:
 
@@ -113,11 +114,12 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
     3. `# Earlier findings`, only when the chain has refusals: per refusal in order,
        `## <run>` and the first FINDINGS_LINES lines of FAB_HOME/runs/<run>/report.md
        (`(report missing)` when it cannot be read).
-    4. `# The diff`: stat in a ```text fence, then diff in a ```diff fence. A diff longer than
+    4. fab.channel.SECTION, then answers, only when answers is not empty.
+    5. `# The diff`: stat in a ```text fence, then diff in a ```diff fence. A diff longer than
        DIFF_LIMIT characters is cut at the last newline at or before DIFF_LIMIT and followed,
        after its fence, by the line `The diff is cut at <DIFF_LIMIT> characters; read the
        rest with \\`git diff <base> <tip>\\`.`
-    5. `# The call's brief`: the line `What the call was asked, verbatim, to the end of this
+    6. `# The call's brief`: the line `What the call was asked, verbatim, to the end of this
        brief:`, then the text of FAB_HOME/calls/<root>/brief.md, or `(brief missing: <path>)`.
 
     Never refuses for size: the call's brief is already bounded by fab.calls.BRIEF_LIMIT."""
@@ -134,6 +136,8 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
                         ("\n".join(f"- `{path}`" for path in designs) or "(none)"))
     if chain.refusals:
         sections.append("# Earlier findings\n\n" + _findings(chain.refusals))
+    if answers:
+        sections.append(channel.SECTION + "\n\n" + answers)
     cut = len(diff) > DIFF_LIMIT
     if cut:
         newline = diff.rfind("\n", 0, DIFF_LIMIT + 1)
@@ -211,10 +215,12 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     diff = git("diff", base, tip)
     designs = (designer.changed_designs(checkout, chain.subject.rsplit("/", 1)[0], rev=tip, sh=sh)
                if chain.role == "retire" else ())
+    events = list(events)
     run_id = runs.next_run(chain.root, events)
     root = Path(runs.remote_home(host))
     text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
-                 report=str(root / "runs" / run_id / "report.md"), designs=designs)
+                 report=str(root / "runs" / run_id / "report.md"), designs=designs,
+                 answers=channel.answers_text(chain.subject, events))
     return runs.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
                                 branch=chain.branch, base=base, brief=text, effort=EFFORT,
                                 call=chain.latest, tip=tip, sh=sh, log_path=log_path)

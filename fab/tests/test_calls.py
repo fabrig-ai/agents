@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import call_review, calls, cli, log
+from fab import call_review, calls, channel, cli, log
 from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, tmp_home
@@ -356,6 +356,7 @@ class StartTest(unittest.TestCase):
                 self.assertIn(str(directory / "report.md"), brief)
                 self.assertNotIn("preview", brief)
                 self.assertIn("# Inventory", brief)
+                self.assertNotIn(channel.SECTION, brief)
                 self.assertIn((root / tasks["demo/one"].path).read_text(), brief)
                 self.assertEqual([event["ev"] for event in log.read(root / "custom.jsonl")], ["call.started"])
                 write(directory / "report.md", "\nDone: designed core\nDetails.\n")
@@ -384,6 +385,25 @@ class StartTest(unittest.TestCase):
             self.assertEqual({key: value for key, value in ended.items() if key != "ts"},
                              {"ev": "call.ended", "call": directory.name, "role": "skeleton", "subject": "demo/core",
                               "outcome": "done", "tokens": "23/50/9", "minutes": 1.5})
+
+    def test_start_binds_subject_answers_after_facts_before_next_section_or_end(self):
+        for tail in ("", "\n\n# The task\n\nKeep the task.\n"):
+            with self.subTest(tail=tail), tmp_home() as root:
+                path = root / "custom/log.jsonl"
+                log.append(channel.ANSWERED, path=path, subject="demo/core", call="earlier",
+                           question="Which host?", by="user", answer="Use hel8")
+                log.append(channel.ANSWERED, subject="demo/core", answer="Wrong log")
+                log.append(channel.ANSWERED, path=path, subject="other", answer="Wrong subject")
+                fake = FakeRunner().on(["claude"], Result(0, "{}"))
+                result = calls.start("skeleton", "demo/core", root, "# Call facts\n\npreview" + tail,
+                                     sh=fake, log_path=path)
+                brief = (log.home() / "calls" / result["call"] / "brief.md").read_text()
+                expected = ("# Call facts\n\n" + calls._facts(result["call"], result["branch"], result["report"])
+                            + "\n\n" + channel.SECTION + "\n\n"
+                            + channel.answers_text("demo/core", log.read(path)) + tail)
+                self.assertEqual(brief, expected)
+                self.assertIn("Question: Which host?\nAnswer (user): Use hel8", brief)
+                self.assertNotIn("Wrong", brief)
 
     def test_start_on_existing_branch_fetches_and_records_amends(self):
         with tmp_home() as root:
@@ -501,6 +521,7 @@ class MainTest(unittest.TestCase):
             with self.subTest(role=role), tmp_home() as root:
                 fixture(root)
                 log.append("question.asked", task="demo/one", run="demo/one-1", text="Which type?")
+                log.append(channel.ANSWERED, subject="demo/core", answer="Bound only when starting")
                 log.append("question.asked", task="other/task", run="other/task-1", text="Other plan")
                 fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root) + "\n"))
                 argv = ["call", role, *(["core"] if role == "skeleton" else []),
@@ -512,6 +533,8 @@ class MainTest(unittest.TestCase):
                 text = output.getvalue()
                 self.assertIn(calls.ROLES[role].read_text(), text)
                 self.assertIn("# Call facts", text)
+                self.assertNotIn(channel.SECTION, text)
+                self.assertNotIn("Bound only when starting", text)
                 self.assertIn("Existing primitive.", text)
                 if role == "answer":
                     self.assertIn("Which type?", text)

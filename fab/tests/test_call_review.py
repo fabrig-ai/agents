@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import atomic, call_review as review, calls, designer, log, run
+from fab import atomic, call_review as review, calls, channel, designer, log, run
 from fab.hosts import Host
 from fab.sh import Failed, Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
@@ -139,7 +139,7 @@ class ChainsTest(unittest.TestCase):
     def test_answer_resets_parked_chain(self):
         chain = self.chain(*_review_events(), *_amend_events(), *_review_events("review-2"),
                            _event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task=CHAIN.subject))
+                           _event(channel.ANSWERED, subject=CHAIN.subject))
         self.assertEqual(chain.state, "review")
         self.assertEqual(chain.calls, (CHAIN.root, "amend-1"))
         self.assertEqual(chain.latest, "amend-1")
@@ -148,7 +148,7 @@ class ChainsTest(unittest.TestCase):
     def test_refusal_after_reset_allows_amendment_again(self):
         chain = self.chain(*_review_events(), *_amend_events(), *_review_events("review-2"),
                            _event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task=CHAIN.subject),
+                           _event(channel.ANSWERED, subject=CHAIN.subject),
                            *_review_events("review-3"))
         self.assertEqual(chain.state, "amend")
         self.assertEqual(chain.refusals, ("review-1", "review-2", "review-3"))
@@ -157,14 +157,26 @@ class ChainsTest(unittest.TestCase):
         events = [event for n in range(review.INFRA_LIMIT)
                   for event in _review_events(f"review-{n}", "infra")]
         chain = self.chain(*events, _event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task=CHAIN.subject),
+                           _event(channel.ANSWERED, subject=CHAIN.subject),
                            *_review_events("retry", "infra"))
         self.assertEqual(chain.state, "review")
 
     def test_answer_before_park_or_for_other_subject_does_not_reset(self):
-        chain = self.chain(_event("question.answered", task=CHAIN.subject),
+        chain = self.chain(_event(channel.ANSWERED, subject=CHAIN.subject),
                            _event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task="other"))
+                           _event(channel.ANSWERED, subject="other"))
+        self.assertEqual(chain.state, "parked")
+
+    def test_task_answer_with_same_subject_resets_nothing(self):
+        chain = self.chain(*_review_events(), _event("call.parked", call=CHAIN.root),
+                           _event("question.answered", task=CHAIN.subject, subject=CHAIN.subject),
+                           _event(channel.ANSWERED, task=CHAIN.subject))
+        self.assertEqual(chain.state, "parked")
+
+    def test_new_park_requires_an_answer_after_it(self):
+        chain = self.chain(_event("call.parked", call=CHAIN.root),
+                           _event(channel.ANSWERED, subject=CHAIN.subject),
+                           _event("call.parked", call=CHAIN.root))
         self.assertEqual(chain.state, "parked")
 
     def test_finished_root_precedes_parked(self):
@@ -181,16 +193,16 @@ class ChainsTest(unittest.TestCase):
 
     def test_each_answer_after_the_last_park_resets_again(self):
         chain = self.chain(_event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task=CHAIN.subject),
+                           _event(channel.ANSWERED, subject=CHAIN.subject),
                            *_review_events(),
-                           _event("question.answered", task=CHAIN.subject))
+                           _event(channel.ANSWERED, subject=CHAIN.subject))
         self.assertEqual(chain.state, "review")
         self.assertEqual(chain.refusals, ("review-1",))
 
     def test_in_flight_review_takes_precedence_over_reset(self):
         chain = self.chain(*_review_events(outcome=None),
                            _event("call.parked", call=CHAIN.root),
-                           _event("question.answered", task=CHAIN.subject))
+                           _event(channel.ANSWERED, subject=CHAIN.subject))
         self.assertEqual(chain.state, "reviewing")
 
     def test_review_after_amendment_can_approve(self):
@@ -213,7 +225,7 @@ class ChainsTest(unittest.TestCase):
                   _event("call.ended", call="bad", outcome="done"),
                   _event("call.started", role="skeleton", subject="x", branch="x"),
                   _event("call.ended"), _event("call.parked"), _event("call.finished"),
-                  _event("question.answered"), _event("run.started", task=CHAIN.root, kind="review"),
+                  _event(channel.ANSWERED), _event("run.started", task=CHAIN.root, kind="review"),
                   _event("run.ended", run="review-1")]
         self.assertEqual(self.chain(*events), CHAIN)
 
@@ -232,10 +244,10 @@ class ChainsTest(unittest.TestCase):
 
 
 class BriefTest(unittest.TestCase):
-    def brief(self, chain=CHAIN, diff="+short\n", *, designs=()):
+    def brief(self, chain=CHAIN, diff="+short\n", *, designs=(), answers=""):
         """Use distinctive facts and optional changed designs for exact assertions."""
         return review.brief(chain, run_id="run-1", base="base", tip="tip", stat="file | 1 +\n",
-                            diff=diff, report="/reports/run-1.md", designs=designs)
+                            diff=diff, report="/reports/run-1.md", designs=designs, answers=answers)
 
     def test_sections_facts_findings_and_original_brief_in_order(self):
         with tmp_home() as home:
@@ -297,6 +309,21 @@ class BriefTest(unittest.TestCase):
             text = self.brief()
             self.assertNotIn("# Earlier findings", text)
             self.assertNotIn("Amended by", text)
+
+    def test_answers_follow_findings_or_review_facts_and_precede_diff(self):
+        with tmp_home():
+            for refusals in ((), ("refusal-1",)):
+                with self.subTest(refusals=refusals):
+                    chain = replace(CHAIN, refusals=refusals)
+                    plain = self.brief(chain)
+                    self.assertNotIn(channel.SECTION, plain)
+                    self.assertEqual(self.brief(chain, answers=""), plain)
+                    text = self.brief(chain, answers="Question: Capacity?\nAnswer (user): Buy it")
+                    earlier = "# Earlier findings" if refusals else "# Your review"
+                    self.assertLess(text.index(earlier), text.index(channel.SECTION))
+                    self.assertLess(text.index(channel.SECTION), text.index("# The diff"))
+                    self.assertEqual(text.replace(channel.SECTION +
+                                     "\n\nQuestion: Capacity?\nAnswer (user): Buy it\n\n", ""), plain)
 
     def test_short_diff_is_whole_including_trailing_blank_lines(self):
         with tmp_home():
@@ -362,7 +389,10 @@ class StartTest(unittest.TestCase):
     def test_git_snapshot_detached_checkout_and_review_launch(self):
         with tmp_home() as home:
             fake = _review_runner()
-            events = [_event("run.started", task=CHAIN.root), _event("run.started", task="other")]
+            events = [_event("run.started", task=CHAIN.root), _event("run.started", task="other"),
+                      _event(channel.ANSWERED, subject=CHAIN.subject, answer="Buy capacity"),
+                      _event(channel.ANSWERED, subject="other", answer="Ignore other subject"),
+                      _event("question.answered", task=CHAIN.subject, answer="Ignore task answer")]
             # The fake accepts the numbered launch while all commands remain observable.
             fake.on(["ssh"], Result(0, "codex-2 /state/codex-2\n"))
             path = home / "custom/log.jsonl"
@@ -396,6 +426,9 @@ class StartTest(unittest.TestCase):
             self.assertEqual(fake.calls[-2].input, text)
             self.assertIn("- Amended by: amend-1", text)
             self.assertIn("+change", text)
+            self.assertIn(channel.SECTION, text)
+            self.assertIn("Answer (-): Buy capacity", text)
+            self.assertNotIn("Ignore", text)
 
     def test_retire_start_passes_changed_designs_at_the_reviewed_tip(self):
         """Consistency reviews list designs from the plan history at this branch's tip."""
