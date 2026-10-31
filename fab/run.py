@@ -46,8 +46,10 @@ def next_run(task_id: str, events: Iterable[dict]) -> str:
 def branch_for(task: Task, kind: str, events: Iterable[dict]) -> str:
     """implement and review: the task id; repair: the branch of the task's last run.started
     (the task id if none); rebase: `<task>-r<n>`, n counting the task's earlier rebase runs from 1;
-    tests and accept (fab.acceptance.KINDS): the run's own id, next_run(task.id, events), so
-    each of their runs pushes a fresh branch from origin/main."""
+    tests and accept (fab.acceptance.KINDS): fab.acceptance.BRANCH of the run's own id,
+    `accept/<next_run(task.id, events)>`, so each of their runs pushes a fresh branch from
+    origin/main, and none is under a spec task's branch `<draft>/<task>` (git cannot hold
+    `<draft>/<part>` and `<draft>/<part>/tests-1` at once)."""
     if kind not in KINDS:
         raise ValueError(f"unknown run kind {kind!r}")
     started = [event for event in events
@@ -144,7 +146,8 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
     The brief's role text is role_text(task.repo, kind); tests and accept runs (fab.acceptance)
-    add their worktree as implement does, on branch_for's fresh branch from origin/main.
+    add their worktree as implement does, on branch_for's fresh branch (`accept/<run>`) from
+    origin/main.
     The brief is also kept on this machine at FAB_HOME/runs/<run>/brief.md. run.started carries
     run, task, kind, host, dir (the worktree), branch, base ("origin/main"), codex (the id),
     state (codex-run's state directory) and report (the builder's report path).

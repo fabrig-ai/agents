@@ -175,14 +175,14 @@ class History:
     def run(self, task: str, *, kind: str = "implement", outcome: str | None = None,
             branch: str | None = None, report: str | None = None) -> str:
         """A run of task: run.started (run `<task>-<n>`, n counting this history's starts of
-        task; host "builder"; branch, default the run id for fab.acceptance's kinds and the
-        task otherwise) and, given an outcome, its run.ended; report, when given, is kept as
+        task; host "builder"; branch, default fab.acceptance.BRANCH of the run id for its kinds
+        and the task otherwise) and, given an outcome, its run.ended; report, when given, is kept as
         the run's report text. Return the run id."""
         count = sum(event["ev"] == "run.started" and event.get("task") == task
                     for event in self.events)
         run_id = f"{task}-{count + 1}"
         if branch is None:
-            branch = run_id if kind in acceptance.KINDS else task
+            branch = acceptance.BRANCH.format(run_id) if kind in acceptance.KINDS else task
         self.add("run.started", run=run_id, task=task, kind=kind, host="builder",
                  branch=branch, base="origin/main")
         if report is not None:

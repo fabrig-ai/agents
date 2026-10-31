@@ -31,6 +31,18 @@ class PendingTest(unittest.TestCase):
         self.assertEqual((result.testsRun, result.skipped), (1, []))
 
 
+class BranchTest(unittest.TestCase):
+    def test_a_run_branch_is_apart_from_a_spec_task_named_after_its_part(self):
+        history = History()
+        runs = [history.run("draft/core/tests", kind="tests"),
+                history.run("draft/core/accept-1", kind="accept")]
+        branches = [event["branch"] for event in history.events]
+        self.assertEqual(branches, [acceptance.BRANCH.format(run) for run in runs])
+        self.assertEqual(branches, ["accept/draft/core/tests-1", "accept/draft/core/accept-1-1"])
+        for branch in branches:  # git cannot hold the spec's `draft/core` and a ref under it
+            self.assertFalse(branch == "draft/core" or branch.startswith("draft/core/"))
+
+
 @support.pending("agents-rebuild/acceptance")
 class StoryTest(unittest.TestCase):
     """A part and its slice, from the skeleton landing to the slice done."""

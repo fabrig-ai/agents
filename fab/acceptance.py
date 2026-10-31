@@ -11,6 +11,9 @@ written once every part of the slice is designed, and accepted once they are all
 No spec holds these tasks. `tasks` derives them from the plan, its specs and the log, and
 the tick adds them to the specs' tasks, so the fold, runs, gates and landing treat them as
 any task. Their ids have three parts, `<draft>/<unit>/<name>`, where a spec's have two.
+Their runs push branches under BRANCH, apart from the specs' `<draft>/<task>`: a spec task
+named after its part would otherwise hold the ref `<draft>/<part>` that git needs free for
+`<draft>/<part>/tests-1`.
 """
 
 from __future__ import annotations
@@ -28,6 +31,7 @@ SLICE = "slice-{}"  # a slice's unit key, from its number
 TESTS_PREFIX = "fab/tests/test_accept_"  # every acceptance test module's path starts so
 SUPPORT = "fab/tests/support.py"  # the shared test vocabulary, pending among it
 TASKS_DIR = "docs/plan/{}/tasks"  # a draft's task specs, where a red accept run writes its fix
+BRANCH = "accept/{}"  # a run's branch, from its run id; no spec's branch is under it
 GREEN = "Done: accepted"  # the first line of a green accept run's report (fab/roles/accepter.md)
 TESTS_MINUTES = 40  # the test-writer's expected minutes
 ACCEPT_MINUTES = 15  # the accept run's

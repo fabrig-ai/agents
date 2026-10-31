@@ -85,7 +85,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   new event never breaks an old reader.
 - **Ids:** a task is `<draft>/<task>`; a run is `<task>-<n>`, n counting the
   task's runs from 1; a branch is `<draft>/<task>` and a rebase pushes
-  `<draft>/<task>-r<n>`.
+  `<draft>/<task>-r<n>`. A test-writer or accept run (13.1) pushes
+  `accept/<run>`, apart from the specs' branches: a spec task named after
+  its part holds `<draft>/<part>`, and git cannot also hold a ref under it.
 
 ## 4. Plans and tasks
 
@@ -440,7 +442,7 @@ it, and the flow grows from a small start rather than to a fixed cap.
   them from the plan, its specs and the log, `<draft>/<unit>/tests` and
   `<draft>/<unit>/accept-<k>`, and adds them to the specs' tasks, so the
   fold, runs, gates, `fab land` and `fab status` treat them as any task.
-  Each of their runs pushes a fresh branch, its run id. They never ask: a
+  Each of their runs pushes a fresh branch, `accept/<run>`. They never ask: a
   `Question:` parks the task for judgement by hand, since the answerer has
   no spec to answer in. Readers wait for a part's tasks, not its acceptance;
   the part's status is done only once it is accepted. Parts not in feature

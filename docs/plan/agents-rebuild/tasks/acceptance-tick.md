@@ -26,7 +26,9 @@ are on main when you start: the tick is split into functions by then, and
 - `fab/run.py`: KINDS gains `"tests"` and `"accept"` (fab.acceptance.KINDS);
   EFFORTS gains `"tests": "high"` and `"accept": "medium"`.
   `role_text(repo, kind="implement")` reads `fab.acceptance.ROLES[kind]` for
-  those kinds. `branch_for` gives a tests or accept run its own run id.
+  those kinds. `branch_for` gives a tests or accept run
+  `fab.acceptance.BRANCH` of its own run id, `accept/<run id>`, never a
+  branch under a spec task's `<draft>/<task>`.
   `brief` leaves out `(spec ...)` when the task's path is empty. `start`
   passes its kind to `role_text`.
 - `fab/dispatch.py`: as the docstrings of `decide`, `call_actions` and
@@ -40,11 +42,15 @@ are on main when you start: the tick is split into functions by then, and
 
 - `fab/tests/test_run.py`: `role_text("agents", "tests")` and `"accept"`
   start with their role files, then the taste file; `branch_for` for both
-  kinds gives the next run id; `brief` of a task with an empty path has the
-  line `- Task: <id>` and no `spec`; `start` of a tests task adds the
-  worktree with `-b <run id>` from origin/main, writes the test-writer's role
+  kinds gives `accept/` and the next run id; `brief` of a task with an empty
+  path has the line `- Task: <id>` and no `spec`; `start` of a tests task
+  adds the worktree with `-b accept/<run id>` from origin/main, writes the test-writer's role
   in the brief and starts Codex at effort high (accept: medium). The
   existing loops over KINDS take the new kinds' branch and effort.
+  A regression test: a draft `d` whose part `core` has a spec task `core`
+  (its branch `d/core`): the branches of `d/core/tests` and
+  `d/core/accept-1` runs neither equal `d/core` nor start with `d/core/`
+  (git cannot hold a ref and one under it at once).
 - `fab/tests/test_dispatch.py`, with `fab.tests.support`'s builders:
   - decide: an owned tests task starts with run_kind `tests`; a rejected
     accept task starts with run_kind `accept` and its rejection; a part whose

@@ -143,7 +143,9 @@
   part is done when its tasks have landed. Parts designed before then owe
   no acceptance once their tasks have all landed. The red accept run writes
   the part's repair spec itself; the user's model gives repair tasks to the
-  foreman (`foreman-repairs` may take it over).
+  foreman (`foreman-repairs` may take it over). Their runs' branches are
+  `accept/<run>` (`fab.acceptance.BRANCH`), since the run id under
+  `<draft>/<part>/` collided with a spec task named after its part.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
