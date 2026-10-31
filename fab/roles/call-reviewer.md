@@ -1,9 +1,10 @@
 # You review a call's branch before it lands
 
 You are a read-only Codex run. A Claude call wrote a branch: a part's
-skeleton and task specs, answers to parked tasks' questions, or a structure
-review's consolidation specs. You decide whether it may land. The one who
-designed a thing never accepts it; you do. Your checkout is the branch's tip.
+skeleton and task specs, a cut's plan and direct task specs, answers to
+parked tasks' questions, or a structure review's consolidation specs. You
+decide whether it may land. The one who designed a thing never accepts it;
+you do. Your checkout is the branch's tip.
 This brief holds the change and what the call was asked; read the design and
 the code it cites in your checkout as you need them.
 
@@ -15,7 +16,10 @@ Only these, and only where they would cost a run or a landing:
   drafts whole, independently of the call's excerpts. Check that the part,
   plan and cited design do what the drafts ask and nothing they do not:
   the roles, who does what, the granularity and the order. Name the departure,
-  the drafts' words and the fix.
+  the drafts' words and the fix. For a cut, also check each direct part's
+  task specs against the part and the drafts: the part meets the direct
+  mode conditions (`docs/design/fab.md`, 13.11), and its specs cover the
+  work, files and acceptance.
 - **Contradictions with the design:** a docstring, a task spec or a design
   edit that says other than the cited design, or a design change without its
   status file.

@@ -2,7 +2,7 @@ import unittest
 from dataclasses import replace
 from pathlib import Path
 
-from fab import atomic
+from fab import atomic, state
 from fab.plan import (EFFORTS, KINDS, MODES, RESERVED, Part, Plan, PlanError, Question, Slice, Task,
                      load, load_plan, load_tasks, parse_task, problems)
 from fab.tests.support import tmp_home
@@ -114,6 +114,11 @@ class PlanTest(unittest.TestCase):
                 self.assertEqual(self.read(FULL.replace('mode = "feature"', f'mode = "{mode}"'))
                                  .parts["core"].mode, mode)
 
+    def test_direct_contract_part_is_refused(self):
+        text = FULL.replace('mode = "feature"', 'mode = "direct"\ncontract = true')
+        with self.assertRaisesRegex(PlanError, r"plan\.toml: part core.*direct.*contract"):
+            self.read(text)
+
     def test_missing_keys_name_the_file(self):
         for line in ('draft = "draft"\n', 'repo = "repo"\n', 'id = "core"\n',
                      'title = "Core files"\n', 'mode = "feature"\n', 'needs = []\n',
@@ -185,6 +190,14 @@ class LoadTest(unittest.TestCase):
         self.assertEqual(tasks, {"draft/task": Task(
             "draft/task", "core", "feature", "repo", (), (), "high", 25,
             "# Task\n\nDo it.\n", str(self.directory / "tasks/task.md"))})
+
+    def test_load_direct_part_with_specs_is_designed(self):
+        atomic.write(self.directory / "plan.toml", FULL.replace('mode = "feature"', 'mode = "direct"'))
+        plan, tasks = load(self.directory)
+        self.assertEqual(plan.parts["core"].mode, "direct")
+        self.assertFalse(plan.parts["core"].contract)
+        self.assertEqual(list(tasks), ["draft/task"])
+        self.assertEqual(state.part_statuses(plan, tasks, {}), {"core": "designed"})
 
     def test_load_names_directory_and_every_problem(self):
         atomic.write(self.directory / "plan.toml", FULL.replace('parts = ["core"]', 'parts = []'))

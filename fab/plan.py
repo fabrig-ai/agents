@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-MODES = ("feature", "migration", "fix", "probe")
+MODES = ("feature", "migration", "fix", "probe", "direct")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
 EFFORTS = ("medium", "high")
 RESERVED = ("cut", "retire", "review")  # call subjects `<draft>/<name>` (fab.designer); not part ids
@@ -148,6 +148,8 @@ def _plan_tables(data, path, value, strings):
                     needs_landed=strings(item, "needs_landed"))
         if part.mode not in MODES:
             raise PlanError(f"{path}: part {part.id} has unknown mode {part.mode!r}")
+        if part.mode == "direct" and part.contract:
+            raise PlanError(f"{path}: part {part.id} is direct and cannot be a contract")
         if part.id in parts:
             raise PlanError(f"{path}: duplicate part {part.id}")
         parts[part.id] = part
