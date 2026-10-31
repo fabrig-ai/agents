@@ -2,7 +2,7 @@
 id = "brief-sections"
 part = "calls"
 kind = "feature"
-needs = ["designer"]
+needs = ["designer", "accounting"]
 files = ["fab/calls.py", "fab/call_review.py", "fab/designer.py", "fab/tests/test_calls.py", "fab/tests/test_call_review.py", "fab/tests/test_designer.py"]
 effort = "high"
 minutes = 30

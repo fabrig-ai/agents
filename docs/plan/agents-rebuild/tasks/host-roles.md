@@ -2,7 +2,7 @@
 id = "host-roles"
 part = "dispatch"
 kind = "feature"
-needs = ["foreman-tick"]
+needs = ["foreman-tick", "run-place", "accounting"]
 files = ["fab/hosts.py", "fab/dispatch.py", "fab/run.py", "fab/report.py", "fab/landing_report.py", "fab/code_report.py", "fab/flow.py", "fab/tests/test_package.py", "fab/tests/test_dispatch.py", "fab/tests/test_run.py", "fab/tests/test_report.py", "fab/tests/test_flow.py"]
 effort = "medium"
 minutes = 30
