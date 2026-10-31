@@ -171,6 +171,18 @@
   `plans-tick`. Until then `decide` starts rejected tasks first, then
   runnable ones in their specs' order, and a spec's `consolidation` key is
   ignored.
+- **Events are a skeleton:** `fab/wake.py` holds 13.9's want file, the
+  wake from any machine, the round's close (the lost-event note, the tick
+  waking itself) and the tick's four units; `fab.hosts.this` names this
+  machine's entry. The task `wake` fills the module, registers `fab wake`
+  and makes the wakers wake: a Codex unit's ExecStopPost, a call's end, `fab
+  land`, `fab page answer` and the queue's cycle. `wake-tick` makes the tick
+  take the want, wait for its lock as an event tick, close each round, and
+  fills `fab wake --install`, after `buffer-order` since it changes
+  `fab/dispatch.py`. Until both land the transient `fab-tick.timer` ticks
+  every 2 minutes and wants pile up unread in `FAB_HOME/tick.want`. Once
+  they land, `fab wake --install` on hel8 starts the units, and each
+  builder needs ssh to hel8 for its runs' wakes.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

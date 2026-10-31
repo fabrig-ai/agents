@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import socket
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -45,6 +48,20 @@ def parse(text: str) -> dict[str, Host]:
 
 def load(path: Path = DEFAULT) -> dict[str, Host]:
     return parse(path.read_text())
+
+
+def this_name(hostnames: Mapping[str, str], name: str | None = None) -> str:
+    """This machine's entry name: name when given, else the FAB_HOST environment variable
+    when set, else the first key of hostnames (entry name to its hostname) whose value equals
+    socket.gethostname(), else "". A given or FAB_HOST name is returned as it is, even ""
+    or a name hostnames lacks. fab.heavy.settings and this use it."""
+    raise NotImplementedError
+
+
+def this(hosts: Mapping[str, Host], name: str | None = None) -> Host | None:
+    """This machine's Host: hosts[this_name({entry: host.hostname}, name)], None when hosts
+    has no such entry."""
+    raise NotImplementedError
 
 
 def problems(host: Host) -> list[str]:

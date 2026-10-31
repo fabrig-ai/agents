@@ -46,6 +46,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/reports/` on hel8 | the standing reports, one file per draft and day (section 10) |
 | `FAB_HOME/digests/<run>.md` on hel8 | each gated branch's structure digest (section 12) |
 | `FAB_HOME/user.md` on hel8 | the user's page: their open questions and the latest reports (13.6) |
+| `FAB_HOME/tick.want` on hel8 | the reasons the tick was woken since it last ran (13.9) |
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 | `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
@@ -732,24 +733,43 @@ before it lands (13.1).
 At the user's word (10-30): the loop reacts to what happens, and polling is
 only the backstop.
 
-- **An event starts a tick.** Whatever ends work the dispatcher waits for
-  starts `fab-tick.service` on hel8: a Codex run's unit when it stops (its
-  ExecStopPost, over ssh from the builder), a Claude call when it ends, the
-  queue when it records `landed` or `rejected`, `fab land` when it lands, a
-  question answered by hand.
-- **Events coalesce.** Starting the tick while one runs or waits to run adds
-  nothing: systemd keeps at most one start pending, so a burst of events
-  makes one tick after the running one, never a queue of them. A tick reads
-  every new record anyway.
-- **The timer is the backstop,** never the driver: it ticks every 10 minutes
-  (the user, 10-30), for a lost event or a host that could not reach hel8.
-  In normal operation every change of state arrives as an event, so the
-  backstop tick finds nothing to do; a backstop tick that does act is a lost
-  event, and it logs a note saying so. Until the events are in place the
-  timer stays at 2 minutes.
-- **A tick that wants another starts one:** when a tick's own actions end
-  work the next decision depends on (a landing that makes tasks runnable,
-  a finished call), it starts the next tick at its end.
+- **An event wakes the tick** (`fab/wake.py`). Whatever ends work the
+  dispatcher waits for appends a reason to the want file,
+  `FAB_HOME/tick.want` on hel8, beside the log: a Codex run's unit when it
+  stops (its ExecStopPost runs `fab wake codex <id>`, over ssh from the
+  builder), a Claude call when it logs `call.ended`, the queue at the end of
+  a cycle that recorded `landed` or `rejected` (one wake per cycle), `fab
+  land` when it lands or refuses, and the user's answer (`fab page answer`).
+  On hel8 a wake is one appended line; elsewhere it is one ssh to the host
+  with the role dispatcher. A wake that fails is not retried: the backstop
+  finds its work.
+- **Events coalesce.** A path unit (`fab-events.path`, PathExists on the
+  want) starts `fab-events.service`, `fab tick --trigger event`, whenever
+  the want exists and the tick is not running. The tick takes the want
+  (renames it away) first under its lock, so a burst of wakes makes one tick
+  after the running one, never a queue of them, and a wake during a tick
+  makes the next. An event tick waits for the lock; a hand or backstop tick
+  that finds it held exits. A tick reads every new record anyway.
+- **The timer is the backstop,** never the driver: `fab-backstop.timer`
+  ticks every 10 minutes (the user, 10-30) as `fab tick --trigger backstop`,
+  for a lost event or a host that could not reach hel8. In normal operation
+  every change of state arrives as an event, so the backstop finds nothing
+  to do. A backstop tick that took a want, collected an ended run or
+  imported a queue record found a lost event, and logs a note saying so
+  (`lost event: ...`); its other work (an answer due after 30 minutes, a
+  review after 4 hours, a builder become calm, a retried failure) is the
+  timer's by nature and is not noted. `fab wake --install [PLAN_DIR...]`
+  writes the four units into `~/.config/systemd/user`, enables the path and
+  the timer and stops the transient 2-minute `fab-tick.timer`; until then
+  that timer ticks.
+- **A tick that wants another starts one:** when the log gained, during a
+  tick, a record the next decision depends on (`run.ended`, `branch.landed`,
+  `branch.rejected`, `question.asked`, `question.answered`,
+  `refusal.settled`, `call.finished`, `call.parked`, `call.answered`), the
+  tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
+  row with no outside wake between them stop the chain with a note: a chain
+  that long is a fault, and the next tick waits for an event or the
+  backstop.
 
 ### 13.10 The timeline's flow
 
@@ -806,6 +826,9 @@ things fab follows, whatever the clock says:
   branches are suspects, CPU accounting against the tiers' budgets, and the
   landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
+- The tick's event and backstop units kept by fleet, as the queue's will be;
+  lost-event notes counted in the code report; a wake retried before the
+  backstop, if those notes show wakes are lost.
 - The flow's target and each builder's calm in the code report, beside runs
   in flight per hour; the target shared across plans (13.4).
 - The buffer's order across plans: each plan orders its own runnable tasks

@@ -1,0 +1,173 @@
+"""Events start the tick; the timer is only the backstop (docs/design/fab.md, 13.9).
+
+Whatever ends work the dispatcher waits for wakes the tick: it appends a reason to the want
+file beside the log on the dispatcher's machine (hel8), over ssh from any other machine
+(`fab wake REASON...`). A systemd path unit starts the event tick while the file exists, so
+a burst of wakes makes one tick after the running one. The tick takes the file under its
+lock before it reads anything; at its end it wants another when its own records call for
+one. A backstop round, on a 10-minute timer, that finds what only an event explains logs a
+note: a lost event.
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from collections.abc import Iterable, Mapping, Sequence
+from pathlib import Path
+
+from fab import hosts as machines, log
+from fab.hosts import Host
+from fab.sh import Runner, run, ssh
+
+WANT = "tick.want"  # beside the log: one reason per line; its existence is the wake
+TAKEN = ".tick.want.taken"  # the want a tick has taken, beside it, until read
+TRIGGERS = ("hand", "event", "backstop")  # what started a tick round
+AGAIN = ("run.ended", "branch.landed", "branch.rejected", "question.asked", "question.answered",
+         "refusal.settled", "call.finished", "call.parked", "call.answered")  # a round's records that want another
+AGAIN_LIMIT = 5  # rounds in a row that may want another with no outside wake between them
+EVENT_PATH = "fab-events.path"  # starts EVENT_SERVICE while the want exists
+EVENT_SERVICE = "fab-events.service"  # `fab tick --trigger event`
+BACKSTOP_TIMER = "fab-backstop.timer"  # starts BACKSTOP_SERVICE every 10 minutes
+BACKSTOP_SERVICE = "fab-backstop.service"  # `fab tick --trigger backstop`
+BACKSTOP = "*:0/10"  # the backstop's OnCalendar (the user, 10-30)
+TIMEOUT = "10min"  # each tick service's TimeoutStartSec, as the transient tick had
+OLD_TIMER = "fab-tick.timer"  # the transient 2-minute tick the units replace
+
+
+def want_path(log_path: Path | None = None) -> Path:
+    """The want file: WANT beside the log, log_path (default fab.log.default_path()). Pure."""
+    raise NotImplementedError
+
+
+def want(reason: str, *, path: Path | None = None) -> Path:
+    """Wake the tick on this machine: append reason as one line to path (default
+    want_path()), creating it and its parents; return path.
+
+    reason's line breaks become spaces and it is stripped; a blank reason is `-`. The line
+    goes in one os.write on a descriptor opened O_WRONLY | O_APPEND | O_CREAT (mode 0o600), so
+    concurrent wakers never lose each other's lines and never replace the file: this is the
+    one file fab appends to without a sibling and a rename, as the log is. The caller is on
+    the dispatcher's machine (calls, fab land, fab page answer, the tick); any other machine
+    calls wake."""
+    raise NotImplementedError
+
+
+def take(path: Path | None = None) -> list[str] | None:
+    """Take the want at path (default want_path()): None when there is none; else rename it
+    to TAKEN beside it (replacing a TAKEN a crashed tick left), read that, remove it, and
+    return its stripped non-blank lines in order ([] for an empty want).
+
+    The rename comes first, so a wake that arrives while the taken file is read makes a new
+    want, and the path unit starts another round for it. The tick calls this first under
+    its lock, before it reads the log or any machine."""
+    raise NotImplementedError
+
+
+def wake(reason: str, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
+         here: str | None = None) -> bool:
+    """Wake the tick from wherever this runs; return whether the wake was delivered.
+
+    hosts defaults to fab.hosts.load(); this machine is fab.hosts.this(hosts, here). When it
+    has the role dispatcher: want(reason), True. Otherwise the dispatcher is the first host
+    by name with that role (none: False, nothing run), and the wake is one
+    sh(ssh(<its ssh>, ["fab", "wake", reason])), True when it exits 0. Never raises for a
+    failed ssh: a lost wake waits for the backstop. A machine not in hosts counts as not the
+    dispatcher."""
+    raise NotImplementedError
+
+
+def wanted(records: Iterable[dict]) -> list[str]:
+    """The AGAIN types among records' ev, each once, in the order they first appear. Pure.
+
+    records are those the log gained during a round: one of these means the round ended
+    work the next decision depends on (a run ended, a branch landed or was refused, a
+    question asked or answered, a call's chain finished or parked)."""
+    raise NotImplementedError
+
+
+def again(kinds: Sequence[str], taken: Sequence[str]) -> str | None:
+    """The reason a round whose records hold kinds (wanted's, not empty) wants another under,
+    or None when AGAIN_LIMIT rounds in a row already have. Pure.
+
+    The reason is `tick <n>: <kinds joined by ", ">`. n is 1 + the largest n of the taken
+    reasons when taken is not empty and every one of them is a tick's own (`tick <n>: ...`,
+    n a positive integer); otherwise 1 (an outside wake, a hand round, a backstop round).
+    None when n would exceed AGAIN_LIMIT: a chain that long is a fault, not work."""
+    raise NotImplementedError
+
+
+def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
+    """What a backstop round found that only an event explains, in this order: `wake
+    <reason>` per taken reason (a want no event round started for); then, in records' order,
+    `run.ended <run>` per run.ended record (a builder's wake did not arrive) and `<ev> <task>`
+    per record carrying queue_ts (a record imported from the queue's, whose wake did not
+    arrive). records are those the log gained during the round. A run that ends just as the
+    backstop collects it reads the same; that race is rare. Pure."""
+    raise NotImplementedError
+
+
+def settle(trigger: str, taken: Sequence[str] | None, records: Sequence[dict], *,
+           path: Path | None = None, log_path: Path | None = None) -> list[str]:
+    """Close a tick round and return the lines the tick prints for it, in order.
+
+    trigger is one of TRIGGERS (ValueError otherwise); taken what take gave at the round's
+    start; records what the log gained since (other writers' records included).
+    1. trigger backstop: when lost(taken, records) is not empty, log a note (log_path) with
+       text `lost event: <its items joined by "; ">`; the line is `lost - <that text>`.
+    2. kinds = wanted(records). When not empty: reason = again(kinds, taken or []); a reason
+       is want(reason, path=path) with the line `again - <reason>`; None logs a note with
+       text `tick: <AGAIN_LIMIT> rounds in a row wanted another; the next waits for an event
+       or the backstop` and the line `again - stopped`.
+    The note of step 1 is not in records and wants nothing."""
+    raise NotImplementedError
+
+
+def units(plan_dirs: Sequence[Path], *, checkout: Path | None = None,
+          home: Path | None = None) -> dict[str, str]:
+    """The four unit files of the tick on hel8, keyed by name in this order: EVENT_PATH,
+    EVENT_SERVICE, BACKSTOP_TIMER, BACKSTOP_SERVICE. Pure.
+
+    checkout is fab's install (default home / "install"); home is FAB_HOME (default
+    fab.log.home()). Both and every plan dir are made absolute (Path.absolute, not
+    resolved); a path holding a newline, `%`, `$`, `"` or a backslash is a ValueError.
+    - EVENT_PATH: `[Unit]` Description `fab: start the tick while an event wants one`;
+      `[Path]` PathExists=<home>/WANT and Unit=EVENT_SERVICE; `[Install]`
+      WantedBy=default.target.
+    - EVENT_SERVICE and BACKSTOP_SERVICE: `[Unit]` Description `fab: the tick, started by an
+      event` or `fab: the tick's backstop`; `[Service]` Type=oneshot, TimeoutStartSec=TIMEOUT
+      and ExecStart=/usr/bin/bash -lc "<script>", script being, with q = shlex.quote:
+      `{ git -C <q checkout> fetch -q origin && git -C <q checkout> checkout -q --detach
+      origin/main; } || true; exec <q checkout/bin/fab> tick --trigger <event|backstop>`
+      then ` <q plan dir>` per plan dir. A failed fetch still ticks on the code it has, so
+      the path unit never retries a want into the start limit for a network fault.
+    - BACKSTOP_TIMER: `[Unit]` Description `fab: the tick's backstop, every 10 minutes`;
+      `[Timer]` OnCalendar=BACKSTOP and Unit=BACKSTOP_SERVICE; `[Install]`
+      WantedBy=timers.target.
+    Each file is its sections in that order, one blank line between them, ending with a
+    newline."""
+    raise NotImplementedError
+
+
+def install(plan_dirs: Sequence[Path], *, sh: Runner = run, directory: Path | None = None,
+            checkout: Path | None = None) -> list[Path]:
+    """Install the tick's units on this machine (hel8) and return the files written.
+
+    directory defaults to $XDG_CONFIG_HOME/systemd/user, or ~/.config/systemd/user without
+    it. In this order: units(plan_dirs, checkout=checkout) (its ValueError before anything
+    is done); each file through fab.atomic.write into directory; `systemctl --user
+    daemon-reload`; `systemctl --user enable --now EVENT_PATH BACKSTOP_TIMER` (both
+    check=True); then `systemctl --user stop OLD_TIMER` (check=False: the transient tick may
+    be gone; a tick it started finishes on its own and shares the tick's lock)."""
+    raise NotImplementedError
+
+
+def main(argv: list[str]) -> int:
+    """`fab wake REASON...` and `fab wake --install [PLAN_DIR...]`.
+
+    REASON's words joined by single spaces go to wake(reason); exit 0 when delivered, else 1
+    with `fab wake: not delivered: <reason>` on stderr. No REASON without --install: usage
+    on stderr, exit 2. With --install, the positionals are plan dirs: install(those), print
+    each path written, then `enabled <EVENT_PATH> <BACKSTOP_TIMER>`; exit 0. An OSError,
+    ValueError or fab.sh.Failed prints `fab wake: <error on one line>` on stderr, exit 1."""
+    raise NotImplementedError
