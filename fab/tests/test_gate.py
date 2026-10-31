@@ -43,6 +43,37 @@ def write(path, text):
     sibling.replace(path)
 
 
+class RecordsTest(unittest.TestCase):
+    def test_loader_passes_repo_once_and_returns_the_same_dict(self):
+        repo = Path('/workspace')
+        loaded = []
+        meta = {}
+
+        def load(path):
+            loaded.append(path)
+            return meta
+
+        once = gate.loader(load)
+        self.assertEqual(loaded, [])
+        self.assertIs(once(repo), meta)
+        self.assertIs(once(repo), meta)
+        self.assertEqual(loaded, [repo])
+
+    def test_shown_preserves_modes_and_sorts_package_names(self):
+        for selected in ('full', 'docs'):
+            self.assertEqual(gate.shown(selected), selected)
+        packages = {'normal', 'core'}
+        self.assertEqual(gate.shown(packages), ['core', 'normal'])
+        self.assertEqual(packages, {'normal', 'core'})
+        self.assertEqual(gate.shown(set()), [])
+
+    def test_step_texts_preserves_order_names_codes_and_three_decimals(self):
+        results = [gate.StepResult('ratchet:jig', ('ratchet',), 0, True, 1.2346),
+                   gate.StepResult('clippy', ('check',), 7, False, 0)]
+        self.assertEqual(gate.step_texts(results), ['ratchet:jig:0:1.235', 'clippy:7:0.000'])
+        self.assertEqual(gate.step_texts(()), [])
+
+
 class SelectionTest(unittest.TestCase):
     closure = {'core', 'normal', 'build', 'dev', 'transitive', 'always'}
 
@@ -196,6 +227,19 @@ class FilesTest(unittest.TestCase):
         self.assertTrue(all(call.cwd == str(self.repo) for call in fake.calls))
         with self.assertRaises(Failed):
             gate.metadata(self.repo, sh=FakeRunner().on(['cargo'], Result(1, err='bad manifest')))
+
+    def test_loader_defaults_to_metadata_with_injected_runner(self):
+        meta = metadata(self.repo)
+        fake = FakeRunner().on(['cargo', 'metadata'], Result(0, json.dumps(meta)))
+        once = gate.loader(sh=fake)
+        self.assertEqual(fake.calls, [])
+        loaded = once(self.repo)
+        self.assertEqual(loaded, meta)
+        self.assertIs(once(self.repo), loaded)
+        self.assertEqual(fake.argvs(), [
+            ['cargo', 'metadata', '--no-deps', '--format-version', '1', '--locked'],
+            ['cargo', 'metadata', '--format-version', '1', '--locked']])
+        self.assertTrue(all(call.cwd == str(self.repo) for call in fake.calls))
 
     def test_select_full_docs_and_tools_without_metadata_or_git(self):
         def no_load(repo):

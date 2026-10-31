@@ -39,13 +39,7 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
     atomic.write(log_path, "")
     receipt = {"tip": tip, "main": main_tip, "selection": "docs", "steps": [],
                "outcome": "conflict", "log": str(log_path)}
-    meta = None
-
-    def load_metadata(repo: Path) -> dict:
-        nonlocal meta
-        if meta is None:
-            meta = gate.metadata(repo, sh=sh) if load is None else load(repo)
-        return meta
+    load_metadata = gate.loader(load, sh=sh)
 
     try:
         git("checkout", "--detach", "--force", main_tip)
@@ -57,23 +51,29 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
         else:
             paths = gate.changed_paths(slot, base=main_tip, sh=sh)
             selected = gate.select(slot, paths, base=main_tip, sh=sh, load=load_metadata)
-            receipt["selection"] = sorted(selected) if isinstance(selected, set) else selected
+            receipt["selection"] = gate.shown(selected)
             steps = gate.ratchet_steps(slot, paths, write=False)
+            meta = load_metadata(slot) if isinstance(selected, set) else None
             steps += gate.check_steps(slot, selected, paths, meta, lane="build")
             results = gate.run_steps(steps, log_path, sh=sh)
-            receipt["steps"] = [f"{step.name}:{step.code}:{step.seconds:.3f}" for step in results]
+            receipt["steps"] = gate.step_texts(results)
             receipt["outcome"] = "green" if all(step.green for step in results) else "red"
     finally:
-        # Reset while detached so the implementer's branch never moves to the merge.
-        git("reset", "--hard", original)
-        if branch:
-            git("checkout", "--force", branch.removeprefix("refs/heads/"))
-        else:
-            git("checkout", "--detach", "--force", original)
-        git("clean", "-fd")
+        _restore(git, original, branch)
     receipt["at"] = log.now()
     atomic.write(directory / f"{tip}.json", json.dumps(receipt, indent=2) + "\n")
     return receipt
+
+
+def _restore(git, original, branch):
+    """Restore the slot's original HEAD and remove check output, without moving its branch."""
+    # Reset while detached so the implementer's branch never moves to the merge.
+    git("reset", "--hard", original)
+    if branch:
+        git("checkout", "--force", branch.removeprefix("refs/heads/"))
+    else:
+        git("checkout", "--detach", "--force", original)
+    git("clean", "-fd")
 
 
 def main(argv: list[str]) -> int:

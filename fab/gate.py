@@ -168,6 +168,30 @@ def metadata(repo: Path, *, sh: Runner = run) -> dict:
     return workspace
 
 
+def loader(load: Callable[[Path], dict] | None = None, *, sh: Runner = run) -> Callable[[Path], dict]:
+    """Load metadata for one candidate on the first call, passing its repo to load (default
+    metadata with sh); return the same dict on every later call."""
+    cached = None
+
+    def once(repo: Path) -> dict:
+        nonlocal cached
+        if cached is None:
+            cached = metadata(repo, sh=sh) if load is None else load(repo)
+        return cached
+
+    return once
+
+
+def shown(selected: str | set[str]) -> str | list[str]:
+    """The selection for a record: full or docs unchanged, package names sorted."""
+    return sorted(selected) if isinstance(selected, set) else selected
+
+
+def step_texts(results: Sequence[StepResult]) -> list[str]:
+    """The results for a record as name:code:seconds strings, seconds to three decimals."""
+    return [f"{step.name}:{step.code}:{step.seconds:.3f}" for step in results]
+
+
 def select(repo: Path, paths: Sequence[str], *, base: str = "origin/main", candidate: str = "HEAD",
            sh: Runner = run, load: Callable[[Path], dict] | None = None) -> str | set[str]:
     """The selection for a checked-out candidate: full_inputs is full without loading metadata;
