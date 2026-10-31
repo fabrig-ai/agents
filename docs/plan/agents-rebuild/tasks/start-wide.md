@@ -3,7 +3,7 @@ id = "start-wide"
 part = "wide-start"
 kind = "feature"
 needs = ["flow"]
-files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "docs/design/fab.md"]
+files = ["fab/flow.py", "fab/tests/test_flow.py", "fab/dispatch.py", "fab/drafts.py", "fab/tests/test_drafts.py", "docs/design/fab.md"]
 effort = "high"
 minutes = 40
 +++
@@ -33,3 +33,10 @@ drop of one.
   the target is never 0; a rebase conflict halves nothing; growth by one as
   before.
 - `bin/fab test` passes within the 30 s budget.
+
+## Answers
+
+- 2026-10-31, the designer: option 1. Update `fab/drafts.py` and
+  `fab/tests/test_drafts.py` too (now in files), so both users of the flow
+  target start from the plan's builders' places; in dispatch.py still only
+  what passes the places.
