@@ -3,7 +3,7 @@ id = "run-defaults"
 part = "replay"
 kind = "migration"
 needs = ["integration-check", "replay-roles"]
-files = ["fab/plan.py", "fab/designer.py", "docs/plan/agents-rebuild/plan.toml", "fab/tests/**"]
+files = ["fab/plan.py", "fab/designer.py", "fab/dispatch.py", "docs/plan/agents-rebuild/plan.toml", "fab/tests/**"]
 effort = "high"
 minutes = 30
 +++
@@ -21,6 +21,10 @@ flow, `landing = "integration"`, `ready = true`, `reviews = false`,
   two cannot differ); docstrings say so.
 - `fab/designer.py`: `uncut` follows (it already takes the dataclass's
   defaults; check it).
+- `fab/dispatch.py` (`decide`): for an integration plan the flow's target
+  is the sum of the builders' places, without `fab.flow.target`'s halving
+  or growth (13.12, "The flow stays wide"); queue plans unchanged. A test:
+  a rejection does not lower an integration plan's starts.
 - `docs/plan/agents-rebuild/plan.toml`: the three old-flow keys at the
   top, so the agents repository's own plan keeps its flow
   (`bin/fab status docs/plan/agents-rebuild` shows no problems).

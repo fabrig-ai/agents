@@ -947,6 +947,13 @@ only as tweaks once a replay matches its run.
   Since a merged task counts as landed, its dependents become runnable and
   start from the trunk's tip: the manual run's "dependents start from the
   integration tip".
+- **The flow stays wide.** An integration plan keeps its target for runs
+  in flight at its builders' places throughout: no halving on a refusal or
+  an `Infra:` outcome and no growth (13.11's start-wide rule is the queue
+  flow's), as the lead started every runnable task while slots were free.
+  The simulation of codex-kit shows why: abort's ratchet refusal halved the
+  target from 14 to 7 just as kit-lib's nine dependents became runnable,
+  and staggered them by up to six minutes.
 - **The end check.** When every task of the plan has landed on the trunk,
   the tick starts one check run of the trunk's tip: task
   `<draft>/integration`, kind `check`, in an idle slot of the builder with
