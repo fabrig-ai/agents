@@ -41,9 +41,11 @@ lines; put new steps in private functions as `tick-split` does.
     there starts nothing, as a git failure does.
 - **`fab.dispatch.decide`, step 4 (design):**
   - a part is eligible when `fab.state.part_statuses` calls it `not
-    designed`, every need is `done` there, and no question of
-    `plan.questions` with an empty answer names it;
-  - this replaces the inline rule, `landed`.
+    designed`, its needs meet `_design_action`'s existing rule (design 4:
+    a need is `designed` or `done`; a `needs_landed` or probe need is
+    `done`), and no question of `plan.questions` with an empty answer
+    names it;
+  - the open-question exclusion is the only change to that rule.
 - **`fab.dispatch.call_actions`:**
   - Only chains of the plan's draft take steps: those whose subject is the
     draft or starts with `<draft>/`.
@@ -85,7 +87,8 @@ lines; put new steps in private functions as `tick-split` does.
 - `fab/tests/test_dispatch.py`:
   - `decide` leaves out a part named by an open question, and designs it
     once the question has an answer;
-  - `decide` treats a need marked done in the plan as done;
+  - `decide` still designs a part whose need is only designed, and holds
+    one whose `needs_landed` need is only designed;
   - `call_actions`:
     - a contract call for a contract part;
     - a skeleton call and a contract call in the same tick;
@@ -117,3 +120,12 @@ lines; put new steps in private functions as `tick-split` does.
   subject.
 - A contract call and a skeleton call count as different roles for "one
   call of a role in flight". 13.4 lifts the limit later.
+
+## Answers
+
+- 2026-10-31. Q: should design eligibility keep flow's dependency rule or
+  require every need done? A: keep flow's rule (`docs/design/fab.md`,
+  section 4: needs designed or done; `needs_landed` and probe needs done)
+  and add only the open-question exclusion. The decide bullet and its
+  acceptance line above are corrected to match; the existing eligibility
+  tests stand unchanged.
