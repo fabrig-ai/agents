@@ -7,11 +7,12 @@ import json
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fab import call_review, calls, cli, log
-from fab.plan import Part, Plan, Slice, Task, load_tasks
+from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, tmp_home
 
@@ -171,6 +172,39 @@ class BriefTest(unittest.TestCase):
             partial = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed", "demo/two": "done"},
                                            root, call_id="c", branch="b", report="r")
             self.assertIn("| base | Base primitives | feature | - | designed |", partial)
+
+    def test_skeleton_and_contract_show_marker_readers_and_all_questions_in_order(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            plan.parts["base"] = replace(plan.parts["base"], contract=True)
+            plan.parts["next"] = replace(plan.parts["next"], needs=("base", "core"))
+            plan = replace(plan, questions=(Question("z", "Which budget?", ("base",)),
+                                            Question("other", "Unrelated?", ("core",)),
+                                            Question("a", "Which format?", ("base",), "TOML")))
+            for role in ("skeleton", "contract"):
+                with self.subTest(role=role):
+                    text = calls.skeleton_brief(plan, "base", tasks, {}, root,
+                                                call_id="c", branch="b", report="r", role=role)
+                    self.assertIn(calls.ROLES[role].read_text(), text)
+                    details = text.split("# Part to design\n\n")[1].split("\n\n# ")[0]
+                    expected = ("- Id: base\n- Title: Base primitives\n- Mode: feature\n"
+                                "- Needs: (none)\n- Design: design.md, 1\n- Contract: yes\n")
+                    if role == "contract":
+                        expected += "- Readers: core, next\n"
+                    expected += ("- Question z: Which budget?\n  Answer: (open)\n"
+                                 "- Question a: Which format?\n  Answer: TOML")
+                    self.assertEqual(details, expected)
+            text = calls.skeleton_brief(plan, "next", tasks, {}, root,
+                                        call_id="c", branch="b", report="r", role="contract")
+            self.assertIn("- Readers: (none)", text)
+            self.assertNotIn("- Contract: yes", text)
+
+    def test_skeleton_refuses_another_role(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            with self.assertRaisesRegex(ValueError, "role"):
+                calls.skeleton_brief(plan, "core", tasks, {}, root,
+                                     call_id="c", branch="b", report="r", role="answer")
 
     def test_absolute_spec_paths_are_presented_relative_to_the_checkout(self):
         with tmp_home() as root:

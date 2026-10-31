@@ -10,11 +10,15 @@ Retire brings a finished plan's status files current and marks the plan retired.
 
 from __future__ import annotations
 
+import argparse
+import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from fab.plan import Plan, Task
-from fab.sh import Runner, run
+from fab import atomic, calls, log, state
+from fab import run as runs
+from fab.plan import Plan, Task, load_plan, load_tasks
+from fab.sh import Failed, Runner, run
 
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
 DESIGNS = "docs/design"  # a repository's designs; its draft/ holds the user's drafts
@@ -27,7 +31,15 @@ def subject(draft: str, role: str, part: str | None = None) -> str:
     call's, so either one designs the part), decision `<draft>/<part>/decision`. ValueError
     for a role not in ROLES, a part missing for contract or decision, or a part given for
     cut or retire."""
-    raise NotImplementedError
+    if role not in ROLES:
+        raise ValueError(f"unknown designer role {role!r}")
+    if role in ("contract", "decision"):
+        if not part:
+            raise ValueError(f"{role} requires a part")
+        return f"{draft}/{part}" + ("/decision" if role == "decision" else "")
+    if part is not None:
+        raise ValueError(f"{role} takes no part")
+    return f"{draft}/{role}"
 
 
 def uncut(draft: str, repo: str, sources: Sequence[str] = ()) -> Plan:
@@ -35,27 +47,34 @@ def uncut(draft: str, repo: str, sources: Sequence[str] = ()) -> Plan:
     tuple(sources), 1.0, 2.0, {}, ()), no parts, slices or questions, not retired. The cut's
     brief reads its sources through fab.calls.drafts_text; the tick of a plan directory
     being cut runs on it (fab.dispatch.tick)."""
-    raise NotImplementedError
+    return Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ())
 
 
 def repository(checkout: Path, *, sh: Runner = run) -> str:
     """The name of checkout's repository: the key of fab.run.REMOTES whose URL equals the
     output of `git remote get-url origin` run in checkout (check=True, stripped). ValueError
     naming the URL when no key matches; fab.sh.Failed when git fails."""
-    raise NotImplementedError
+    url = sh(["git", "remote", "get-url", "origin"], cwd=str(checkout), check=True).out.strip()
+    for name, remote in runs.REMOTES.items():
+        if remote == url:
+            return name
+    raise ValueError(f"unknown repository URL {url!r}")
 
 
 def designs(root: Path) -> list[str]:
     """The repository's designs: every `*.md` directly in root/DESIGNS, except README.md and
     the status files (`*.status.md`), as repository-relative POSIX paths, sorted. The drafts
     under DESIGNS/draft/ are not designs. Empty when the directory does not exist."""
-    raise NotImplementedError
+    return sorted(path.relative_to(root).as_posix() for path in (root / DESIGNS).glob("*.md")
+                  if path.is_file() and path.name != "README.md" and not path.name.endswith(".status.md"))
 
 
 def status_path(design: str) -> str:
     """The status file beside a design: `docs/design/x.md` gives `docs/design/x.status.md`.
     ValueError for a path that does not end in `.md` or is already a status file."""
-    raise NotImplementedError
+    if not design.endswith(".md") or design.endswith(".status.md"):
+        raise ValueError(f"not a design path: {design!r}")
+    return design[:-3] + ".status.md"
 
 
 def design_index(root: Path) -> str:
@@ -65,7 +84,14 @@ def design_index(root: Path) -> str:
     design's line count, and `no status file` in place of `status ...` when status_path's
     file does not exist. `(none)` when there are no designs. The call reads the designs it
     needs itself: all of them would pass fab.calls.BRIEF_LIMIT."""
-    raise NotImplementedError
+    entries = []
+    for design in designs(root):
+        lines = (root / design).read_text(encoding="utf-8").splitlines()
+        title = next((line[2:] for line in lines if line.startswith("# ")), "(untitled)")
+        status = status_path(design)
+        note = f"status `{status}`" if (root / status).is_file() else "no status file"
+        entries.append(f"- `{design}` — {title} ({len(lines)} lines; {note})")
+    return "\n".join(entries) or "(none)"
 
 
 def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
@@ -81,7 +107,28 @@ def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
     <start>^`, check=False, fails). A path counts when it is directly in DESIGNS and is a
     design (designs' rule) or a design's status file (then its design is returned, whether
     or not that design still exists at rev)."""
-    raise NotImplementedError
+    plan_path = f"{PLANS}/{draft}/plan.toml"
+
+    def git(*args, check=True):
+        return sh(["git", *args], cwd=str(checkout), check=check)
+
+    commits = git("log", "--format=%H", "--diff-filter=A", rev, "--", plan_path).out.splitlines()
+    if not commits:
+        raise ValueError(f"no commit added {plan_path}")
+    start = commits[-1]
+    if git("rev-parse", "--verify", "-q", f"{start}^", check=False).ok:
+        paths = git("diff", "--name-only", "--no-renames", f"{start}^", rev, "--", f"{DESIGNS}/").out
+    else:
+        paths = git("ls-tree", "-r", "--name-only", rev, "--", f"{DESIGNS}/").out
+    changed = set()
+    for name in paths.splitlines():
+        path = Path(name)
+        if path.parent.as_posix() != DESIGNS or not name.endswith(".md"):
+            continue
+        design = name.removesuffix(".status.md") + ".md" if name.endswith(".status.md") else name
+        if Path(design).name != "README.md":
+            changed.add(design)
+    return sorted(changed)
 
 
 def retire_due(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> bool:
@@ -91,7 +138,16 @@ def retire_due(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) ->
     role retire and subject `<draft>/retire` has a call.ended with outcome done. A retire
     call in flight, a parked subject or an open chain is fab.dispatch.call_actions' to
     check, as for every call. Pure."""
-    raise NotImplementedError
+    if plan.retired or not plan.parts:
+        return False
+    statuses = {key: view.status for key, view in state.fold(tasks, events).items()}
+    if any(status != "done" for status in state.part_statuses(plan, tasks, statuses).values()):
+        return False
+    completed = {event["call"] for event in events
+                 if event.get("ev") == "call.ended" and event.get("outcome") == "done"}
+    return not any(event.get("ev") == "call.started" and event.get("role") == "retire"
+                   and event.get("subject") == subject(plan.draft, "retire")
+                   and event.get("call") in completed for event in events)
 
 
 def enlist(plan_dir: Path) -> bool:
@@ -99,7 +155,16 @@ def enlist(plan_dir: Path) -> bool:
     of FAB_HOME/plans, unless a line already names it; return whether it was added. The
     file is created when missing and rewritten whole through fab.atomic.write, its lines
     kept in order with the new one last."""
-    raise NotImplementedError
+    path = log.home() / "plans"
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        lines = []
+    resolved = str(plan_dir.resolve())
+    if any(str(Path(line).resolve()) == resolved for line in lines):
+        return False
+    atomic.write(path, "\n".join([*lines, resolved]) + "\n")
+    return True
 
 
 def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str) -> str:
@@ -118,7 +183,19 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str)
        when it is empty (a repository without fab/).
 
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
-    raise NotImplementedError
+    plans = sorted(path.relative_to(root).as_posix() for path in (root / PLANS).glob("*/plan.toml")
+                   if path.is_file())
+    return calls._brief([
+        ("Role", calls.ROLES["cut"].read_text(encoding="utf-8")),
+        ("Call facts", calls._facts(call_id, branch, report)),
+        ("The draft", f"- Draft: {plan.draft}\n- Repository: {plan.repo}\n"
+         f"- Plan: write `{PLANS}/{plan.draft}/plan.toml`\n"
+         f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
+        ("The user's drafts", calls.drafts_text(plan, root)),
+        ("Designs", design_index(root)),
+        ("Plans", "\n".join(f"- `{path}`" for path in plans) or "(none)"),
+        ("Inventory", calls.render_inventory(calls.inventory(root)) or "(none)"),
+    ])
 
 
 def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: dict[str, str],
@@ -141,7 +218,31 @@ def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
 
     ValueError when part_id is not a part of the plan, its mode is not probe, or the report
     cannot be read (naming its path); past fab.calls.BRIEF_LIMIT as every call's brief."""
-    raise NotImplementedError
+    if part_id not in plan.parts:
+        raise ValueError(f"unknown part {part_id!r}")
+    part = plan.parts[part_id]
+    if part.mode != "probe":
+        raise ValueError(f"part {part_id!r} is not a probe")
+    report_path = log.home() / "runs" / run_id / "report.md"
+    try:
+        probe_report = report_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError(f"cannot read {report_path}: {error}") from error
+    parts = state.part_statuses(plan, tasks, statuses)
+    readers = [f"- {item.id} — {item.title} (design: {item.design}; {parts[item.id]})"
+               for item in plan.parts.values() if part_id in item.needs]
+    return calls._brief([
+        ("Role", calls.ROLES["decision"].read_text(encoding="utf-8")),
+        ("Call facts", calls._facts(call_id, branch, report)),
+        ("Plan parts and slices", calls._parts_table(plan, tasks, statuses) +
+         f"\n\nPlan: `{PLANS}/{plan.draft}/plan.toml`"),
+        ("The probe", f"- Part: {part.id}\n- Title: {part.title}\n- Design: {part.design}\n"
+         f"- Run: {run_id}\n- Report: `{report_path}`"),
+        ("The probe's report", probe_report),
+        ("Its readers", "\n".join(readers) or "(none)"),
+        ("The user's drafts", calls.drafts_text(plan, root)),
+        ("Cited design", calls.design_text(root, part.design)),
+    ])
 
 
 def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], root: Path,
@@ -162,7 +263,23 @@ def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], r
 
     ValueError past fab.calls.BRIEF_LIMIT: the designs are quoted whole, and a plan that
     changed more than the limit holds is retired by hand."""
-    raise NotImplementedError
+    designs_text = []
+    for design in changed:
+        path = root / design
+        text = path.read_text(encoding="utf-8") if path.exists() else "(removed)"
+        status = status_path(design)
+        path = root / status
+        note = path.read_text(encoding="utf-8") if path.exists() else "(no status file)"
+        designs_text.append(f"## {design}\n\n{text}\n\n## {status}\n\n{note}")
+    return calls._brief([
+        ("Role", calls.ROLES["retire"].read_text(encoding="utf-8")),
+        ("Call facts", calls._facts(call_id, branch, report)),
+        ("Plan parts and slices", calls._parts_table(plan, tasks, statuses) +
+         f"\n\nPlan: `{PLANS}/{plan.draft}/plan.toml`"),
+        ("The user's drafts", calls.drafts_text(plan, root)),
+        ("Designs changed since the plan started", "\n\n".join(designs_text) or "(none)"),
+        ("Inventory", calls.render_inventory(calls.inventory(root))),
+    ])
 
 
 def main(argv: list[str]) -> int:
@@ -187,4 +304,76 @@ def main(argv: list[str]) -> int:
     subject(draft, role, part), root, brief), prints `<outcome> <branch>` and exits 0 when
     the outcome is done, 1 otherwise; an OSError, ValueError or fab.sh.Failed prints
     `fab call: <error>` on stderr and exits 1, starting nothing."""
-    raise NotImplementedError
+    args = _arguments(argv)
+    try:
+        plan, tasks, root = _prepare(args)
+        statuses = {key: view.status for key, view in state.fold(tasks, log.read()).items()}
+        facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
+        text = _compile(args, plan, tasks, statuses, root, facts)
+        if args.brief_only:
+            print(text)
+            return 0
+        if args.role == "cut":
+            enlist(args.plan)
+        result = calls.start(args.role, subject(plan.draft, args.role, getattr(args, "part", None)),
+                             root, text, sh=run)
+        print(f"{result['outcome']} {result['branch']}")
+        return 0 if result["outcome"] == "done" else 1
+    except (OSError, ValueError, Failed) as error:
+        print(f"fab call: {error}", file=sys.stderr)
+        return 1
+
+
+def _arguments(argv):
+    """Parse the designer roles without adding them to the other calls' parser."""
+    parser = argparse.ArgumentParser(prog="fab call")
+    commands = parser.add_subparsers(dest="role", required=True)
+    for role in ROLES:
+        command = commands.add_parser(role)
+        command.add_argument("--plan", type=Path, required=True)
+        command.add_argument("--brief-only", action="store_true")
+        if role in ("contract", "decision"):
+            command.add_argument("part")
+        if role == "decision":
+            command.add_argument("--run", required=True)
+        if role == "cut":
+            command.add_argument("--source", action="append", required=True)
+    return parser.parse_args(argv)
+
+
+def _prepare(args):
+    """Find the checkout and read a plan, or validate a cut's destination and sources."""
+    directory = args.plan.resolve()
+    ancestor = directory
+    while not ancestor.exists():
+        ancestor = ancestor.parent
+    root = Path(run(["git", "rev-parse", "--show-toplevel"], cwd=str(ancestor), check=True).out.strip()).resolve()
+    if args.role != "cut":
+        plan = load_plan(directory / "plan.toml")
+        return plan, load_tasks(directory / "tasks", plan.draft, plan.repo), root
+    if directory != root / PLANS / directory.name:
+        raise ValueError(f"PLAN_DIR must be {root / PLANS}/<draft>: {directory}")
+    if (directory / "plan.toml").exists():
+        raise ValueError(f"plan.toml already exists: {directory / 'plan.toml'}")
+    for source in args.source:
+        path = root / source
+        if Path(source).is_absolute() or not path.resolve().is_relative_to(root) or not path.is_file():
+            raise ValueError(f"source must name a relative file under {root}: {source}")
+    return uncut(directory.name, repository(root, sh=run), args.source), {}, root
+
+
+def _compile(args, plan, tasks, statuses, root, facts):
+    """Build a brief only after the role's preconditions hold."""
+    if args.role == "cut":
+        return cut_brief(plan, root, **facts)
+    if args.role == "contract":
+        if args.part not in plan.parts:
+            raise ValueError(f"unknown part {args.part!r}")
+        if not plan.parts[args.part].contract:
+            raise ValueError(f"part {args.part!r} is not a contract")
+        return calls.skeleton_brief(plan, args.part, tasks, statuses, root, role="contract", **facts)
+    if args.role == "decision":
+        return decision_brief(plan, args.part, tasks, statuses, root, args.run, **facts)
+    if plan.retired:
+        raise ValueError(f"plan {plan.draft!r} is already retired")
+    return retire_brief(plan, tasks, statuses, root, changed_designs(root, plan.draft, sh=run), **facts)
