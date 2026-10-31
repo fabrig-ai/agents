@@ -5,6 +5,10 @@ across tasks. It is yours for this run; never touch another slot. Your task's
 facts name its trunk: your branch is merged into it when you are done, and
 the trunk gets the queue's full checks once, at the end.
 
+- **fab runs the pipeline:** fabrig's `agents/implementer.md` steps for
+  `claim`, `tools/slots/trim`, `precheck`, `ready-check` and `post` are
+  not yours. Those tools are gone; your slot is claimed for you and swept
+  when your run ends. Skip them; never stop to ask about them.
 - **Read fabrig's `AGENTS.md` first,** then the tree's `AGENTS.md`, the
   notes and designs your task names. The code's rules are skein's
   `docs/foundation/programming-model.md` and `testing-strategy.md`, section 1.
