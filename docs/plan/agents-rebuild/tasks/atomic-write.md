@@ -3,7 +3,7 @@ id = "atomic-write"
 part = "run"
 kind = "feature"
 needs = ["gates-tick"]
-files = ["fab/atomic.py", "fab/run.py", "fab/queue.py", "fab/precheck.py", "fab/codex.py", "fab/gate.py", "fab/tiers.py", "fab/after_landing.py", "fab/calls.py", "fab/report.py", "fab/gates.py", "fab/tests/test_atomic.py", "fab/tests/test_after_landing.py", "fab/tests/test_report.py", "fab/tests/test_gates.py", "fab/tests/test_call_review.py"]
+files = ["fab/atomic.py", "fab/run.py", "fab/queue.py", "fab/precheck.py", "fab/codex.py", "fab/gate.py", "fab/tiers.py", "fab/after_landing.py", "fab/calls.py", "fab/report.py", "fab/gates.py", "fab/tests/test_atomic.py", "fab/tests/test_after_landing.py", "fab/tests/test_report.py", "fab/tests/test_gates.py", "fab/tests/test_call_review.py", "fab/taste.md"]
 effort = "medium"
 minutes = 25
 +++
@@ -53,8 +53,8 @@ and 8; `AGENTS.md`.
   writing (patch the rename to raise) leaves the old file unchanged and no
   sibling behind; `extend` appends to an existing file and creates a
   missing one.
-- `grep -rn "NamedTemporaryFile\|_write\b" fab/*.py` finds only
-  `fab/atomic.py`.
+- `grep -rnw "NamedTemporaryFile\|_write" fab/*.py` finds only
+  `fab/atomic.py` and the exclusive create in `fab/slots.py`.
 - `bin/fab test` passes, with no other change in behaviour and every
   touched test module under a second.
 
@@ -70,3 +70,16 @@ and 8; `AGENTS.md`.
   run._write calls in fab/tests/test_call_review.py to fab.atomic.write; the
   file is now in files. Anything else that still calls run._write is the
   same case: migrate it.
+- 2026-10-31, the answerer (run atomic-write-4, four runs without landing):
+  the work is done; its branch's history is what fails. Run 4 merged the old
+  branch (dc80204, 59de177) into a fresh one, so every rebase replays commits
+  main has since moved past and conflicts in six files. The next run starts
+  from origin/main, takes the final tree of `agents-rebuild/atomic-write`
+  (f755560) as the reference, re-applies it as one commit, resolving each
+  file once against main, and pushes that over the task branch; it merges
+  no old branch. Two loose ends land with it: the acceptance grep is now
+  word-bounded (`-w`) and names `fab/slots.py` too, since `cache_write` and
+  the exempt `slots.claim` are not the case it checks for; and
+  `fab/taste.md` is in files, so its "Good" example for writes to a sibling
+  cites `atomic.write(path, json.dumps(state))  # fab.atomic.write` rather
+  than `fab.run._write` (its "Bad" private-import example stays).
