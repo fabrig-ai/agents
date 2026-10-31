@@ -24,8 +24,8 @@ messages), fab does it instead; everything else in the brief holds.
 
 - **Claude is spent on the code's shape:** layout, names, types, APIs,
   boundaries, test worlds and task sketches.
-- **A pipeline:** no slot waits; the first task of a part is out within 10
-  minutes of the part arriving (here: released, below).
+- **A pipeline:** no slot waits; the first task of a part goes out as soon
+  as it can (here: released, below).
 - **A lead fans out:** several implementers at once, one task each, one
   per crate of the wave (three or four to start).
 - **One writer per crate:** a task owns its crates for the wave; a change
@@ -119,11 +119,19 @@ push), `## Report`.
 
 ## Release early
 
-Commit and push your branch (`git push origin HEAD`) and run `fab wake cut
-<your call id>` as soon as `plan.toml` and the first specs hold together
-(`fab status <the plan directory>` shows no problems): fab merges what you
-pushed and starts those tasks while you write the rest. Push and wake again
-after each batch. Never change a spec you have pushed. Never push main.
+Implementers wait for you: until your first push, no slot works. Get the
+first tasks out first, as a lead launches its first implementers before it
+has designed the rest.
+
+- First, before anything else: push the tasks that need no survey and no
+  other task (an independent fix, the counts, a contract whose surface the
+  draft already gives), with the notes they cite, in a `plan.toml` that
+  holds only their parts, and run `fab wake cut <your call id>`.
+- Then design the rest while those run. Survey in parallel (subagents if
+  you like), and push and wake again each time a batch holds together
+  (`fab status <the plan directory>` shows no problems). `plan.toml` grows
+  with each batch, gaining parts and slices; a pushed spec never changes.
+  Never push main.
 
 ## Your report
 

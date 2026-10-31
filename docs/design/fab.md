@@ -945,9 +945,13 @@ only as tweaks once a replay matches its run.
   queued behind each other; a light merge is a fetch, a merge and a push.
 - **The cut releases its first specs early,** as the lead launched its first
   tasks while it wrote the rest. During a cut of an integration plan with
-  reviews off, the cut may commit and push a consistent part of its plan
-  (plan.toml with every part, and the specs whose needs are already
-  written), then wake the tick (`fab wake cut <call>`). The tick merges an
+  reviews off, the cut first pushes the tasks that need no survey and no
+  other task, in a plan.toml holding only their parts, then designs the
+  rest while they run, pushing each batch that holds together (plan.toml
+  grows), and wakes the tick each time (`fab wake cut <call>`). Replay 2
+  (10-31) showed why first: its cut released at T+13.5 of a 21.5-minute
+  call, after it had designed the whole plan; the lead's first task went
+  out at T+4.8. No prompt names a timing figure (the user, 10-31). The tick merges an
   in-flight cut's pushed branch into the trunk whenever its tip is not yet
   there, so those tasks start from the trunk as any; the cut's last push
   is merged when the call ends, as today. A spec the cut has released is

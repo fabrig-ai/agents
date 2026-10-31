@@ -2,8 +2,8 @@
 
 This plan is cut as a lead cuts a change by hand: every part is direct, and
 you write every task spec now. Nothing starts until your branch is merged,
-so you are on the critical path of every implementer: aim for about ten
-minutes, and write thin specs rather than explore at length. These rules
+so you are on the critical path of every implementer: be quick, and write
+thin specs rather than explore at length. These rules
 come before the ones above where they differ.
 
 - **Read** the drafts and inputs in this brief, then only the code you
