@@ -207,6 +207,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
         text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
                 f"```toml\n{lines}\n```")
         if parsed.get("direct"):
+            role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
             text += ("\n\nEvery part is `mode = \"direct\"`, so the cut writes every task spec itself. "
                      f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
                      "cited from each spec by repository path; the implementers read them in their checkout. "

@@ -318,6 +318,23 @@ class BriefTest(unittest.TestCase):
                                  "A task's `needs` name the tasks whose merged code it builds on."):
                     self.assertEqual(fragment in text, direct, fragment)
 
+    def test_cut_direct_role_follows_repository_role_when_enabled(self):
+        role = calls.ROLES["cut"].read_text()
+        direct_role = calls.ROLES["cut"].with_name("cut-direct.md").read_text().rstrip("\n")
+        fabrig_role = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
+        for repo in ("agents", "fabrig"):
+            plan = designer.uncut("new", repo, [SOURCE])
+            for entries, direct in (((), False), (["direct=false"], False),
+                                    (["direct=true", "direct=false"], False),
+                                    (["direct=false", "direct=true"], True)):
+                with self.subTest(repo=repo, entries=entries):
+                    text = designer.cut_brief(plan, self.root, **FACTS, options=entries)
+                    self.assertEqual(direct_role in text, direct)
+                    if direct:
+                        expected = role + ("\n\n" + fabrig_role if repo == "fabrig" else "")
+                        self.assertTrue(text.startswith("# Role\n\n" + expected + "\n\n" + direct_role))
+                        self.assertLess(text.index(direct_role), text.index("# Call facts"))
+
     def test_plan_path_preserves_root_briefs_and_changes_only_destination(self):
         cut_plan = designer.uncut("new", "agents", [SOURCE])
         compilers = (
@@ -533,6 +550,7 @@ class MainTest(unittest.TestCase):
             self.assertIn('# Plan options\n\nWrite these keys at the top of plan.toml, before the first table, verbatim:', text)
             self.assertIn('```toml\nlanding = "integration"\nready = false\nreviews = false\ndirect = true\n```', text)
             self.assertIn("`skein/docs/plan/new/notes/<name>.md`", text)
+            self.assertIn(calls.ROLES["cut"].with_name("cut-direct.md").read_text(), text)
             atomic.write(worktree.parent / "report.md", "Done: cut the replay\n")
             return Result(0, "{}")
 
@@ -556,6 +574,16 @@ class MainTest(unittest.TestCase):
         self.assertEqual(upstream.argv, ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
         self.assertEqual(upstream.cwd, str(self.root))
         self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
+
+    def test_cut_direct_option_adds_role_through_cli(self):
+        direct_role = calls.ROLES["cut"].with_name("cut-direct.md").read_text().rstrip("\n")
+        for args, direct in (((), False), (("--set", "direct=false"), False),
+                             (("--set", "direct=true"), True)):
+            with self.subTest(args=args):
+                result, text, errors = self.invoke("cut", "--source", SOURCE, *args,
+                                                   directory=self.root / "docs/plan/new")
+                self.assertEqual((result, errors), (0, ""))
+                self.assertEqual(direct_role in text, direct)
 
     def test_cut_integration_refuses_wrong_or_missing_upstream_before_enlisting(self):
         for upstream in (Result(0, "origin/main\n"), Result(0, "origin/other/integration\n"),

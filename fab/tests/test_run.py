@@ -311,6 +311,7 @@ class RunStartTest(unittest.TestCase):
                     base = "origin/component-kit/integration"
                     self.assertEqual(entry["base"], base)
                     text = (log.home() / "runs" / run_id / "brief.md").read_text()
+                    self.assertTrue(text.startswith(run.role_text(repo, "component-kit/integration")))
                     self.assertIn(f"- Base: `{base}`\n- Trunk: `{base}`\n", text)
                     self.assertEqual(fake.calls[-2].input, text)
                     commands = [command(call) for call in fake.calls]
@@ -341,6 +342,18 @@ class RunStartTest(unittest.TestCase):
                 self.assertEqual(log.read()[0]["base"], base)
                 self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "diff",
                                "old-skeleton", "new-skeleton"], [command(call) for call in fake.calls])
+
+    def test_skeleton_rebase_uses_integration_role(self):
+        with tmp_home():
+            fake = starter()
+            task = replace(TASK, repo="fabrig")
+            rejection = dict(step="rebase", findings="amended", skeleton="root",
+                             old_tip="old-skeleton", tip="new-skeleton")
+            run_id = run.start(task, HOST, kind="rebase", events=[started()], sh=fake,
+                               rejection=rejection, trunk="component-kit/integration")
+            text = (log.home() / "runs" / run_id / "brief.md").read_text()
+            self.assertTrue(text.startswith(run.role_text("fabrig", "component-kit/integration")))
+            self.assertEqual(fake.calls[-2].input, text)
 
     def test_start_fabrig_medium_effort_and_explicit_log(self):
         with tmp_home() as home:
@@ -790,6 +803,18 @@ class RoleTextTest(unittest.TestCase):
         notes = run.ROLE.with_name("fabrig.md").read_text().rstrip("\n")
         self.assertEqual(run.role_text("agents"), role + "\n\n" + taste + "\n")
         self.assertEqual(run.role_text("fabrig"), role + "\n\n" + taste + "\n\n" + notes + "\n")
+
+    def test_non_main_trunk_replaces_repository_notes_with_integration_text(self):
+        role = run.ROLE.read_text().rstrip("\n")
+        taste = run.TASTE.read_text().rstrip("\n")
+        integration = run.ROLE.with_name("fabrig-integration.md").read_text().rstrip("\n")
+        self.assertEqual(run.role_text("fabrig", "component-kit/integration"),
+                         role + "\n\n" + taste + "\n\n" + integration + "\n")
+        self.assertEqual(run.role_text("fabrig", "main"), run.role_text("fabrig"))
+
+    def test_non_main_trunk_keeps_usual_role_without_integration_text(self):
+        self.assertEqual(run.role_text("agents", "component-kit/integration"),
+                         run.role_text("agents"))
 
 
 class StartUndoTest(unittest.TestCase):

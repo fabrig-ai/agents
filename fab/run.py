@@ -65,10 +65,14 @@ def outcome(report: str) -> str:
     return next((value for prefix, value in OUTCOMES.items() if first.startswith(prefix)), "failed")
 
 
-def role_text(repo: str) -> str:
+def role_text(repo: str, trunk: str = "main") -> str:
     """The implementer's role text, then the taste file (TASTE), then the repository's notes
-    (fab/roles/<repo>.md) when it has any, each separated by one blank line."""
+    (fab/roles/<repo>.md) when it has any, each separated by one blank line. A non-main
+    trunk uses fab/roles/<repo>-integration.md instead when it exists."""
     notes = ROLE.with_name(f"{repo}.md")
+    integration = ROLE.with_name(f"{repo}-integration.md")
+    if trunk != "main" and integration.exists():
+        notes = integration
     texts = [ROLE.read_text(), TASTE.read_text()]
     if notes.exists():
         texts.append(notes.read_text())
@@ -209,7 +213,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     if source is not None and kind != "rebase":
         base = source[0]["tip"]
     rejection = _rejection(rejection, sh=sh)
-    text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
+    text = brief(task, role_text(task.repo, trunk), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection, trunk=trunk)
 
     def remote(argv, *, input=None):
@@ -533,5 +537,5 @@ def _rebase_brief(task: Task, host: Host, repo: Path, events: Iterable[dict], re
                     f"then `git rebase --onto origin/{trunk} {rejection['old_tip']}`. "
                     "Resolve conflicts, check the result, and push your branch.\n\n"
                     "The skeleton's amendment:\n\n```diff\n" + diff + "\n```\n\n")
-    return brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=f"origin/{trunk}",
+    return brief(task, role_text(task.repo, trunk), run_id=run_id, branch=branch, base=f"origin/{trunk}",
                  report=report, rejection={**rejection, "section": instructions}, trunk=trunk)
