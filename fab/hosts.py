@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import socket
+import sys
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -127,7 +128,11 @@ def main(argv: list[str]) -> int:
     found = []
     local = local_path()
     if local.exists():
-        tables(DEFAULT.read_text(), local.read_text())  # a bad override fails the check
+        try:
+            tables(DEFAULT.read_text(), local.read_text())
+        except ValueError as error:
+            print(f"fab hosts: {local}: {error}", file=sys.stderr)
+            return 1
         for name, changed in tomllib.loads(local.read_text()).items():
             print(f"{name}: overridden in {local}: "
                   + ", ".join(f"{key} = {value!r}" for key, value in sorted(changed.items())))

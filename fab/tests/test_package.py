@@ -125,6 +125,19 @@ class OverrideTest(unittest.TestCase):
             with patch.object(hosts, "local_path", return_value=local):
                 self.assertEqual(hosts.load(path)["a"].places, 2)
 
+    def test_check_lists_overrides_and_refuses_a_bad_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            local = Path(directory) / hosts.LOCAL
+            local.write_text("[hetzner8]\nbuilds = 1\n")
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(hosts, "local_path", return_value=local), \
+                    redirect_stdout(out), redirect_stderr(err):
+                self.assertEqual(hosts.main(["check"]), 0)
+                local.write_text('[hetzner8]\nssh = "z"\n')
+                self.assertEqual(hosts.main(["check"]), 1)
+            self.assertIn("hetzner8: overridden in", out.getvalue())
+            self.assertIn("cannot change ['ssh']", err.getvalue())
+
 
 class ThisHostTest(unittest.TestCase):
     def test_given_name_wins_even_empty_or_unknown(self):
