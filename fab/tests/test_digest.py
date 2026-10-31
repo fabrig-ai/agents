@@ -193,6 +193,18 @@ class Queue:
                          [digest.Function("fab/api.py", "long", 2, 61)])
 
 
+    def test_long_functions_reads_with_the_given_find(self):
+        seen = []
+
+        def find(module, text):
+            seen.append((module, text))
+            return [digest.Function(module, "f", 1, 61 if text == "after\n" else 10)]
+
+        self.assertEqual(digest.long_functions("x/src/lib.rs", "before\n", "after\n", find=find),
+                         [digest.Function("x/src/lib.rs", "f", 1, 61)])
+        self.assertEqual(seen, [("x/src/lib.rs", "before\n"), ("x/src/lib.rs", "after\n")])
+
+
 class ClonesTest(unittest.TestCase):
     def test_eight_lines_copied_and_longer_block_windows_merge(self):
         for length in (8, 11):
@@ -476,3 +488,33 @@ class ArchiveTest(unittest.TestCase):
             with self.assertRaises(Failed):
                 digest.archive(repo, before, missing)
             self.assertFalse(Path(str(missing) + ".tar").exists())
+
+
+class CompareTest(unittest.TestCase):
+    def test_compare_keys_orders_and_first_duplicate(self):
+        old = Signature("m.rs", "old", "pub fn old()", "")
+        kept = Signature("m.rs", "kept", "pub fn kept()", "Was.")
+        moved = Signature("m.rs", "kept", "pub fn kept(x: u8)", "Now.")
+        new = Signature("m.rs", "new", "pub fn new()", "")
+        twice = Signature("m.rs", "new", "pub fn new(y: u8)", "")
+        self.assertEqual(digest.compare([old, kept], [new, twice, moved]),
+                         ([new], [old], [(kept, moved)]))
+        self.assertEqual(digest.compare([kept], [replace(kept, doc="Other.")]), ([], [], []))
+
+
+class ArchivePathsTest(unittest.TestCase):
+    def test_archive_named_paths_only_and_none_refused(self):
+        with tmp_home() as root:
+            _, repo = git_pair(root)
+            for path in ("a/src/lib.rs", "b/src/lib.rs", "fab/x.py"):
+                write(repo / path, "// file\n")
+            git(repo, "add", ".")
+            git(repo, "commit", "-q", "-m", "Add crates")
+            dest = digest.archive(repo, "HEAD", root / "tree", paths=["b", "a"])
+            self.assertEqual(sorted(path.relative_to(dest).as_posix()
+                                    for path in dest.rglob("*.rs")),
+                             ["a/src/lib.rs", "b/src/lib.rs"])
+            self.assertFalse((dest / "fab").exists())
+            with self.assertRaisesRegex(ValueError, "no paths"):
+                digest.archive(repo, "HEAD", root / "none", paths=[])
+            self.assertFalse((root / "none").exists())

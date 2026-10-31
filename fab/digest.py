@@ -7,7 +7,8 @@ the branch adds, removes or changes (from fab.calls.inventory on both trees), wh
 outside its task's files, which new or changed functions are longer than SIZE_CAP and which
 blocks of CLONE_LINES lines repeat. `render` turns that into deterministic Markdown of
 bounded size; the gates (fab/gates.py) check the Digest itself. The shell is two git
-commands: the numstat and an archive of each tree.
+commands: the numstat and an archive of each tree. fabrig's Rust digest (fab/rust_digest.py)
+builds the same Digest from the same primitives.
 """
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from __future__ import annotations
 import ast
 import difflib
 import tarfile
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
@@ -97,22 +98,29 @@ def outside(paths: Sequence[str], files: Sequence[str]) -> list[str]:
 
 def items(base: Path, tip: Path) -> tuple[list[Signature], list[Signature],
                                           list[tuple[Signature, Signature]]]:
-    """(added, removed, changed) between inventory(base, PACKAGE) and inventory(tip, PACKAGE),
-    entries keyed by (module, name), the first entry of a key kept when a module defines a name
-    twice. added: keys only at tip, in tip order; removed: keys only at base, in base order;
-    changed: keys in both whose text differs, as (base entry, tip entry) in tip order. A
-    docstring that changes alone is not a change. A tree without PACKAGE/ has no items."""
+    """compare(inventory(base, PACKAGE), inventory(tip, PACKAGE)). A tree without PACKAGE/ has
+    no items."""
+    return compare(inventory(base, PACKAGE), inventory(tip, PACKAGE))
+
+
+def compare(before: Sequence[Signature], after: Sequence[Signature]) -> tuple[
+        list[Signature], list[Signature], list[tuple[Signature, Signature]]]:
+    """(added, removed, changed) between two inventories, entries keyed by (module, name), the
+    first entry of a key kept when a module defines a name twice. added: keys only in after, in
+    after's order; removed: keys only in before, in before's order; changed: keys in both whose
+    text differs, as (before entry, after entry) in after's order. A doc that changes alone is
+    not a change."""
     entries = []
-    for root in (base, tip):
+    for side in (before, after):
         keyed = {}
-        for entry in inventory(root, PACKAGE):
+        for entry in side:
             keyed.setdefault((entry.module, entry.name), entry)
         entries.append(keyed)
-    before, after = entries
-    added = [entry for key, entry in after.items() if key not in before]
-    removed = [entry for key, entry in before.items() if key not in after]
-    changed = [(before[key], entry) for key, entry in after.items()
-               if key in before and before[key].text != entry.text]
+    old, new = entries
+    added = [entry for key, entry in new.items() if key not in old]
+    removed = [entry for key, entry in old.items() if key not in new]
+    changed = [(old[key], entry) for key, entry in new.items()
+               if key in old and old[key].text != entry.text]
     return added, removed, changed
 
 
@@ -144,15 +152,17 @@ def functions(module: str, text: str) -> list[Function]:
     return sorted(found, key=lambda function: function.start)
 
 
-def long_functions(module: str, before: str, after: str, cap: int = SIZE_CAP) -> list[Function]:
-    """functions(module, after) longer than cap lines whose span [start, start + lines) holds
+def long_functions(module: str, before: str, after: str, cap: int = SIZE_CAP, *,
+                   find: Callable[[str, str], list[Function]] = functions) -> list[Function]:
+    """find(module, after) longer than cap lines whose span [start, start + lines) holds
     at least one of added_lines(before, after), and that the branch made long: new, or longer
     than it was before (by name). A ratchet: a long function the branch did not touch, only
     shortened, or changed without growing is not listed, so a change touching old debt does not
-    have to pay it off."""
+    have to pay it off. find reads one module's text: functions for Python, fab.rust.functions
+    for Rust."""
     added = added_lines(before, after)
-    was = {function.name: function.lines for function in functions(module, before)} if before else {}
-    return [function for function in functions(module, after)
+    was = {function.name: function.lines for function in find(module, before)} if before else {}
+    return [function for function in find(module, after)
             if function.lines > cap
             and function.lines > was.get(function.name, 0)
             and any(function.start <= line < function.start + function.lines for line in added)]
@@ -332,18 +342,34 @@ def changes(repo: Path, base: str, tip: str, *, sh: Runner = run) -> list[Change
     return found
 
 
-def archive(repo: Path, rev: str, dest: Path, *, sh: Runner = run) -> Path:
-    """Extract rev's PACKAGE/ into dest (created; it must not exist) and return dest:
-    `git archive --format=tar -o <dest>.tar <rev> -- <PACKAGE>` in repo (check=True), then
-    tarfile extractall into dest with filter="data", then the tar removed. A rev without
-    PACKAGE/ fails as git does (fab.sh.Failed)."""
+def archive(repo: Path, rev: str, dest: Path, *, sh: Runner = run,
+            paths: Sequence[str] = (PACKAGE,)) -> Path:
+    """Extract rev's paths (default PACKAGE/) into dest (created; it must not exist) and return
+    dest: `git archive --format=tar -o <dest>.tar <rev> -- <paths...>` in repo (check=True),
+    then tarfile extractall into dest with filter="data", then the tar removed. No paths: a
+    ValueError before anything is created (git would archive the whole tree). A path rev does
+    not hold fails as git does (fab.sh.Failed)."""
+    if not paths:
+        raise ValueError("archive: no paths")
     dest.mkdir(parents=True)
     tar = Path(str(dest) + ".tar")
     try:
-        sh(["git", "archive", "--format=tar", "-o", str(tar), rev, "--", PACKAGE],
+        sh(["git", "archive", "--format=tar", "-o", str(tar), rev, "--", *paths],
            cwd=str(repo), check=True)
         with tarfile.open(tar) as tree:
             tree.extractall(dest, filter="data")
     finally:
         tar.unlink(missing_ok=True)
     return dest
+
+
+def gather(repo: Path, task: Task, run_id: str, branch: str, base: str, tip: str,
+           directory: Path, *, sh: Runner = run) -> Digest:
+    """This repository's digest of a branch, from its clone repo and the two shas:
+    changes(repo, base, tip), then archive base into directory/"base" and tip into
+    directory/"tip", then build. fab.gates.screen calls it under its lock (fab.gates.GATHER);
+    a git failure raises fab.sh.Failed and a SyntaxError from build propagates."""
+    changed = changes(repo, base, tip, sh=sh)
+    before = archive(repo, base, directory / "base", sh=sh)
+    after = archive(repo, tip, directory / "tip", sh=sh)
+    return build(task, run_id, branch, base, tip, changed, before, after)

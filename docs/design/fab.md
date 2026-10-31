@@ -362,9 +362,35 @@ and Claude reads the code's structure in batches, never on the landing path.
   digest's path, and `findings`, the findings as text; a tip whose Python
   does not parse is step `gate:parse`. The repair run's brief quotes the
   findings (section 6). A gating that cannot run (git fails) is a failed
-  action and the branch waits; it never lands ungated. The first gates read
-  Python (this repository); fabrig's, over Rust and its public API, come
-  later.
+  action and the branch waits; it never lands ungated.
+- **fabrig's branches pass the same gates,** over Rust, before the tick
+  readies them for the queue; a branch with findings is rejected as above
+  and never readied. The digest is the same `Digest`, built by
+  `fab/rust_digest.py` from `fab/rust.py`, a tokenizer and item scanner in
+  the standard library: no build, no slot, no `cargo public-api` (which
+  would need nightly rustdoc builds on a builder). `fab.gates.screen` takes
+  each repository's lock and digest builder from `LOCKS` and `GATHER`, in
+  the clone `FAB_HOME/repos/fabrig` under `FAB_HOME/gate-fabrig.lock`.
+  - A crate is a directory holding a `Cargo.toml` (the root's aside); its
+    production sources are the `.rs` files under its `src/`. Only the
+    crates a branch touches are archived and read, so `clones` looks for a
+    repeat within the touched crates.
+  - The public API is every item declared `pub` (not `pub(crate)` or other
+    restricted forms) wherever its module sits: free functions, structs,
+    enums, unions, traits, types, consts and statics; inherent impls' `pub`
+    methods (`Type.method`); every method of a `pub` trait. Its text is the
+    signature or header, its tokens spaced one way, so a rustfmt reflow
+    changes nothing; a struct's fields and an enum's variants are not
+    items, as a Python class's attributes are not. `shape` is the public
+    API against the skeleton: the base holds the landed skeleton, so a
+    feature task may fill bodies and add items but not change one.
+  - `size` counts every function with a body, its doc and attributes left
+    out; test-only items (`#[cfg(test)]`, `#[test]`, `#[<path>::test]`) are
+    not read for items, size or clones. `clones` leaves out blank lines,
+    comments, `use` and `mod x;` lines and lines of brackets alone.
+  - `docs` asks for a `///` (or `#[doc]`) on every new public item.
+    Source that the scanner cannot read (an unbalanced delimiter, an
+    unterminated string) is `gate:parse`.
 - **The taste file,** `fab/taste.md`, holds the banned names and pairs of
   good and bad code from this repository, each with one line on why. It is
   added to every implementer's brief after the role text.
@@ -777,7 +803,11 @@ things fab follows, whatever the clock says:
 
 - (The self-critique is 13.1's, part `critique`, not later.)
 
-- fabrig's gates, over Rust and its public API against the skeleton.
+- fabrig's gates, further: a struct's `pub` fields, an enum's variants and
+  a trait's associated items as items; `pub use` re-exports and module
+  privacy followed, so only what a crate exports counts; clones across
+  crates; a cap on complexity beside length for both languages (the
+  user's model names "function length and complexity caps").
 - Gates on the calls' own branches (skeletons, reviews), which have no task
   `files` to check against.
 - `fab report daily` on a timer on hel8, with the dispatcher's; reports

@@ -64,6 +64,15 @@
   branch lands ungated and no review call starts. Once it does, a change to a
   function already over 60 lines (`fab.dispatch.tick` among them) fails
   `size` and must split it.
+- **fabrig's gates are a skeleton:** `fab/rust.py` (the Rust tokenizer and
+  item scanner) and `fab/rust_digest.py` (crates, the digest over Rust, its
+  gathering) hold section 12's contracts for fabrig; `fab.gates.screen`
+  already takes its lock and digest builder per repository (`LOCKS`,
+  `GATHER`), and `fab.digest` gained `compare`, `gather`, `archive`'s
+  `paths` and `long_functions`' `find` for them. The task `rust-scan` fills
+  the first; `rust-digest` the second, adds `fabrig` to `fab.gates.REPOS`
+  and makes the tick screen a fabrig branch before it readies it. Until it
+  lands, fabrig's branches are readied ungated.
 - **The review of calls' output is a skeleton:** `fab/call_review.py`
   (chains, the review run's brief and start, the amend brief) and
   `fab.run.fetch_clone` and `fab.run.launch` hold 13.1's contracts.

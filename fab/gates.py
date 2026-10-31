@@ -3,7 +3,8 @@
 Not fabrig's check steps (fab/gate.py). These read the branch's digest (fab/digest.py) and
 its task, and are pure; `screen` is the shell around them that the tick calls before it lands
 a task's branch. A finding rejects the branch with step `gate:<name>`, and the repair loop
-takes it as it takes a red landing.
+takes it as it takes a red landing. A branch of this repository is gated before fab land
+lands it; a branch of fabrig before the tick readies it for the queue.
 """
 
 from __future__ import annotations
@@ -14,12 +15,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, digest, log, run as runs
+from fab import atomic, digest, log, run as runs, rust_digest
 from fab.digest import SIZE_CAP, Digest
 from fab.plan import Task
 from fab.sh import Runner, run
 
-REPOS = ("agents",)  # repositories whose branches are gated: the first gates read Python
+REPOS = ("agents",)  # repositories whose branches are gated
+LOCKS = {"agents": "land-agents.lock",  # fab land's, so no landing moves the clone meanwhile
+         "fabrig": "gate-fabrig.lock"}  # FAB_HOME/<lock>: the gating of one clone at a time
+GATHER = {"agents": digest.gather,  # Python, the package fab/
+          "fabrig": rust_digest.gather}  # Rust, the crates the branch touches
 GATES = ("files", "shape", "size", "names", "docs", "clones")
 PARSE = "parse"  # the finding's gate when the tip's Python does not parse
 EXEMPT = ("interface", "migration")  # task kinds that may change or remove a signature
@@ -131,19 +136,19 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
     """Gate a task's branch before it lands; return the findings (empty: it may land).
 
     The run is the task's last run.started in events (none: ValueError naming the task) and
-    the branch that record's. Under an exclusive flock on FAB_HOME/land-agents.lock (fab
-    land's, so no landing moves the clone meanwhile), in the clone FAB_HOME/repos/<task.repo>
-    (cloned from fab.run.REMOTES[task.repo] when it has no .git): `git fetch origin --prune`;
-    the tip `git rev-parse --verify refs/remotes/origin/<branch>^{commit}`; the base
-    `git merge-base refs/remotes/origin/main <tip>`; fab.digest.changes(base, tip); both trees
-    by fab.digest.archive into `base` and `tip` of a temporary directory under FAB_HOME,
-    removed afterwards; fab.digest.build; its render written to FAB_HOME/digests/<run>.md with
-    fab.atomic.write. Every git command runs with check=True, so a git failure raises
-    fab.sh.Failed, writes no digest and logs nothing. The lock is released before logging.
+    the branch that record's. Under an exclusive flock on FAB_HOME/LOCKS[task.repo], in the
+    clone FAB_HOME/repos/<task.repo> (cloned from fab.run.REMOTES[task.repo] when it has no
+    .git): `git fetch origin --prune`; the tip `git rev-parse --verify
+    refs/remotes/origin/<branch>^{commit}`; the base `git merge-base refs/remotes/origin/main
+    <tip>`; the digest GATHER[task.repo](clone, task, run, branch, base, tip, directory) with
+    directory a temporary directory under FAB_HOME, removed afterwards; its render written to
+    FAB_HOME/digests/<run>.md with fab.atomic.write. Every git command runs with check=True,
+    so a git failure raises fab.sh.Failed, writes no digest and logs nothing. The lock is
+    released before logging.
 
     Then the findings are check(digest, banned_names(fab.run.TASTE's text)). A SyntaxError
-    from build is instead one finding of gate PARSE, "`<filename>:<lineno>` <msg>", with no
-    digest written. Any findings: log branch.rejected (task, branch, tip, step
+    from the gathering is instead one finding of gate PARSE, "`<filename>:<lineno>` <msg>",
+    with no digest written. Any findings: log branch.rejected (task, branch, tip, step
     `gate:<the first finding's gate>`, log the digest's path or "" without one, findings
     findings_text(findings)). The task's status becomes rejected and decide starts a repair."""
     started = next((event for event in reversed(list(events))
@@ -155,7 +160,7 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
     home.mkdir(parents=True, exist_ok=True)
     repo = home / "repos" / task.repo
     written = ""
-    with open(home / "land-agents.lock", "a") as lock:
+    with open(home / LOCKS[task.repo], "a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
         if not (repo / ".git").exists():
             repo.parent.mkdir(parents=True, exist_ok=True)
@@ -165,12 +170,10 @@ def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,
                  cwd=str(repo), check=True).out.strip()
         base = sh(["git", "merge-base", "refs/remotes/origin/main", tip],
                   cwd=str(repo), check=True).out.strip()
-        changed = digest.changes(repo, base, tip, sh=sh)
         with tempfile.TemporaryDirectory(dir=home) as directory:
-            before = digest.archive(repo, base, Path(directory) / "base", sh=sh)
-            after = digest.archive(repo, tip, Path(directory) / "tip", sh=sh)
             try:
-                summary = digest.build(task, run_id, branch, base, tip, changed, before, after)
+                summary = GATHER[task.repo](repo, task, run_id, branch, base, tip,
+                                            Path(directory), sh=sh)
             except SyntaxError as error:
                 findings = [Finding(PARSE, f"`{error.filename}:{error.lineno}` {error.msg}")]
             else:
