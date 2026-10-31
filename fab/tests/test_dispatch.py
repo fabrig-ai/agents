@@ -285,7 +285,7 @@ class DecideTest(unittest.TestCase):
                   for e in (started(n=n), ended(n=n, outcome="infra"))]
         self.assertEqual(self.decide([task("a")], events)[0].kind, "start")
 
-    def test_design_only_unspecced_parts_with_all_needs_landed_in_plan_order(self):
+    def test_design_only_unspecced_parts_with_all_needs_designed_in_plan_order(self):
         spec = make_plan(part("core"), part("z", ("core",)), part("a"),
                          part("blocked", ("other",)), part("other"),
                          part("empty_need", ("a",)), part("two", ("core", "other")))
@@ -293,25 +293,71 @@ class DecideTest(unittest.TestCase):
         events = [event("branch.landed", "x", tip="tip", main="main"),
                   event("branch.landed", "y", tip="tip", main="main"),
                   event("question.asked", "w", text="Which?")]
-        self.assertEqual(self.decide(tasks, events, spec=spec), [Action("design", detail="z, a")])
+        self.assertEqual(self.decide(tasks, events, spec=spec),
+                         [Action("design", detail="z, a, blocked, two")])
         events.pop(1)
         actions = self.decide(tasks, events, spec=spec)
-        self.assertEqual(actions[-1], Action("design", detail="a"))
+        self.assertEqual(actions[-1], Action("design", detail="z, a, blocked, two"))
 
     def test_a_done_part_is_never_designed_and_counts_as_landed_for_its_readers(self):
         spec = make_plan(plan.Part("built", "built", "feature", (), "design.md", done=True),
                          part("reader", ("built",)))
         self.assertEqual(self.decide([], spec=spec), [Action("design", detail="reader")])
 
-    def test_design_buffer_counts_rejections_and_total_places(self):
+    def test_contract_reader_is_eligible_before_any_contract_task_lands(self):
+        spec = make_plan(replace(part("core"), contract=True), part("reader", ("core",)))
+        tasks = [task("a"), task("b", needs=("draft/a",))]
+        actions = self.decide(tasks, spec=spec)
+        self.assertEqual(actions[-1], Action("design", detail="reader"))
+        self.assertEqual([a.task for a in actions if a.kind == "start"], ["draft/a"])
+        self.assertEqual(self.decide([], spec=spec), [Action("design", detail="core")])
+
+    def test_needs_landed_and_probe_readers_wait_for_every_task_to_land(self):
+        for dependency, reader in (
+            (part("core"), replace(part("reader", ("core",)), needs_landed=("core",))),
+            (replace(part("core"), mode="probe"), part("reader", ("core",))),
+        ):
+            with self.subTest(dependency=dependency, reader=reader):
+                spec = make_plan(dependency, reader, low=2)
+                tasks = [task("a"), task("b")]
+                events = [event("branch.landed", "a", tip="tip", main="main")]
+                for history in ([], events):
+                    self.assertNotIn("design", [a.kind for a in self.decide(tasks, history, spec=spec)])
+                events.append(event("branch.landed", "b", tip="tip", main="main"))
+                self.assertEqual(self.decide(tasks, events, spec=spec),
+                                 [Action("design", detail="reader")])
+                spec.parts["core"] = replace(dependency, done=True)
+                self.assertEqual(self.decide([], spec=spec), [Action("design", detail="reader")])
+
+    def test_design_buffer_uses_starting_flow_target_regardless_of_places(self):
+        for places in (0, 1, 2, 20):
+            for low in (0.5, 1, 1.5):
+                for count in range(4):
+                    with self.subTest(places=places, low=low, count=count):
+                        hosts = {"builder": replace(self.hosts["builder"], places=places)}
+                        spec = make_plan(part("core"), part("next"), low=low)
+                        tasks = [task(str(n)) for n in range(count)]
+                        actions = self.decide(tasks, hosts=hosts, spec=spec)
+                        expected = ([Action("design", detail="next" if count else "core, next")]
+                                    if count < 2 * low else [])
+                        self.assertEqual([a for a in actions if a.kind == "design"], expected)
+        spec = make_plan(part("core"))
+        self.assertEqual(self.decide([], hosts={}, spec=spec), [Action("design", detail="core")])
+        self.assertEqual(self.decide([], spec=replace(spec, low=0)), [])
+
+    def test_design_buffer_follows_grown_and_reduced_targets_and_counts_rejections(self):
         spec = make_plan(part("core"), part("next"))
         tasks = [task("a"), task("b")]
+        self.assertNotIn("design", [a.kind for a in self.decide(tasks, spec=spec)])
+        self.assertEqual(self.decide(tasks, growth(), spec=spec)[-1], Action("design", detail="next"))
         events = [event("branch.rejected", "b", step="test")]
         self.assertNotIn("design", [a.kind for a in self.decide(tasks, events, spec=spec)])
         events.append(started("a"))
-        self.assertEqual(self.decide(tasks, events, spec=spec)[-1].kind, "design")
-        self.assertEqual(self.decide([], hosts={}, spec=spec), [])
-        self.assertEqual(self.decide([], spec=replace(spec, low=0)), [])
+        self.assertNotIn("design", [a.kind for a in self.decide(tasks, events, spec=spec)])
+        events.append(started("b"))
+        self.assertEqual(self.decide(tasks, events, spec=spec)[-1], Action("design", detail="next"))
+        infra = [started("a"), ended("a", outcome="infra")]
+        self.assertNotIn("design", [a.kind for a in self.decide([task("a")], infra, spec=spec)])
 
     def test_decide_is_repeatable_and_does_not_mutate_inputs(self):
         tasks = {t.id: t for t in (task("a"), task("b"))}

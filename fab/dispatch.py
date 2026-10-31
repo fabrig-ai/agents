@@ -196,10 +196,11 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
        last run ended infra. A task that already has MAX_RUNS runs gets park instead of start,
        whatever the target and the places.
-    4. design: when fewer tasks are runnable or rejected than plan.low times the builders'
-       total places, one design action whose detail lists, in plan order, the parts that
-       have no task spec yet and whose needs all have every task landed.
-    Statuses come from fab.state.fold.
+    4. design: when fewer tasks are runnable or rejected than plan.low times the flow's
+       current target (its starting target without prior events), one design action whose
+       detail lists, in plan order, parts not designed whose needs are designed or done.
+       A need in needs_landed or on a probe part must be done; plan.toml's done counts too.
+    Task statuses come from fab.state.fold, part statuses from fab.state.part_statuses.
     """
     flight = in_flight(events)
     free = places(hosts, flight, calm)
@@ -218,30 +219,27 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
                   for identifier, view in views.items() if view.status == status]
     actions.extend(_starts(candidates, views, events, free, limit - occupied))
 
-    design = _design_action(plan, tasks, views, hosts, len(candidates))
-    if design is not None:
-        actions.append(design)
+    if len(candidates) < plan.low * limit:
+        design = _design_action(plan, tasks, views, hosts, len(candidates))
+        if design is not None:
+            actions.append(design)
     return actions
 
 
 def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
                    hosts: Mapping[str, Host], ready: int) -> Action | None:
-    """When the ready buffer is low, list undesigned parts whose dependencies have landed."""
-    capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
-    if ready < plan.low * capacity:
-        by_part = {part: [identifier for identifier, task in tasks.items() if task.part == part]
-                   for part in plan.parts}
+    """List eligible parts after decide checks the ready buffer against the flow target.
 
-        def landed(part_id):
-            part = plan.parts.get(part_id)
-            return part is not None and (part.done or bool(by_part[part_id]) and all(
-                views[identifier].status == "landed" for identifier in by_part[part_id]))
-
-        eligible = [part.id for part in plan.parts.values() if not part.done and not by_part[part.id]
-                    and all(landed(need) for need in part.needs)]
-        if eligible:
-            return Action("design", detail=", ".join(eligible))
-    return None
+    Needs must be designed or done; needs_landed and probe needs must be done.
+    """
+    statuses = state.part_statuses(plan, tasks, {key: view.status for key, view in views.items()})
+    eligible = [part.id for part in plan.parts.values()
+                if statuses[part.id] == "not designed" and all(
+                    statuses.get(need) == "done" or (
+                        statuses.get(need) == "designed" and need not in part.needs_landed
+                        and plan.parts[need].mode != "probe")
+                    for need in part.needs)]
+    return Action("design", detail=", ".join(eligible)) if eligible else None
 
 
 def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
