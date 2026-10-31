@@ -26,11 +26,13 @@
 
 ## Gaps and departures
 
-- **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; fab's
-  queue (`fab-queue.service`) on hetzner8 since 10-30 21:15Z, which landed
-  the cutover; the tick (`fab-tick.timer`, every 2 minutes) on hel8. The
-  queue and the tick are transient user units: a reboot loses them. They
-  become fleet units with retire's second step.
+- **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; the
+  tick (`fab-tick.timer`, every 2 minutes) on hel8, a transient user unit a
+  reboot loses. It becomes a unit installed by `fab wake --install`.
+- **The queue is fab's unit, not fleet's:** `fab-queue.service`, written by
+  `fab queue install`, which the deploy runs on every machine (section 6).
+  It ran as a transient unit on hetzner8 from 10-30 21:15Z (it landed the
+  cutover) until 10-31 10:08Z, when hetzner8 also became a builder.
 - **Retire, step 1 done by hand** (the user's OK, 10-30 23:17Z): the dead
   `claim`, `precheck`, `ready-check` and `codex-run` links removed on all
   three hosts; hel8 on fab's heavy, the old reconcile timer disabled;

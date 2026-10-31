@@ -905,5 +905,68 @@ class QueueWakeTest(unittest.TestCase):
         self.assertEqual(self.notes, [])
 
 
+class UnitTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.directory = self.home / 'units'
+        self.gate = {'g': queue.machines.Host('g', 'free@g', ('gate', 'builder'), hostname='g')}
+        self.builder = {'g': queue.machines.Host('g', 'free@g', ('builder',), hostname='g')}
+        self.enterContext(patch.dict(os.environ, {'FAB_HOST': 'g'}))
+
+    def install(self, known, fake):
+        return queue.install(sh=fake, directory=self.directory, known=known,
+                             repo=Path('/q'), checkout=Path('/i'))
+
+    def test_unit_runs_the_queue_and_drains_on_stop(self):
+        text = queue.unit(home=Path('/h/fab'), checkout=Path('/h/fab/install'), repo=Path('/h/q'))
+        self.assertIn('Environment=FAB_HOME=/h/fab\n', text)
+        self.assertIn('ExecStartPre=/usr/bin/rm -f /h/fab/queue.stop\n', text)
+        self.assertIn('ExecStart=/usr/bin/bash -lc "exec /h/fab/install/bin/fab queue run --repo /h/q"\n', text)
+        self.assertIn('touch /h/fab/queue.stop; while kill -0 $$MAINPID', text)
+        self.assertIn('TimeoutStopSec=1h\nKillSignal=SIGINT\nRestart=on-failure\n', text)
+        self.assertTrue(text.endswith('[Install]\nWantedBy=default.target\n'))
+        with self.assertRaises(ValueError):
+            queue.unit(repo=Path('/bad$path'))
+
+    def test_first_install_on_a_gate_writes_reloads_enables_and_starts(self):
+        fake = FakeRunner()
+        line = self.install(self.gate, fake)
+        self.assertEqual((self.directory / queue.UNIT).read_text(),
+                         queue.unit(repo=Path('/q'), checkout=Path('/i')))
+        self.assertEqual(fake.argvs(), [['systemctl', '--user', 'daemon-reload'],
+                                        ['systemctl', '--user', 'enable', queue.UNIT],
+                                        ['systemctl', '--user', 'restart', '--no-block', queue.UNIT]])
+        self.assertTrue(line.endswith('enabled and restarting'))
+
+    def test_a_deploy_restarts_an_enabled_queue_and_keeps_a_paused_one_stopped(self):
+        write(self.directory / queue.UNIT, 'old\n')
+        for enabled, last in ((Result(0), 'restart'), (Result(1), 'daemon-reload')):
+            with self.subTest(enabled=enabled.code):
+                fake = FakeRunner().on(['systemctl', '--user', 'is-enabled'], enabled)
+                line = self.install(self.gate, fake)
+                self.assertIn(last, fake.argvs()[-1])
+                self.assertEqual('left disabled' in line, enabled.code == 1)
+                self.assertNotEqual((self.directory / queue.UNIT).read_text(), 'old\n')
+
+    def test_a_machine_without_the_gate_role_disables_a_unit_it_has(self):
+        fake = FakeRunner()
+        self.assertEqual(self.install(self.builder, fake), 'not a gate: nothing to do')
+        self.assertEqual(fake.argvs(), [])
+        write(self.directory / queue.UNIT, 'old\n')
+        line = self.install(self.builder, fake)
+        self.assertEqual(fake.argvs()[-2:], [['systemctl', '--user', 'disable', queue.UNIT],
+                                             ['systemctl', '--user', 'stop', '--no-block', queue.UNIT]])
+        self.assertEqual((self.directory / queue.UNIT).read_text(), 'old\n')
+        self.assertIn('disabled and stopping', line)
+
+    def test_main_install_prints_its_line(self):
+        out = io.StringIO()
+        with patch.object(queue, 'install', return_value='done') as install, \
+                contextlib.redirect_stdout(out):
+            self.assertEqual(queue.main(['install', '--repo', '/q']), 0)
+        install.assert_called_once_with(repo=Path('/q'))
+        self.assertEqual(out.getvalue(), 'done\n')
+
+
 if __name__ == '__main__':
     unittest.main()

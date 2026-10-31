@@ -162,6 +162,15 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `collateral`), which the dispatcher reads; the tips it has tried and
   their collateral reds (13.8) are its only other state. The port
   drops train, worker and recovery, and the publication journal (section 9).
+- **The queue's unit is fab's** (`fab queue install`, `fab-queue.service`):
+  the deploy runs it on every machine after moving fab's install to main.
+  On a gate (role `gate` in `fab/hosts.toml`) it writes the unit and
+  restarts the queue on the new code; a unit disabled by hand (a pause:
+  `systemctl --user disable --now fab-queue`) stays disabled. On a machine
+  without the role it disables a unit it finds, so moving the role moves the
+  queue. A stop drains: the unit creates `FAB_HOME/queue.stop` and waits up
+  to an hour for the cycle in progress, then interrupts it so the attempt's
+  cleanup still runs; a start removes a stale stop file.
 - **The selection and the steps are shared** (`fab/gate.py`): the queue runs
   them in the gate lane on the batch, precheck in the build lane on the tip
   merged with main, in the implementer's slot. Precheck writes its receipt to

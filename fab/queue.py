@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import shlex
 import sys
 import time
 from collections.abc import Callable, Sequence
@@ -19,8 +21,11 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, gate, log, receipts, reds, slots, wake as events
+from fab import atomic, gate, hosts as machines, log, receipts, reds, slots, wake as events
 from fab.sh import Runner, run
+
+UNIT = "fab-queue.service"  # the queue's user unit on the gate machine
+DRAIN = "1h"  # how long a stop waits for the cycle in progress before interrupting it
 
 
 @dataclass(frozen=True)
@@ -438,18 +443,86 @@ class Queue:
                     sleep(idle)
 
 
+def unit(*, checkout: Path | None = None, repo: Path | None = None, home: Path | None = None) -> str:
+    """The text of UNIT, which runs `fab queue run` on the gate. Pure.
+
+    checkout is fab's install (default home / "install"), repo the queue's clone (default
+    ~/src/fabrig/queue), home FAB_HOME (default fab.log.home()); each is made absolute, and one
+    holding a newline, `%`, `$`, `"` or a backslash is a ValueError. The service sets FAB_HOME,
+    removes a stale home/queue.stop before it starts, and runs
+    `/usr/bin/bash -lc "exec <checkout>/bin/fab queue run --repo <repo>"` (paths shell-quoted).
+    A stop drains: ExecStop creates the stop file and waits for the main process to end its
+    cycle, up to DRAIN, after which the rest is interrupted with SIGINT so an attempt's
+    cleanup still runs. Restart=on-failure after 60 s; WantedBy=default.target."""
+    home = (home if home is not None else log.home()).absolute()
+    checkout = (checkout if checkout is not None else home / "install").absolute()
+    repo = (repo if repo is not None else Path.home() / "src/fabrig/queue").absolute()
+    for path in (home, checkout, repo):
+        if any(character in str(path) for character in '\n\r%$"\\'):
+            raise ValueError(f"invalid unit path {str(path)!r}")
+    q = shlex.quote
+    stop = home / "queue.stop"
+    return ("[Unit]\nDescription=fab: fabrig's merge queue\n\n"
+            f"[Service]\nEnvironment=FAB_HOME={home}\n"
+            f"ExecStartPre=/usr/bin/rm -f {stop}\n"
+            f'ExecStart=/usr/bin/bash -lc "exec {q(str(checkout / "bin/fab"))} queue run '
+            f'--repo {q(str(repo))}"\n'
+            f'ExecStop=/usr/bin/bash -c "touch {q(str(stop))}; '
+            'while kill -0 $$MAINPID 2>/dev/null; do sleep 5; done"\n'
+            f"TimeoutStopSec={DRAIN}\nKillSignal=SIGINT\nRestart=on-failure\nRestartSec=60\n\n"
+            "[Install]\nWantedBy=default.target\n")
+
+
+def install(*, sh: Runner = run, directory: Path | None = None, checkout: Path | None = None,
+            repo: Path | None = None, known: dict[str, machines.Host] | None = None) -> str:
+    """Install or refresh UNIT on this machine at a deploy; return what was done, one line.
+
+    known is the machines (default fab.hosts.load()), this one found by fab.hosts.this;
+    directory defaults to $XDG_CONFIG_HOME/systemd/user, or ~/.config/systemd/user.
+    - Not a gate, no unit file: nothing.
+    - Not a gate, a unit file: `systemctl --user disable UNIT`, then `stop --no-block`
+      (the queue drains on its own; the file stays, disabled).
+    - A gate: unit(checkout=, repo=) through fab.atomic.write, then daemon-reload. A unit that
+      was there and disabled (a pause, `systemctl --user disable --now fab-queue`) is left
+      so. Otherwise, a first install among them: `enable`, then `restart --no-block`, which
+      drains the running queue and starts it on the new code.
+    Every systemctl command is check=True except `is-enabled`, which is asked first."""
+    host = machines.this(known if known is not None else machines.load())
+    if directory is None:
+        config = os.environ.get("XDG_CONFIG_HOME")
+        directory = (Path(config) if config else Path.home() / ".config") / "systemd/user"
+    path = directory / UNIT
+    present = path.exists()
+    enabled = present and sh(["systemctl", "--user", "is-enabled", "--quiet", UNIT]).ok
+    if host is None or "gate" not in host.roles:
+        if not present:
+            return "not a gate: nothing to do"
+        sh(["systemctl", "--user", "disable", UNIT], check=True)
+        sh(["systemctl", "--user", "stop", "--no-block", UNIT], check=True)
+        return f"not a gate: {UNIT} disabled and stopping"
+    atomic.write(path, unit(checkout=checkout, repo=repo))
+    sh(["systemctl", "--user", "daemon-reload"], check=True)
+    if present and not enabled:
+        return f"{path} written; {UNIT} left disabled"
+    sh(["systemctl", "--user", "enable", UNIT], check=True)
+    sh(["systemctl", "--user", "restart", "--no-block", UNIT], check=True)
+    return f"{path} written; {UNIT} enabled and restarting"
+
+
 def main(argv: list[str]) -> int:
     """`fab queue run|once [--repo PATH] [--batch N]` (repo default FAB_HOME/repos/fabrig; run stops
     at FAB_HOME/queue.stop), `fab queue plan` (the next batch's names, no checks),
     `fab queue log [--since TS]` (queue.jsonl records at or after TS, one per line),
     `fab queue untry BRANCH` (ask the running queue to forget its tried tip next cycle),
     `fab queue receipt TIP` (keep the precheck receipt on stdin for TIP, fab.receipts.store
-    with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1).
+    with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1),
+    `fab queue install [--repo PATH]` (install(repo=) at a deploy, printing its line; repo
+    default ~/src/fabrig/queue).
     Running cycles wake the tick through fab.wake.wake."""
     parser = argparse.ArgumentParser(prog="fab queue")
-    parser.add_argument("command", choices=("run", "once", "plan", "log", "untry", "receipt"))
+    parser.add_argument("command", choices=("run", "once", "plan", "log", "untry", "receipt", "install"))
     parser.add_argument("branch", nargs="?")
-    parser.add_argument("--repo", type=Path, default=log.home() / "repos/fabrig")
+    parser.add_argument("--repo", type=Path)
     parser.add_argument("--batch", type=int, default=8)
     parser.add_argument("--since")
     args = parser.parse_args(argv)
@@ -465,6 +538,11 @@ def main(argv: list[str]) -> int:
                 print(json.dumps(entry, ensure_ascii=False))
         return 0
     try:
+        if args.command == "install":
+            print(install(repo=args.repo))
+            return 0
+        if args.repo is None:
+            args.repo = log.home() / "repos/fabrig"
         if args.command == "receipt":
             receipts.store(log.home(), args.branch, sys.stdin.read())
             return 0
@@ -481,7 +559,7 @@ def main(argv: list[str]) -> int:
             queue.cycle()
         else:
             queue.run(stop=queue.home / "queue.stop")
-    except (OSError, RuntimeError, ValueError) as error:
+    except (OSError, RuntimeError, ValueError) as error:  # Failed is a RuntimeError
         print(f"fab queue: {error}", file=sys.stderr)
         return 1
     return 0
