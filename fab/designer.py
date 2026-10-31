@@ -193,7 +193,9 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
        `(none)` when there is none. Their format is the cut's to follow.
     7. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
        when it is empty (a repository without fab/).
-    Sections 5 to 7 are left out when cut-run.md is the role: it holds the formats.
+    When cut-run.md is the role: section 4 is named `Sources`, a fabrig plan's brief then
+    quotes fab/roles/fabrig-run.md as `What each implementer is told`, and sections 5 to 7
+    are left out (cut-run.md holds the formats).
 
     When options are given, insert `Plan options` after `The draft`, with parsed
     KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true
@@ -238,8 +240,12 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
          f"- Plan: write `{plan_path}/plan.toml`\n"
          f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
         *option_sections,
-        ("The user's drafts", calls.drafts_text(plan, root)),
-        # cut-run.md carries the plan and spec formats; a run's cut reads designs itself.
+        # A run's cut gets its sources under their own name, and reads what each implementer is
+        # told, as the run's lead read the implementers' role file; cut-run.md holds the formats.
+        ("Sources" if run_role else "The user's drafts", calls.drafts_text(plan, root)),
+        *([("What each implementer is told",
+            runs.ROLE.with_name("fabrig-run.md").read_text(encoding="utf-8"))]
+          if run_role and plan.repo == "fabrig" else []),
         *([] if run_role else [
             ("Designs", design_index(root)),
             ("Plans", "\n".join(f"- `{path}`" for path in plans) or "(none)"),

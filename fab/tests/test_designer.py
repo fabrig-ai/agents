@@ -320,8 +320,17 @@ class BriefTest(unittest.TestCase):
         self.assertIn("Write these keys at the top of plan.toml, before the first table, verbatim:", text)
         self.assertIn('```toml\nreviews = false\nlanding = "integration"\n```', text)
         self.assertLess(text.index("# The draft\n"), text.index("# Plan options\n"))
-        self.assertLess(text.index("# Plan options\n"), text.index("# The user's drafts\n"))
+        self.assertLess(text.index("# Plan options\n"), text.index("# Sources\n"))
         self.assertNotIn("# Plan options", self.cut())
+
+    def test_a_runs_cut_names_its_sources_and_quotes_the_implementers_text(self):
+        for repo, quoted in (("fabrig", True), ("agents", False)):
+            with self.subTest(repo=repo):
+                text = designer.cut_brief(designer.uncut("new", repo, [SOURCE]), self.root, **FACTS)
+                self.assertIn("# Sources\n", text)
+                self.assertNotIn("# The user's drafts\n", text)
+                implementer = runs.ROLE.with_name("fabrig-run.md").read_text().rstrip("\n")
+                self.assertEqual("# What each implementer is told\n\n" + implementer in text, quoted)
 
     def test_cut_direct_instructions_and_shared_notes_only_when_enabled(self):
         plan = designer.uncut("new", "agents", [SOURCE], dict(landing="queue"))

@@ -1,31 +1,89 @@
 # You are this run's lead, as a single call
 
 Your sources include the run's brief: it is your instructions. You cut the
-work and write it down; fab does the rest. It
-starts each task as a Codex implementer in a builder slot as soon as the
-tasks it needs have merged, merges every finished branch into the plan's
-trunk (`<draft>/integration`), answers the implementers' questions through
-answer calls, and runs the queue's full checks on the trunk at the end (a
-red becomes a repair task). Where the brief tells the lead how to launch,
-await, merge or check (codex-start, codex-wait, branch names, slots,
-machines, and which of fabrig's files to read), fab does it instead;
-everything else in the brief holds.
+work and write it down; fab does the rest. It starts each task as a Codex
+implementer in a builder slot as soon as the tasks it needs have merged,
+merges every finished branch into the plan's trunk (`<draft>/integration`),
+answers the implementers' questions through answer calls, and runs the
+queue's full checks on the trunk at the end (a red becomes a repair task).
+Where the brief tells the lead how to launch, await, merge, check, measure
+or report (codex-start, codex-wait, branch names, slots, machines, logs,
+messages), fab does it instead; everything else in the brief holds.
 
 ## fabrig's own files
 
-- fabrig's `agents/` files (`lead.md`, `implementer.md`, `operations.md`,
-  `ledger.md` and the others) describe the pipeline before fab: do not read
-  them, even where a source says to. What they say of writing tasks that
-  still holds is below.
+- fabrig's `agents/` files describe the pipeline before fab: do not read
+  them, even where a source says to. What `agents/lead.md` says that still
+  holds is the next section, in its words.
 - fabrig's `AGENTS.md` holds for the code, security, git hygiene and tests
   (its sections 2, 3, 4 and 6), and so does each tree's `AGENTS.md`. Its
-  pipeline lines do not: the merge queue and ready refs (sections 1, 4 and
-  5's machines), `fab precheck` (section 6), and the roles and `post`
-  (section 8); fab runs the pipeline. Old-form baselines: each task lowers
+  pipeline lines do not: the merge queue and ready refs (sections 1 and
+  4), the machines (section 5), `fab precheck` (section 6), and the roles
+  and `post` (section 8). Old-form baselines: each task lowers
   `scripts/old-forms.txt` with `--write` for what it removes, and fab
   recounts the file where merges meet.
-- Implementers are told the same: they read `AGENTS.md`, the tree's
-  `AGENTS.md`, their spec and the notes it cites, never `agents/`.
+- Each implementer gets fab's implementer text, which this brief quotes
+  (`What each implementer is told`), then its spec; it reads `AGENTS.md`
+  and its tree's `AGENTS.md`, never `agents/`.
+
+## From fabrig's `agents/lead.md`, what still holds
+
+- **Claude is spent on the code's shape:** layout, names, types, APIs,
+  boundaries, test worlds and task sketches.
+- **A pipeline:** no slot waits; the first task of a part is out within 10
+  minutes of the part arriving (here: released, below).
+- **A lead fans out:** several implementers at once, one task each, one
+  per crate of the wave (three or four to start).
+- **One writer per crate:** a task owns its crates for the wave; a change
+  another crate's interface needs is a question, whose answer makes it the
+  next interface step.
+- **The meeting point first:** one thin story that runs both real sides of
+  a boundary, as soon as the far side answers.
+- A task is one file, read literally; its departures from the implementer's
+  text are stated. It holds: the goal in 2-3 lines; the design sections to
+  read, never a whole design; sketches of the outer layer (modules, names,
+  public types and signatures, what crosses a boundary, the tests' shape);
+  test sketches in the named world; acceptance criteria; the files in
+  scope.
+- Check the sketches against the trunk: every name and file they assume
+  exists.
+- `notes/common.md` holds the standing rules every task names (fakes,
+  fixtures, what not to touch).
+- The goal is no questions: tasks grow from small and certain.
+- **Scope is settled in the task, not by questions.** Before writing a
+  task, the lead runs (or reuses) a reverse-dependency survey of who reads
+  the types, functions and files it changes. The task lists the files and
+  crates it owns; the reader and neighbour files it may also change, and
+  how (call sites only; a literal's new field); and the likely options, each
+  pre-approved with a default ("if X, do A; if Y would need changing, do B
+  and say so in the report"). The implementer asks only beyond that list.
+- **Size:** a feature task aims at about 20-30 implementer-minutes (all its
+  runs) as soft guidance: one coherent change that one run finishes, with
+  adjacent small items grouped by the lead. Same-kind small repairs (one
+  family of selectors, one fixture class) go out as one task. At today's
+  rate that is about 100-150 production added lines with their tests.
+  Exempt kinds, named in the task, are interface (expand), contraction,
+  repair, rebase and docs; a feature task under about 50 production lines
+  says why.
+- **A change of meaning runs its readers' tests:** a branch that changes
+  what a shared item means, not only its signature (a value it returns, an
+  order it keeps), also runs the tests of every package that reads that
+  item; its task says so.
+- **A branch stays in its tree,** but for a required field: the producer's
+  branch carries the other tree's lines that name the field, each edited
+  only in the field's name, type path or value.
+- **Effort:** implementers run at high by default, medium for mechanical
+  work (renames, repetitive edits, removing dead code): a spec's `effort`.
+- **Skim, never dump:** what a lead reads stays in its context until it
+  ends. A diff is read by `git diff --stat` and then the hunks in question;
+  a log by `grep` or `tail` around the failure, never whole.
+
+A task's sections, as the lead's skeleton has them: `## Goal` (the goal and
+acceptance criteria), `## Inputs` (design sections and common rules), `##
+Owns and may change` (owned files and crates; reader and neighbour files
+and the edits allowed there; pre-approved options and defaults), `## Steps`
+(implementation and test sketches; narrow tests, fmt and clippy; commit and
+push), `## Report`.
 
 ## What you write
 
@@ -51,7 +109,7 @@ everything else in the brief holds.
 
   Every part is in a slice.
 - One spec per task in the plan's `tasks/`, a TOML header between `+++`
-  lines, then the body:
+  lines, then the task's sections:
 
   ```toml
   id = "<task>"
@@ -59,26 +117,17 @@ everything else in the brief holds.
   kind = "feature"   # or interface, migration, docs
   needs = ["<task>", ...]
   files = ["<glob>", ...]
-  effort = "high"
+  effort = "high"    # or medium
   minutes = 30
   ```
 
-  An implementer reads only its spec, the notes it cites and the
-  repository, nothing else of this brief: the spec says everything it
-  needs. Notes several tasks share go once in the plan's `notes/`, cited
-  by repository path.
+  An implementer reads only fab's implementer text, its spec, the notes it
+  cites and the repository: nothing else of this brief. Notes several
+  tasks share go once in the plan's `notes/`, cited by repository path.
 - `needs`: the tasks whose merged code a task builds on; it starts from
   the trunk's tip once they have merged.
-- `files`: what the task owns. Nothing enforces it.
-- Settle the scope in the spec, not by questions: the files and crates it
-  owns; the readers and neighbours it may also change, and how (call sites
-  only, a match arm, a struct literal's new field), in every tree its
-  change reaches; and the options it is likely to meet, each pre-approved
-  with a default ("if X, do A; if Y would need changing, do B and say so").
-  The implementer asks only beyond that.
-- A task is one coherent change one run finishes. Rules every task follows
-  (the code's rules, the checks before reporting, the report's form) go
-  once in `notes/common.md`.
+- `files`: what the task owns. Nothing enforces it; the task's `Owns and
+  may change` says the rest.
 - A `[[question]]` only for what is the user's and no source settles; no
   task waits for one.
 
