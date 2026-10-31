@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, hosts, log, plan
+from fab import atomic, codex, hosts, log, plan
 from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Failed, Runner, run, ssh
@@ -326,16 +326,21 @@ def status(started: dict, host: Host, *, sh: Runner = run) -> dict:
     when the line gives none."""
     marker = shlex.quote(str(Path(started["state"]) / "ended"))
     report_path = shlex.quote(started["report"])
+    result_path = shlex.quote(str(Path(started["state"]) / "result.json"))
     script = (f"if test -f {marker}; then printf 'ended\\n'; "
+              f"line=; if test -f {result_path}; then IFS= read -r line < {result_path} || :; fi; "
+              "printf '%s\\n' \"$line\"; "
               f"if test -f {report_path}; then cat -- {report_path}; fi; "
               "else printf 'running\\n'; fi")
     result = sh(ssh(host.ssh, ["bash", "-c", script]), check=True)
-    state, _, report = result.out.partition("\n")
+    state, _, rest = result.out.partition("\n")
+    result_line, _, report = rest.partition("\n")
     if state not in ("running", "ended"):
         raise ValueError(f"{started['run']}: invalid status response")
     ended = state == "ended"
     return {"run": started["run"], "ended": ended,
-            "outcome": outcome(report) if ended else None, "report": report if ended else None}
+            "outcome": outcome(report) if ended else None, "report": report if ended else None,
+            "tokens": codex.tokens_field(result_line) if ended else None}
 
 
 def launch_detached(host: Host, run_id: str, repo: str, rev: str, *, sh: Runner = run,
@@ -394,6 +399,7 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     stamp = log.now()
     minutes = max(0.0, (datetime.fromisoformat(stamp)
                        - datetime.fromisoformat(started["ts"])).total_seconds() / 60)
+    fields = {"tokens": current["tokens"]} if current["tokens"] is not None else {}
     freed = {}
     try:
         if "slot" in started:
@@ -406,7 +412,7 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     except (OSError, ValueError, Failed) as error:
         freed["free_error"] = str(error)
     log.append("run.ended", path=log_path, ts=stamp, run=run_id, task=started["task"],
-               outcome=current["outcome"], report=str(report_path), minutes=minutes, **freed)
+               outcome=current["outcome"], report=str(report_path), minutes=minutes, **fields, **freed)
     if current["outcome"] == "question":
         log.append("question.asked", path=log_path, task=started["task"], run=run_id,
                    text="\n".join(current["report"].splitlines()[:15]))

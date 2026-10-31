@@ -116,7 +116,15 @@ def tokens_field(result: str) -> str | None:
     int counts 0; Codex's input holds its cached tokens). None when the text is not a JSON
     object or has no `tokens` object: a run cut off before its result, or codex-run's state.
     Pure."""
-    raise NotImplementedError
+    try:
+        record = json.loads(result)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(record, dict) or not isinstance(record.get("tokens"), dict):
+        return None
+    counts = (record["tokens"].get(key) for key in
+              ("input_tokens", "cached_input_tokens", "output_tokens"))
+    return "/".join(str(value) if type(value) is int and value >= 0 else "0" for value in counts)
 
 
 def at_capacity(events: Sequence[dict], stderr: str) -> bool:

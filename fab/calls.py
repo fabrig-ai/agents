@@ -56,7 +56,8 @@ class Usage:
         """call.ended's usage fields: tokens `<input>/<cache_read>/<output>` (the shape the
         log has always had, which fab.accounting.token_counts reads), then cache_write, peak
         and turns as ints."""
-        raise NotImplementedError
+        return {"tokens": f"{self.input}/{self.cache_read}/{self.output}",
+                "cache_write": self.cache_write, "peak": self.peak, "turns": self.turns}
 
 
 @dataclass(frozen=True)
@@ -315,7 +316,7 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: 
     comes first and --add-dir takes `=`: --add-dir accepts several directories and would
     otherwise take the prompt for one."""
     return ["claude", "-p", f"Read and follow the brief at {shlex.quote(str(brief_path))}.",
-            "--model", model, "--effort", effort, "--output-format", "json",
+            "--model", model, "--effort", effort, "--output-format", "stream-json", "--verbose",
             "--dangerously-skip-permissions", f"--add-dir={workdir}"]
 
 
@@ -362,11 +363,11 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         result = sh(claude_argv(brief_path, worktree, effort=role_effort(role)), cwd=str(worktree),
                     timeout=TIMEOUT,
                     env=environment)
-        atomic.write(directory / "result.json", result.out)
+        atomic.write(directory / "stream.jsonl", result.out)
         atomic.write(directory / "stderr.log", result.err)
-        status, tokens = _call_result(result.out, report_path)
+        status = _call_result(report_path)
         log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
-                   outcome=status, tokens=tokens, minutes=(time.monotonic() - began) / 60)
+                   outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
         return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
     finally:
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
@@ -407,25 +408,58 @@ def claude_usage(stream: str) -> Usage:
       turns the number of main-thread messages.
     Usage(input, cache_write, cache_read, output, peak, turns), the cache write being
     cache_creation_input_tokens. Empty or unreadable output gives all zeros. Pure."""
-    raise NotImplementedError
-
-
-def _call_result(text: str, report_path: Path) -> tuple[str, str]:
-    """Read the report's outcome and JSON usage, tolerating missing or malformed output."""
+    messages = {}
     try:
-        result = json.loads(text)
+        legacy = json.loads(stream)
     except json.JSONDecodeError:
-        result = {}
-    usage = result.get("usage", {}) if isinstance(result, dict) else {}
-    if not isinstance(usage, dict):
-        usage = {}
-    tokens = "/".join(str(usage.get(key, 0)) for key in
-                      ("input_tokens", "cache_read_input_tokens", "output_tokens"))
+        legacy = None
+    result = legacy if isinstance(legacy, dict) and "type" not in legacy else None
+    lines = [legacy] if isinstance(legacy, dict) else []
+    if not lines:
+        for line in stream.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(event, dict):
+                lines.append(event)
+    for event in lines:
+        if event.get("type") == "result":
+            result = event
+        message = event.get("message")
+        if event.get("type") != "assistant" or not isinstance(message, dict):
+            continue
+        if not isinstance(message.get("usage"), dict):
+            continue
+        identity = message.get("id")
+        key = identity if isinstance(identity, str) else len(messages)
+        messages[key] = (_usage_counts(message["usage"]), event.get("parent_tool_use_id") is None)
+    peak = max((sum(counts[:3]) for counts, main in messages.values() if main), default=0)
+    if result is not None:
+        counts = _usage_counts(result.get("usage"))
+        turns = result.get("num_turns")
+        turns = turns if type(turns) is int else 0
+    else:
+        counts = tuple(sum(counts[index] for counts, _ in messages.values()) for index in range(4))
+        turns = sum(main for _, main in messages.values())
+    return Usage(*counts, peak, turns)
+
+
+def _usage_counts(usage: object) -> tuple[int, int, int, int]:
+    usage = usage if isinstance(usage, dict) else {}
+    return tuple(value if type(value) is int and value >= 0 else 0
+                 for value in (usage.get(key) for key in
+                               ("input_tokens", "cache_creation_input_tokens",
+                                "cache_read_input_tokens", "output_tokens")))
+
+
+def _call_result(report_path: Path) -> str:
+    """Read the report's outcome, tolerating a missing or unreadable report."""
     try:
         report_text = report_path.read_text(encoding="utf-8")
     except (OSError, UnicodeError):
         report_text = ""
-    return outcome(report_text), tokens
+    return outcome(report_text)
 
 
 def main(argv: list[str]) -> int:

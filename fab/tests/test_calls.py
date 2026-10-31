@@ -330,7 +330,7 @@ class BriefTest(unittest.TestCase):
         brief, worktree = Path("/a b's/brief.md"), Path("/work tree")
         argv = calls.claude_argv(brief, worktree)
         self.assertEqual(argv[:2], ["claude", "-p"])
-        self.assertEqual(argv[3:], ["--model", calls.MODEL, "--effort", "high", "--output-format", "json",
+        self.assertEqual(argv[3:], ["--model", calls.MODEL, "--effort", "high", "--output-format", "stream-json", "--verbose",
                                     "--dangerously-skip-permissions", f"--add-dir={worktree}"])
         self.assertEqual(calls.claude_argv(brief, worktree, effort="medium")[6], "medium")
         self.assertEqual((calls.role_effort("answer"), calls.role_effort("skeleton")), ("medium", "high"))
@@ -340,13 +340,72 @@ class BriefTest(unittest.TestCase):
         self.assertEqual(calls.claude_argv(brief, worktree, model="another")[4], "another")
 
 
+class ClaudeUsageTest(unittest.TestCase):
+    def stream(self, result=True):
+        events = [
+            {"type": "assistant", "message": {"id": "main", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 30, "output_tokens": 1}}},
+            {"type": "assistant", "message": {"id": "main", "usage": {
+                "input_tokens": 10, "cache_creation_input_tokens": 20,
+                "cache_read_input_tokens": 30, "output_tokens": 4}}},
+            {"type": "assistant", "parent_tool_use_id": "tool", "message": {"id": "sub", "usage": {
+                "input_tokens": 1000, "cache_creation_input_tokens": 2000,
+                "cache_read_input_tokens": 3000, "output_tokens": 5}}},
+            {"type": "assistant", "parent_tool_use_id": None, "message": {"usage": {
+                "input_tokens": 3, "output_tokens": 2}}},
+            {"type": "assistant", "message": {"usage": {"input_tokens": 2}}},
+            {"type": "assistant", "message": None},
+            {"type": "assistant", "message": {"id": "main"}},
+        ]
+        if result:
+            events += [{"type": "result", "usage": {"input_tokens": 1}},
+                       {"type": "result", "num_turns": 7, "usage": {"input_tokens": 50,
+                        "cache_creation_input_tokens": 60, "cache_read_input_tokens": 70, "output_tokens": 80}}]
+        events.append({"usage": {"input_tokens": 9999}})
+        return "not JSON\n[]\n" + "\n".join(map(json.dumps, events)) + '\n{"type":'
+
+    def test_claude_usage_result_totals_last_message_usage_and_main_peak(self):
+        self.assertEqual(calls.claude_usage(self.stream()), calls.Usage(50, 60, 70, 80, 60, 7))
+
+    def test_claude_usage_without_result_sums_each_message_once_and_counts_main_turns(self):
+        self.assertEqual(calls.claude_usage(self.stream(False)), calls.Usage(1015, 2020, 3030, 11, 60, 3))
+
+    def test_claude_usage_legacy_object_and_unreadable_stream(self):
+        old = {"usage": {"input_tokens": 10, "cache_creation_input_tokens": 20,
+                         "cache_read_input_tokens": 30, "output_tokens": 4}, "num_turns": 2}
+        self.assertEqual(calls.claude_usage(json.dumps(old, indent=2)), calls.Usage(10, 20, 30, 4, 0, 2))
+        for stream in ("", "garbage", "[]", "null", "42", '{"type":"result","usage":null}'):
+            with self.subTest(stream=stream):
+                self.assertEqual(calls.claude_usage(stream), calls.Usage(0, 0, 0, 0, 0, 0))
+
+    def test_claude_usage_invalid_counts_and_turns_are_zero(self):
+        for value in (None, -1, True, 2.5, "10"):
+            usage = dict.fromkeys(("input_tokens", "cache_creation_input_tokens",
+                                   "cache_read_input_tokens", "output_tokens"), value)
+            events = [{"type": "assistant", "message": {"usage": usage}},
+                      {"type": "result", "usage": usage, "num_turns": value if value != -1 else None}]
+            with self.subTest(value=value):
+                self.assertEqual(calls.claude_usage("\n".join(map(json.dumps, events))),
+                                 calls.Usage(0, 0, 0, 0, 0, 0))
+
+    def test_claude_usage_log_fields_keep_tokens_shape(self):
+        self.assertEqual(calls.Usage(10, 20, 30, 4, 60, 2).log_fields(),
+                         {"tokens": "10/30/4", "cache_write": 20, "peak": 60, "turns": 2})
+
+
 class StartTest(unittest.TestCase):
     def test_start_commands_artifacts_events_usage_and_outcome(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
             text = calls.skeleton_brief(plan, "core", tasks, {}, root,
                                         call_id="preview", branch="preview", report="preview")
-            result_json = json.dumps({"usage": {"input_tokens": 23, "cache_read_input_tokens": 50, "output_tokens": 9}})
+            result_json = "\n".join(json.dumps(event) for event in [
+                {"type": "assistant", "message": {"id": "main", "usage": {
+                    "input_tokens": 23, "cache_creation_input_tokens": 7, "cache_read_input_tokens": 50}}},
+                {"type": "result", "num_turns": 2, "usage": {"input_tokens": 23,
+                    "cache_creation_input_tokens": 7, "cache_read_input_tokens": 50, "output_tokens": 9}},
+            ])
 
             def claude(call):
                 directory = Path(call.cwd).parent
@@ -376,7 +435,7 @@ class StartTest(unittest.TestCase):
             ])
             self.assertEqual([call.cwd for call in fake.calls], [str(root), str(directory / "wt"), str(root)])
             self.assertEqual(runner.call_args_list[1].kwargs["timeout"], calls.TIMEOUT)
-            self.assertEqual((directory / "result.json").read_text(), result_json)
+            self.assertEqual((directory / "stream.jsonl").read_text(), result_json)
             self.assertEqual((directory / "stderr.log").read_text(), "Claude diagnostic\n")
             started, ended = log.read(root / "custom.jsonl")
             self.assertEqual({key: value for key, value in started.items() if key != "ts"},
@@ -384,7 +443,8 @@ class StartTest(unittest.TestCase):
                               "subject": "demo/core", "branch": result["branch"]})
             self.assertEqual({key: value for key, value in ended.items() if key != "ts"},
                              {"ev": "call.ended", "call": directory.name, "role": "skeleton", "subject": "demo/core",
-                              "outcome": "done", "tokens": "23/50/9", "minutes": 1.5})
+                              "outcome": "done", "tokens": "23/50/9", "cache_write": 7,
+                              "peak": 80, "turns": 2, "minutes": 1.5})
 
     def test_start_binds_subject_answers_after_facts_before_next_section_or_end(self):
         for tail in ("", "\n\n# The task\n\nKeep the task.\n"):

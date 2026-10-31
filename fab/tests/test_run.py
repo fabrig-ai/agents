@@ -447,23 +447,34 @@ class RunStatusTest(unittest.TestCase):
     def test_status_while_running(self):
         fake = FakeRunner().on(["ssh"], Result(0, "running\n"))
         self.assertEqual(run.status(started(), HOST, sh=fake),
-                         {"run": "draft/task-1", "ended": False, "outcome": None, "report": None})
+                         {"run": "draft/task-1", "ended": False, "outcome": None, "report": None, "tokens": None})
         self.assertEqual(len(fake.calls), 1)
         script = command(fake.calls[0])[2]
         self.assertIn("test -f /state/codex-123/ended", script)
         self.assertIn("cat -- /remote/report.md", script)
+        self.assertIn("IFS= read -r line < /state/codex-123/result.json", script)
+        self.assertIn("printf '%s\\n' \"$line\"", script)
 
     def test_status_after_ended_reads_report_in_the_same_ssh(self):
         report = "\nDone: complete\nDetails.\n"
-        fake = FakeRunner().on(["ssh"], Result(0, "ended\n" + report))
+        fake = FakeRunner().on(["ssh"], Result(0, "ended\n\n" + report))
         self.assertEqual(run.status(started(), HOST, sh=fake),
-                         {"run": "draft/task-1", "ended": True, "outcome": "done", "report": report})
+                         {"run": "draft/task-1", "ended": True, "outcome": "done", "report": report, "tokens": None})
         self.assertEqual(len(fake.calls), 1)
+
+    def test_status_reads_tokens_and_report_in_one_ssh(self):
+        with tmp_home():
+            result = json.dumps({"tokens": {"input_tokens": 10, "cached_input_tokens": 3, "output_tokens": 4}})
+            fake = FakeRunner().on(["ssh"], Result(0, "ended\n" + result + "\nDone: complete\n"))
+            self.assertEqual(run.status(started(), HOST, sh=fake),
+                             {"run": "draft/task-1", "ended": True, "outcome": "done",
+                              "report": "Done: complete\n", "tokens": "10/3/4"})
+            self.assertEqual(len(fake.calls), 1)
 
     def test_status_missing_or_unknown_report_is_failed(self):
         for report in ("", "codex-run: reserved\n"):
             with self.subTest(report=report):
-                fake = FakeRunner().on(["ssh"], Result(0, "ended\n" + report))
+                fake = FakeRunner().on(["ssh"], Result(0, "ended\n\n" + report))
                 self.assertEqual(run.status(started(), HOST, sh=fake)["outcome"], "failed")
 
     def test_status_quotes_remote_paths(self):
@@ -473,6 +484,7 @@ class RunStatusTest(unittest.TestCase):
         script = command(fake.calls[0])[2]
         self.assertIn(shlex.quote(record["state"] + "/ended"), script)
         self.assertIn("cat -- " + shlex.quote(record["report"]), script)
+        self.assertIn(shlex.quote(record["state"] + "/result.json"), script)
 
     def test_status_propagates_ssh_errors_and_refuses_invalid_response(self):
         fake = FakeRunner().on(["ssh"], Result(255, err="offline"))
@@ -486,7 +498,7 @@ class RunCollectTest(unittest.TestCase):
     def test_collect_logs_and_copies_once_even_with_a_stale_event_snapshot(self):
         with tmp_home() as home:
             record = started()
-            fake = FakeRunner().on(["ssh"], Result(0, "ended\nDone: checked\nDetails.\n"))
+            fake = FakeRunner().on(["ssh"], Result(0, "ended\n\nDone: checked\nDetails.\n"))
             path = home / "events.jsonl"
             with patch.object(log, "now", return_value="2026-10-30T12:12:30.000Z"):
                 self.assertEqual(run.collect(record["run"], iter([record]), {HOST.name: HOST},
@@ -505,6 +517,18 @@ class RunCollectTest(unittest.TestCase):
             self.assertEqual(log.read(path), [entry])
             self.assertEqual(log.read(), [])
 
+    def test_collect_logs_tokens_only_when_result_provides_them(self):
+        for result, tokens in (("", None), ('{"tokens":{"input_tokens":10}}', "10/0/0")):
+            with self.subTest(result=result), tmp_home():
+                record = started()
+                fake = FakeRunner().on(["ssh"], Result(0, "ended\n" + result + "\nDone: checked\n"))
+                self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake), "done")
+                entry, = log.read()
+                if tokens is None:
+                    self.assertNotIn("tokens", entry)
+                else:
+                    self.assertEqual(entry["tokens"], tokens)
+
     def test_collect_command_removes_a_dirty_linked_worktree_and_keeps_its_branch(self):
         # Real git checks removal from inside the linked worktree, including untracked files.
         with tmp_home() as home:
@@ -515,7 +539,7 @@ class RunCollectTest(unittest.TestCase):
             sibling.write_text("left by the run\n")
             sibling.replace(worktree / "untracked")
             record = started(dir=str(worktree))
-            fake = FakeRunner().on(["ssh"], Result(0, "ended\nDone: checked\n"))
+            fake = FakeRunner().on(["ssh"], Result(0, "ended\n\nDone: checked\n"))
             self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake), "done")
             argv = command(fake.calls[-1])
             git(home, *argv[1:])
@@ -529,7 +553,7 @@ class RunCollectTest(unittest.TestCase):
                 def answer(call):
                     if command(call)[:3] == ["fab", "slot", "release"]:
                         return Result(0, f"{freed}\n")
-                    return Result(0, "ended\nDone: checked\n")
+                    return Result(0, "ended\n\nDone: checked\n")
 
                 fake = FakeRunner().on(["ssh"], answer)
                 self.assertEqual(run.collect(record["run"], [record], {HOST.name: HOST}, sh=fake), "done")
@@ -552,7 +576,7 @@ class RunCollectTest(unittest.TestCase):
                     record = started(**({"slot": 0, "dir": str(ROOT.parent / "slots/0")} if slotted else {}))
                     def answer(call):
                         if command(call)[0] == "bash":
-                            return Result(0, "ended\nQuestion: choose?\nDetails.\n")
+                            return Result(0, "ended\n\nQuestion: choose?\nDetails.\n")
                         if failure == "os":
                             raise OSError("cannot execute ssh")
                         if failure == "bad output":
@@ -575,7 +599,7 @@ class RunCollectTest(unittest.TestCase):
     def test_collect_question_logs_first_fifteen_lines(self):
         with tmp_home():
             report = "Question: which option?\n" + "\n".join(f"line {i}" for i in range(20)) + "\n"
-            fake = FakeRunner().on(["ssh"], Result(0, "ended\n" + report))
+            fake = FakeRunner().on(["ssh"], Result(0, "ended\n\n" + report))
             self.assertEqual(run.collect("draft/task-1", [started()], {HOST.name: HOST}, sh=fake),
                              "question")
             ended, question = log.read()
@@ -622,7 +646,7 @@ class RunMainTest(unittest.TestCase):
             running = FakeRunner().on(["ssh"], Result(0, "running\n"))
             self.assertEqual(self.invoke(["status", "draft/task-1"], running),
                              (0, "draft/task-1 running\n"))
-            done = FakeRunner().on(["ssh"], Result(0, "ended\nDone: checked\n"))
+            done = FakeRunner().on(["ssh"], Result(0, "ended\n\nDone: checked\n"))
             self.assertEqual(self.invoke(["status", "draft/task-1"], done), (0, "draft/task-1 done\n"))
             self.assertEqual(self.invoke(["collect", "draft/task-1"], done), (0, "draft/task-1 done\n"))
             self.assertTrue((home / "fab/runs/draft/task-1/report.md").exists())

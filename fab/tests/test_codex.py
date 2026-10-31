@@ -47,6 +47,16 @@ class CodexPureTest(unittest.TestCase):
                                                       model=model, last=Path("/state/last.md"),
                                                       thread=thread), expected)
 
+    def test_tokens_field_missing_invalid_and_partial_result(self):
+        for result in ("not JSON", "", "null", "[]", "42", "{}", '{"tokens": null}'):
+            with self.subTest(result=result):
+                self.assertIsNone(codex.tokens_field(result))
+        self.assertEqual(codex.tokens_field('{"tokens":{"output_tokens":4}}'), "0/0/4")
+        for value in (None, -1, True, "3", 1.5):
+            with self.subTest(value=value):
+                self.assertEqual(codex.tokens_field(json.dumps({"tokens": {
+                    "input_tokens": value, "cached_input_tokens": value, "output_tokens": value}})), "0/0/0")
+
     def test_tokens_sum_completed_turns_and_default_missing_counts_to_zero(self):
         empty = {"input_tokens": 0, "cached_input_tokens": 0, "output_tokens": 0}
         self.assertEqual(codex.tokens([]), empty)
@@ -222,6 +232,7 @@ class CodexFilesTest(unittest.TestCase):
             if Path(target) == state / "ended":
                 self.assertEqual(self.report.read_text(), "Done: completed.\n")
                 result = json.loads((state / "result.json").read_text())
+                self.assertEqual(codex.tokens_field((state / "result.json").read_text()), "10/4/2")
                 self.assertEqual(result["exit"], 0)
                 self.assertEqual(result["tries"], 1)
                 self.assertEqual(result["tokens"], {"input_tokens": 10, "cached_input_tokens": 4,
