@@ -13,10 +13,11 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, state
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, state, wake
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
+from fab.tests import wakes
 from fab.tests.buffer_order import ids, sliced, spec, specs
 from fab.tests.test_repairs import (TASK as REPAIR_TASK, foreman_run, rejected, report,
                                     settled, task_run)
@@ -1107,7 +1108,7 @@ parts = []
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["flow draft target 3, 1 in flight",
                           *[f"{a.kind} {a.task or '-'} {a.detail}" for a in actions],
-                          f"page - {log.home() / channel.PAGE}"])
+                          f"page - {log.home() / channel.PAGE}", "again - tick 1: question.asked"])
         # Ready and parked tasks are not handed off or parked twice.
         self.tick()
         self.assertEqual(len([e for e in log.read() if e["ev"] == "branch.ready"]), 1)
@@ -1688,8 +1689,10 @@ parts = []
         self.land.assert_called_once()
         self.assertEqual(self.out.getvalue().splitlines(),
                          ["flow draft target 2, 0 in flight", "finish answer-1 ",
-                          f"page - {log.home() / channel.PAGE}", "flow draft target 2, 0 in flight",
-                          f"page - {log.home() / channel.PAGE}"])
+                          f"page - {log.home() / channel.PAGE}",
+                          "again - tick 1: question.answered, call.finished",
+                          "wake - tick 1: question.answered, call.finished",
+                          "flow draft target 2, 0 in flight", f"page - {log.home() / channel.PAGE}"])
 
     def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
         path = self.home / "custom.jsonl"
@@ -1986,7 +1989,7 @@ parts = []
     def test_main_invokes_tick_and_cli_registers_it(self):
         with patch("fab.dispatch.tick") as tick:
             self.assertEqual(cli.main(["tick", str(self.directory)]), 0)
-        tick.assert_called_once_with(self.directory)
+        tick.assert_called_once_with(self.directory, trigger="hand")
 
     def test_main_reports_plan_or_shell_errors(self):
         for failure in (plan.PlanError("bad plan"), OSError("offline")):
@@ -2012,6 +2015,171 @@ parts = []
         self.assertIn("unknown task draft/missing", actions[0].detail)
         self.assertEqual(self.calls, [])
         self.assertFalse(log.default_path().exists())
+
+
+class WakeTickTest(wakes.WakeTestCase):
+    def setUp(self):
+        super().setUp()
+        self.directory = write_plan(self.home / "plan", "draft", tasks=("a",))
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(128))
+        self.collect = self.enterContext(patch.object(runs, "collect"))
+        self.start = self.enterContext(patch.object(runs, "start", side_effect=self.start_run))
+        self.out = io.StringIO()
+        self.enterContext(redirect_stdout(self.out))
+
+    def append(self, record):
+        log.append(path=self.log_path, **record)
+
+    def start_run(self, task, host, **kwargs):
+        self.append(wakes.started(task.id + "-1", host=host.name))
+        return task.id + "-1"
+
+    def tick(self, **kwargs):
+        return dispatch.tick(self.directory, sh=self.fake, hosts=wakes.HOSTS,
+                             log_path=self.log_path, **kwargs)
+
+    def test_want_is_taken_and_printed_before_import(self):
+        wake.want("codex 1")
+        wake.want("queue landed draft/b")
+
+        def imported(*args, **kwargs):
+            self.assertNoWant()
+            self.assertEqual(self.out.getvalue(), "wake - codex 1; queue landed draft/b\n")
+
+        with patch.object(dispatch, "_import_queue", side_effect=imported) as imports:
+            self.tick(trigger="event")
+        imports.assert_called_once()
+        self.assertNoWant()
+        self.assertEqual(self.notes(), [])
+
+    def test_empty_want_prints_a_dash(self):
+        write(self.want, "")
+        self.tick()
+        self.assertEqual(self.out.getvalue().splitlines()[0], "wake - -")
+        self.assertNoWant()
+
+    def test_a_want_during_collect_is_left_for_the_next_round(self):
+        wake.want("before")
+        self.append(wakes.started("draft/a-1"))
+        self.collect.side_effect = lambda *args, **kwargs: wake.want("during")
+        self.tick()
+        self.assertWanted("during")
+        self.assertEqual(self.out.getvalue().splitlines()[0], "wake - before")
+
+    def test_collecting_an_ended_run_wants_again_and_only_backstop_notes_it(self):
+        for number, trigger in enumerate(("hand", "backstop"), 1):
+            with self.subTest(trigger=trigger):
+                run_id = f"draft/a-{number}"
+                self.append(wakes.started(run_id))
+                self.collect.side_effect = lambda *args, **kwargs: self.append(wakes.ended(run_id))
+                self.tick(trigger=trigger)
+                self.assertWanted("tick 1: run.ended")
+                self.assertEqual(self.notes(), [] if trigger == "hand" else
+                                 ["lost event: run.ended draft/a-2"])
+                wake.take()
+        self.assertIn("again - tick 1: run.ended", self.out.getvalue().splitlines())
+        self.assertIn("lost - lost event: run.ended draft/a-2", self.out.getvalue().splitlines())
+
+    def test_backstop_starting_a_run_wants_nothing_and_logs_no_note(self):
+        self.tick(trigger="backstop")
+        self.start.assert_called_once()
+        self.assertNoWant()
+        self.assertEqual(self.notes(), [])
+
+    def test_settle_counts_other_writers_records_but_excludes_old_records(self):
+        self.append(wakes.ended("other/old-1"))
+        with patch.object(channel, "write", side_effect=lambda *args, **kwargs:
+                          self.append(wakes.imported("branch.landed", "other/new"))):
+            self.tick()
+        self.assertWanted("tick 1: branch.landed")
+
+    def test_early_returns_and_errors_still_settle(self):
+        for result in ("empty", "failed load", "error"):
+            with self.subTest(result=result):
+                wake.want("before")
+                scenario = (patch.object(dispatch, "_round", side_effect=RuntimeError("round"))
+                            if result == "error" else
+                            patch.object(channel, "plan_dirs", return_value=(
+                                [] if result == "empty" else [self.home / "missing"])))
+                with scenario:
+                    if result == "error":
+                        with self.assertRaisesRegex(RuntimeError, "round"):
+                            self.tick(trigger="backstop")
+                    else:
+                        self.tick(trigger="backstop")
+                self.assertNoWant()
+        self.assertEqual(self.notes(), ["lost event: wake before"] * 3)
+
+    def test_event_waits_for_lock_while_backstop_leaves_want_untouched(self):
+        wake.want("before")
+        held, release, attempted, finished = (threading.Event() for _ in range(4))
+        errors, actions = [], []
+        flock = fcntl.flock
+
+        def hold():
+            with open(log.home() / "tick.lock", "a") as lock:
+                flock(lock, fcntl.LOCK_EX)
+                held.set()
+                release.wait(1)
+
+        def locking(lock, operation):
+            attempted.set()
+            return flock(lock, operation)
+
+        def event_tick():
+            try:
+                actions.extend(self.tick(trigger="event"))
+            except Exception as error:
+                errors.append(error)
+            finally:
+                finished.set()
+
+        holder = threading.Thread(target=hold, daemon=True)
+        holder.start()
+        worker = threading.Thread(target=event_tick, daemon=True)
+        try:
+            self.assertTrue(held.wait(0.2))
+            self.assertEqual(self.tick(trigger="backstop"), [])
+            self.assertWanted("before")
+            self.assertEqual(self.fake.calls, [])
+            with patch.object(dispatch.fcntl, "flock", side_effect=locking):
+                worker.start()
+                self.assertTrue(attempted.wait(0.2))
+                self.assertFalse(finished.wait(0.02))
+                self.assertWanted("before")
+                release.set()
+                worker.join(0.2)
+        finally:
+            release.set()
+            holder.join(0.2)
+            if worker.ident is not None:
+                worker.join(0.2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(errors, [])
+        self.assertIn("start", [action.kind for action in actions])
+        self.assertNoWant()
+
+    def test_unknown_trigger_raises_before_the_lock_and_takes_nothing(self):
+        wake.want("before")
+        with patch.object(dispatch.fcntl, "flock", side_effect=AssertionError("locked")):
+            with self.assertRaises(ValueError):
+                self.tick(trigger="unknown")
+        self.assertFalse((log.home() / "tick.lock").exists())
+        self.assertWanted("before")
+        self.assertEqual(self.fake.calls, [])
+
+    def test_main_passes_backstop_and_dry_run_ignores_trigger_and_want(self):
+        with patch.object(dispatch, "tick", return_value=[]) as tick:
+            self.assertEqual(dispatch.main([str(self.directory), "--trigger", "backstop"]), 0)
+        tick.assert_called_once_with(self.directory, trigger="backstop")
+        wake.want("before")
+        with patch.object(dispatch, "run", self.fake), \
+                patch.object(dispatch.machines, "load", return_value=wakes.HOSTS), \
+                patch.object(wake, "settle", side_effect=AssertionError("settled")):
+            self.assertEqual(dispatch.main([str(self.directory), "--dry-run", "--trigger", "event"]), 0)
+        self.assertWanted("before")
+        self.assertFalse((log.home() / "tick.lock").exists())
+        self.assertEqual(self.notes(), [])
 
 
 class MultiPlanTickTest(unittest.TestCase):
@@ -2153,8 +2321,8 @@ class MultiPlanTickTest(unittest.TestCase):
         two = self.plan_dir("two", tasks=("a",))
         write(one / "plan.toml", "invalid [")
         real_tick = dispatch.tick
-        with patch.object(dispatch, "tick", side_effect=lambda *paths: real_tick(
-                *paths, sh=self.fake, hosts=self.hosts)):
+        with patch.object(dispatch, "tick", side_effect=lambda *paths, **kwargs: real_tick(
+                *paths, sh=self.fake, hosts=self.hosts, **kwargs)):
             self.assertEqual(dispatch.main([str(one), str(two)]), 1)
         self.assertEqual([e["task"] for e in log.read()], ["two/a"])
         lines = self.out.getvalue().splitlines()
@@ -2260,11 +2428,11 @@ class MultiPlanTickTest(unittest.TestCase):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         with patch.object(dispatch, "tick", return_value=[]) as tick:
             self.assertEqual(dispatch.main([str(one), str(two)]), 0)
-        tick.assert_called_once_with(one, two)
+        tick.assert_called_once_with(one, two, trigger="hand")
         self.assertEqual(self.tick(), [])
         self.assertEqual(self.out.getvalue(), "plans - none\n")
         self.assertEqual(self.fake.calls, [])
-        self.assertFalse(log.home().exists())
+        self.assertFalse(wake.want_path().exists())
 
     def test_dry_run_continues_after_failed_load_and_returns_one(self):
         one, two = self.plan_dir("one"), self.plan_dir("two", tasks=("a",))

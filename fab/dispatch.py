@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state
+from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -514,47 +514,73 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
 
 
 def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
-         log_path: Path | None = None) -> list[Action]:
-    """Tick listed then given plans under one nonblocking lock (docs/design/fab.md, 13.4).
+         log_path: Path | None = None, trigger: str = "hand") -> list[Action]:
+    """Run one round under the tick lock (docs/design/fab.md, 13.9).
 
-    Fetch each checkout once; print load failures without logging and skip retired plans.
-    Import the queue and measure builders once, then let each plan decide on fresh events.
-    Plans collect their runs and spend builders' calm extras once per tick; after decisions,
-    question and refusal actions share one log snapshot and precede fresh call decisions.
-    Collect unowned runs last and refresh the page once. Return load, plan and stray
-    actions in order; no loaded plan means no import, measure or page.
+    Validate trigger before locking. Event ticks wait for the lock; hand and backstop
+    ticks return [] when it is held, taking nothing. Under the lock:
+    1. Take the want beside log_path and print its reasons when it exists.
+    2. Count the records already in the log.
+    3. Load plans, import, decide, collect strays and refresh the page.
+    4. Finally settle the round with every record gained since the count, printing its
+       lines, including after an early return or an error.
+    Return load, plan and stray actions in order.
+    """
+    if trigger not in wake.TRIGGERS:
+        raise ValueError(f"unknown tick trigger {trigger!r}")
+    home = log.home()
+    home.mkdir(parents=True, exist_ok=True)
+    with open(home / "tick.lock", "a") as lock:
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if trigger == "event" else fcntl.LOCK_NB))
+        except BlockingIOError:
+            return []
+        path = wake.want_path(log_path)
+        taken = wake.take(path)
+        if taken is not None:
+            print("wake - " + ("; ".join(taken) or "-"))
+        count = len(log.read(log_path))
+        try:
+            return _round(plan_dirs, sh=sh, hosts=hosts, log_path=log_path)
+        finally:
+            for line in wake.settle(trigger, taken, log.read(log_path)[count:],
+                                    path=path, log_path=log_path):
+                print(line)
+
+
+def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] | None,
+           log_path: Path | None) -> list[Action]:
+    """Load and run listed then given plans, sharing imports and builder measurements.
+
+    Fetch each checkout once; print load failures and skip retired plans. With no loaded
+    plan, return before importing, measuring or paging. Otherwise decide each plan on
+    fresh events and spend calm extras once. Question and refusal actions share a log
+    snapshot before fresh call decisions. Collect unowned runs last and refresh the page.
     """
     directories = channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
         return []
-    home = log.home()
-    home.mkdir(parents=True, exist_ok=True)
-    with open(home / "tick.lock", "a") as lock:
-        try:
-            fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            return []
-        loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
-        if not loaded:
-            return actions
-        hosts = machines.load() if hosts is None else hosts
-        tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
-        _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
-                      plan_drafts=[plan.draft for plan, _, _, _ in loaded])
-        calm = flow.measure(hosts, log.now(), sh=sh)
-        for plan, tasks, directory, checkout in loaded:
-            taken = _tick_plan(plan, tasks, directory, checkout, hosts, calm, sh=sh, log_path=log_path)
-            actions.extend(taken)
-            calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
-        events = log.read(log_path)
-        for record in drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events):
-            action = Action("collect", task=record["task"], run=record["run"],
-                            host=record["host"], detail=record["run"])
-            actions.append(action)
-            _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
-        _page(plan_dirs, log_path)
+    loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
+    if not loaded:
         return actions
+    hosts = machines.load() if hosts is None else hosts
+    tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
+    _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
+                  plan_drafts=[plan.draft for plan, _, _, _ in loaded])
+    calm = flow.measure(hosts, log.now(), sh=sh)
+    for plan, tasks, directory, checkout in loaded:
+        taken = _tick_plan(plan, tasks, directory, checkout, hosts, calm, sh=sh, log_path=log_path)
+        actions.extend(taken)
+        calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
+    events = log.read(log_path)
+    for record in drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events):
+        action = Action("collect", task=record["task"], run=record["run"],
+                        host=record["host"], detail=record["run"])
+        actions.append(action)
+        _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+    _page(plan_dirs, log_path)
+    return actions
 
 
 def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runner) -> Path:
@@ -813,14 +839,18 @@ def _park(action: Action, *, log_path: Path | None) -> None:
 
 
 def main(argv: list[str]) -> int:
-    """`fab tick [PLAN_DIR...] [--dry-run]`: tick listed and given plans; fail on bad loads.
+    """`fab tick [PLAN_DIR...] [--trigger hand|event|backstop] [--dry-run]`.
+
+    Tick listed and given plans; fail on bad loads.
 
     Dry-run loads each plan without fetch, prints retirement, failed loads or decide's
-    actions on the same log and hosts, with no calm. It neither chains plans nor acts.
+    actions on the same log and hosts, with no calm. It neither chains plans nor acts,
+    ignores --trigger and takes no want.
     """
     parser = argparse.ArgumentParser(prog="fab tick", description=__doc__)
     parser.add_argument("plan_dirs", type=Path, nargs="*", metavar="PLAN_DIR")
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--trigger", choices=wake.TRIGGERS, default="hand")
     args = parser.parse_args(argv)
     try:
         if args.dry_run:
@@ -834,7 +864,7 @@ def main(argv: list[str]) -> int:
                 for action in decide(plan, tasks, events, hosts):
                     print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:
-            actions = tick(*args.plan_dirs)
+            actions = tick(*args.plan_dirs, trigger=args.trigger)
         return int(any(action.kind == "load" and action.detail.startswith("failed:") for action in actions))
     except (OSError, ValueError, Failed) as error:
         print("fab tick: " + " ".join(str(error).splitlines()), file=sys.stderr)
