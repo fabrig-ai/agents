@@ -253,38 +253,42 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
             if need not in tasks:
                 issues.append(f"task {task.id} needs unknown task {need}")
 
-    def cycles(graph, kind):
-        # Tarjan's components group overlapping cycles into one diagnostic.
-        indices, lowest = {}, {}
-        stack, active = [], set()
-
-        def visit(node):
-            indices[node] = lowest[node] = len(indices)
-            stack.append(node)
-            active.add(node)
-            for need in sorted(set(graph[node])):
-                if need not in graph:
-                    continue
-                if need not in indices:
-                    visit(need)
-                    lowest[node] = min(lowest[node], lowest[need])
-                elif need in active:
-                    lowest[node] = min(lowest[node], indices[need])
-            if lowest[node] == indices[node]:
-                members = []
-                while True:
-                    member = stack.pop()
-                    active.remove(member)
-                    members.append(member)
-                    if member == node:
-                        break
-                if len(members) > 1 or node in graph[node]:
-                    issues.append(f"{kind} cycle: {', '.join(sorted(members))}")
-
-        for node in sorted(graph):
-            if node not in indices:
-                visit(node)
-
-    cycles({key: part.needs for key, part in plan.parts.items()}, "part")
-    cycles({key: task.needs for key, task in tasks.items()}, "task")
+    issues.extend(_cycles({key: part.needs for key, part in plan.parts.items()}, "part"))
+    issues.extend(_cycles({key: task.needs for key, task in tasks.items()}, "task"))
     return sorted(issues)
+
+
+def _cycles(graph: dict[str, tuple[str, ...]], kind: str) -> list[str]:
+    """One diagnostic per cyclic component, with sorted members and unknown needs skipped."""
+    issues = []
+    # Tarjan's components group overlapping cycles into one diagnostic.
+    indices, lowest = {}, {}
+    stack, active = [], set()
+
+    def visit(node):
+        indices[node] = lowest[node] = len(indices)
+        stack.append(node)
+        active.add(node)
+        for need in sorted(set(graph[node])):
+            if need not in graph:
+                continue
+            if need not in indices:
+                visit(need)
+                lowest[node] = min(lowest[node], lowest[need])
+            elif need in active:
+                lowest[node] = min(lowest[node], indices[need])
+        if lowest[node] == indices[node]:
+            members = []
+            while True:
+                member = stack.pop()
+                active.remove(member)
+                members.append(member)
+                if member == node:
+                    break
+            if len(members) > 1 or node in graph[node]:
+                issues.append(f"{kind} cycle: {', '.join(sorted(members))}")
+
+    for node in sorted(graph):
+        if node not in indices:
+            visit(node)
+    return issues
