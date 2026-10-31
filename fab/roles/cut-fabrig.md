@@ -19,6 +19,6 @@ Specs for direct parts belong in that plan's `tasks/`.
 - Validate the plan and specs in their tree's plan directory. Where Rust
   code must compile, run `heavy cargo check -p <crate> --tests` and fix your
   own compile errors. Every build and test runs through `heavy`, one at a
-  time; `cargo fmt` runs directly. hel8 builds nothing. Heavy exit 75
+  time; `cargo fmt` runs directly. Only `cargo check -p` of the crates you touch runs here; tests and the workspace build on the builders. Heavy exit 75
   (`heavy: Infra: disk`) ends with an `Infra: disk` report. Never run the
   whole workspace. Push your branch for fabrig's merge queue; never main.

@@ -18,6 +18,6 @@ and `testing-strategy.md`, section 1.
   names Rust tests and focused nextest commands.
 - Run `heavy cargo check -p <crate> --tests` and fix your own compile errors
   before committing. Run one build or test at a time through `heavy`;
-  `cargo fmt` runs directly. hel8 builds nothing. Heavy exit 75
+  `cargo fmt` runs directly. Only `cargo check -p` of the crates you touch runs here; tests and the workspace build on the builders. Heavy exit 75
   (`heavy: Infra: disk`) ends with an `Infra: disk` report. Never check the
   whole workspace. Push your branch for fabrig's merge queue; never main.
