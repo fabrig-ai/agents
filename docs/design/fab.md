@@ -1026,8 +1026,8 @@ only as tweaks once a replay matches its run.
     `implementer.md`, `operations.md` and `ledger.md` describe the pipeline
     before fab (resident leads, `post`, `claim`, `precheck`, ready refs, the
     old machines). The cut's sources carry fabrig's `AGENTS.md` only;
-    `cut-run.md` names its pipeline lines that do not hold and quotes, in
-    `lead.md`'s own words, every line of it that still holds (the code's
+    `cut-run.md` quotes, in `lead.md`'s own words and without naming it,
+    every line of it that still holds (the code's
     shape, fanning out, one writer per crate, the task's contents,
     scope settled in the task after a reverse-dependency survey, readers'
     tests, effort, skimming; not its task size, which the cut decides, at
@@ -1037,10 +1037,11 @@ only as tweaks once a replay matches its run.
     sources `Sources`. fab's texts assume a fabrig `AGENTS.md` written for
     fab's pipeline (the user, 10-31): a replay's base is fabrig's commit
     plus that `AGENTS.md` (the component kit's: `6de0cd271` +
-    `AGENTS.md for fab's pipeline`), until fabrig's main has it. The run's lead was given nothing else: its prompt was
-    its brief, and it read these files itself.
-    fabrig's own `AGENTS.md` and `agents/` brought to fab's era are fabrig's
-    change, through its queue.
+    `AGENTS.md for fab's pipeline`). The run's lead was given nothing else: its prompt was
+    its brief, and it read these files itself. Since fabrig `2c39875fd2`
+    (the user, 10-31) fabrig's main has that `AGENTS.md` and no `agents/`
+    (its files are this repository's `old/fabrig/`), and fab's texts name
+    neither `agents/` nor its files.
   - An implementer of an integration fabrig plan gets the spec and its
     facts, with `fab/roles/fabrig-run.md` in place of `implementer.md`,
     the taste file and `fabrig.md`: its slot is claimed and set up, it

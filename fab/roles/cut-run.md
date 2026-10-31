@@ -12,15 +12,12 @@ messages), fab does it instead; everything else in the brief holds.
 
 ## fabrig's own files
 
-- fabrig's `agents/` files describe the pipeline before fab: do not read
-  them, even where a source says to. What `agents/lead.md` says that still
-  holds is the next section, in its words.
 - fabrig's `AGENTS.md` and each tree's `AGENTS.md` hold.
 - Each implementer gets fab's implementer text, which this brief quotes
   (`What each implementer is told`), then its spec; it reads `AGENTS.md`
-  and its tree's `AGENTS.md`, never `agents/`.
+  and its tree's `AGENTS.md`.
 
-## From fabrig's `agents/lead.md`, what still holds
+## How a lead works
 
 - **Claude is spent on the code's shape:** layout, names, types, APIs,
   boundaries, test worlds and task sketches.
