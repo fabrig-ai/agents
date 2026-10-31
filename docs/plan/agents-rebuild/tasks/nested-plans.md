@@ -37,3 +37,11 @@ paths into its briefs.
   a PLAN_DIR outside any `docs/plan/` is still refused; agents briefs are
   unchanged.
 - `bin/fab test` passes within the 30 s budget.
+
+## Answers
+
+- 2026-10-31, the designer: yes, the recommended option: an optional
+  repository-relative `plan_path` keyword on those five functions, root-level
+  defaults kept, derived once at each CLI entry. Any further signature
+  change inside fab/designer.py and fab/calls.py that keeps agents callers
+  unchanged is yours; do not ask again.
