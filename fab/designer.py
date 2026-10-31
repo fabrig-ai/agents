@@ -182,7 +182,8 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     """The cut's brief, plan being uncut(draft, repo, sources), through fab.calls' section
     builder and facts (fab.calls._brief, _facts), sections in this order:
 
-    1. `Role`: fab.calls.ROLES["cut"]'s text.
+    1. `Role`: cut-run.md alone for a direct integration plan; otherwise
+       fab.calls.ROLES["cut"]'s text and the repository and direct-mode notes that apply.
     2. `Call facts`.
     3. `The draft`: `- Draft: <draft>`, `- Repository: <repo>`, `- Plan: write
        \\`<PLANS>/<draft>/plan.toml\\``, `- Sources: \\`<source>\\`, ...` (comma-separated).
@@ -195,25 +196,31 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
 
     When options are given, insert `Plan options` after `The draft`, with parsed
     KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true
-    (the plan's default unless overridden), include that section's instructions for
-    direct parts, task specs written by the cut, shared notes under the plan's
-    notes/ cited by repository path, and needs naming tasks whose merged code is needed.
+    (the plan's default unless overridden), except when cut-run.md supplies the role,
+    include that section's instructions for direct parts, task specs written by the cut,
+    shared notes under the plan's notes/ cited by repository path, and needs naming tasks
+    whose merged code is needed.
     plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
     plan_path = plan_path or f"{PLANS}/{plan.draft}"
     plans = sorted(path.relative_to(root).as_posix() for path in root.glob(f"**/{PLANS}/*/plan.toml")
                    if path.is_file())
-    role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
-    if plan.repo == "fabrig":
-        role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
-    option_sections = []
     parsed = parse_options(options)
+    direct = parsed.get("direct", plan.direct)
+    run_role = direct and parsed.get("landing", plan.landing) == "integration"
+    if run_role:
+        role_text = calls.ROLES["cut"].with_name("cut-run.md").read_text(encoding="utf-8")
+    else:
+        role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
+        if plan.repo == "fabrig":
+            role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
+    option_sections = []
     text = ""
     if parsed:
         lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
         text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
                 f"```toml\n{lines}\n```")
-    if parsed.get("direct", plan.direct):
+    if direct and not run_role:
         role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
         if text:
             text += "\n\n"

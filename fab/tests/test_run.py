@@ -327,6 +327,29 @@ class RunStartTest(unittest.TestCase):
                         self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
                                        "-b", branch, str(ROOT / "wt" / run_id), source], commands)
 
+    def test_start_names_spec_relative_to_checkout_when_inside(self):
+        for kind in ("implement", "rebase"):
+            with self.subTest(kind=kind), tmp_home() as home:
+                checkout = home / "checkout"
+                inside = str(checkout / TASK.path)
+                outside = str(home / "checkout-other" / TASK.path)
+                for path, root, expected in ((inside, None, inside),
+                                              (inside, checkout, TASK.path),
+                                              (outside, checkout, outside),
+                                              (TASK.path, checkout, TASK.path)):
+                    with self.subTest(path=path, checkout=root):
+                        task = replace(TASK, path=path)
+                        fake = starter()
+                        rejection = (dict(step="rebase", findings="amended", skeleton="root",
+                                          old_tip="old-skeleton", tip="new-skeleton")
+                                     if kind == "rebase" else None)
+                        run_id = run.start(task, HOST, kind=kind, events=[started()], sh=fake,
+                                           rejection=rejection, checkout=root)
+                        text = (log.home() / "runs" / run_id / "brief.md").read_text()
+                        self.assertIn(f"- Task: {TASK.id} (spec `{expected}`)\n", text)
+                        self.assertEqual(fake.calls[-2].input, text)
+                        self.assertEqual(task.path, path)
+
     def test_skeleton_rebase_instructions_and_base_use_trunk(self):
         for trunk in ("main", "component-kit/integration"):
             with self.subTest(trunk=trunk), tmp_home():
@@ -806,12 +829,12 @@ class RoleTextTest(unittest.TestCase):
         self.assertEqual(run.role_text("agents"), role + "\n\n" + taste + "\n")
         self.assertEqual(run.role_text("fabrig"), role + "\n\n" + taste + "\n\n" + notes + "\n")
 
-    def test_non_main_trunk_replaces_repository_notes_with_integration_text(self):
-        role = run.ROLE.read_text().rstrip("\n")
-        taste = run.TASTE.read_text().rstrip("\n")
-        integration = run.ROLE.with_name("fabrig-integration.md").read_text().rstrip("\n")
-        self.assertEqual(run.role_text("fabrig", "component-kit/integration"),
-                         role + "\n\n" + taste + "\n\n" + integration + "\n")
+    def test_non_main_fabrig_trunk_uses_only_run_text(self):
+        text = run.role_text("fabrig", "component-kit/integration")
+        self.assertEqual(text, run.ROLE.with_name("fabrig-run.md").read_text())
+        for path in (run.ROLE, run.TASTE, run.ROLE.with_name("fabrig.md"),
+                     run.ROLE.with_name("fabrig-integration.md")):
+            self.assertNotIn(path.read_text().rstrip("\n"), text)
         self.assertEqual(run.role_text("fabrig", "main"), run.role_text("fabrig"))
 
     def test_non_main_trunk_keeps_usual_role_without_integration_text(self):

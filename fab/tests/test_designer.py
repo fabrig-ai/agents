@@ -324,7 +324,7 @@ class BriefTest(unittest.TestCase):
         self.assertNotIn("# Plan options", self.cut())
 
     def test_cut_direct_instructions_and_shared_notes_only_when_enabled(self):
-        plan = designer.uncut("new", "agents", [SOURCE])
+        plan = designer.uncut("new", "agents", [SOURCE], dict(landing="queue"))
         for entries, direct in (((), True), (["reviews=false"], True),
                                 (["direct=false"], False), (["direct=true", "direct=false"], False),
                                 (["direct=true"], True)):
@@ -342,7 +342,7 @@ class BriefTest(unittest.TestCase):
         direct_role = calls.ROLES["cut"].with_name("cut-direct.md").read_text().rstrip("\n")
         fabrig_role = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
         for repo in ("agents", "fabrig"):
-            plan = designer.uncut("new", repo, [SOURCE])
+            plan = designer.uncut("new", repo, [SOURCE], dict(landing="queue"))
             for entries, direct in (((), True), (["direct=false"], False),
                                     (["direct=true", "direct=false"], False),
                                     (["direct=false", "direct=true"], True)):
@@ -353,6 +353,35 @@ class BriefTest(unittest.TestCase):
                         expected = role + ("\n\n" + fabrig_role if repo == "fabrig" else "")
                         self.assertTrue(text.startswith("# Role\n\n" + expected + "\n\n" + direct_role))
                         self.assertLess(text.index(direct_role), text.index("# Call facts"))
+
+    def test_direct_integration_cut_uses_only_run_role(self):
+        role = calls.ROLES["cut"]
+        run_role = role.with_name("cut-run.md").read_text().rstrip("\n")
+        for repo in ("agents", "fabrig"):
+            for entries in ((), ["ready=false"], ["direct=true"], ["landing='integration'"]):
+                with self.subTest(repo=repo, entries=entries):
+                    plan = designer.uncut("new", repo, [SOURCE])
+                    text = designer.cut_brief(plan, self.root, **FACTS, options=entries)
+                    self.assertEqual(text.split("\n\n# Call facts", 1)[0].rstrip("\n"),
+                                     "# Role\n\n" + run_role)
+                    for name in ("cut.md", "cut-fabrig.md", "cut-direct.md"):
+                        self.assertNotIn(role.with_name(name).read_text().rstrip("\n"), text)
+                    self.assertNotIn('Every part is `mode = "direct"`', text)
+                    self.assertNotIn("the cut writes every task spec itself", text)
+                    if entries:
+                        self.assertIn("# Plan options\n", text)
+
+    def test_options_select_run_role_from_effective_plan(self):
+        role = calls.ROLES["cut"].with_name("cut-run.md").read_text().rstrip("\n")
+        cases = ((dict(landing="queue"), ["landing='integration'"], True),
+                 (dict(direct=False), ["direct=true"], True),
+                 ({}, ["landing='queue'"], False),
+                 ({}, ["direct=false"], False))
+        for settings, entries, expected in cases:
+            with self.subTest(settings=settings, entries=entries):
+                plan = designer.uncut("new", "agents", [SOURCE], settings)
+                text = designer.cut_brief(plan, self.root, **FACTS, options=entries)
+                self.assertEqual(role in text, expected)
 
     def test_plan_path_preserves_root_briefs_and_changes_only_destination(self):
         cut_plan = designer.uncut("new", "agents", [SOURCE],
@@ -383,7 +412,8 @@ class BriefTest(unittest.TestCase):
         self.assertEqual(plans, "\n".join(f"- `{path}`" for path in paths))
 
     def test_fabrig_cut_adds_rust_role_rules(self):
-        text = designer.cut_brief(designer.uncut("new", "fabrig", [SOURCE]), self.root, **FACTS)
+        plan = designer.uncut("new", "fabrig", [SOURCE], dict(landing="queue"))
+        text = designer.cut_brief(plan, self.root, **FACTS)
         variant = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
         self.assertIn(variant, text)
         for fragment in ("Rust", "heavy cargo check -p <crate>", "tasks/", "globs", 'repo = "fabrig"'):
@@ -470,7 +500,10 @@ class MainTest(unittest.TestCase):
             with self.subTest(role=role), patch.object(calls, "start") as start:
                 result, text, errors = self.invoke(role, *args, directory=directory)
                 self.assertEqual((result, errors), (0, ""))
-                self.assertIn(calls.ROLES[role].read_text(), text)
+                role_path = calls.ROLES[role]
+                if role == "cut":
+                    role_path = role_path.with_name("cut-run.md")
+                self.assertIn(role_path.read_text(), text)
                 self.assertIn("# Call facts", text)
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
@@ -573,8 +606,8 @@ class MainTest(unittest.TestCase):
             text = (worktree.parent / "brief.md").read_text()
             self.assertIn('# Plan options\n\nWrite these keys at the top of plan.toml, before the first table, verbatim:', text)
             self.assertIn('```toml\nlanding = "integration"\nready = false\nreviews = false\ndirect = true\n```', text)
-            self.assertIn("`skein/docs/plan/new/notes/<name>.md`", text)
-            self.assertIn(calls.ROLES["cut"].with_name("cut-direct.md").read_text(), text)
+            self.assertIn(calls.ROLES["cut"].with_name("cut-run.md").read_text(), text)
+            self.assertNotIn("`skein/docs/plan/new/notes/<name>.md`", text)
             atomic.write(worktree.parent / "report.md", "Done: cut the replay\n")
             return Result(0, "{}")
 
@@ -599,8 +632,8 @@ class MainTest(unittest.TestCase):
         self.assertEqual(upstream.cwd, str(self.root))
         self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
 
-    def test_cut_direct_option_adds_role_through_cli(self):
-        direct_role = calls.ROLES["cut"].with_name("cut-direct.md").read_text().rstrip("\n")
+    def test_cut_direct_option_selects_run_role_through_cli(self):
+        direct_role = calls.ROLES["cut"].with_name("cut-run.md").read_text().rstrip("\n")
         for args, direct in (((), True), (("--set", "direct=false"), False),
                              (("--set", "direct=true"), True)):
             with self.subTest(args=args):

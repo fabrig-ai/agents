@@ -6,6 +6,7 @@ import argparse
 import json
 import shlex
 from collections.abc import Iterable, Sequence
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -18,7 +19,7 @@ KINDS = ("implement", "repair", "rebase", "review")
 OUTCOMES = {"Done:": "done", "Question:": "question", "Infra:": "infra", "Failed:": "failed"}
 REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@github.com:fabrig-ai/fabrig.git"}
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
-TASTE = Path(__file__).resolve().parent / "taste.md"  # banned names and pairs; every brief carries it
+TASTE = Path(__file__).resolve().parent / "taste.md"  # banned names and pairs for the standard role
 NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
 MODEL = "gpt-6.1-sol"  # every Codex run's model, explicit (the user, 10-30): Sol 6.1
 # The Codex efforts the user's model sets by role (execution-modes.md): implementers high,
@@ -68,7 +69,10 @@ def outcome(report: str) -> str:
 def role_text(repo: str, trunk: str = "main") -> str:
     """The implementer's role text, then the taste file (TASTE), then the repository's notes
     (fab/roles/<repo>.md) when it has any, each separated by one blank line. A non-main
-    trunk uses fab/roles/<repo>-integration.md instead when it exists."""
+    trunk uses fab/roles/<repo>-integration.md instead when it exists. For fabrig on
+    a non-main trunk, fab/roles/fabrig-run.md is the entire role text."""
+    if repo == "fabrig" and trunk != "main":
+        return ROLE.with_name("fabrig-run.md").read_text()
     notes = ROLE.with_name(f"{repo}.md")
     integration = ROLE.with_name(f"{repo}-integration.md")
     if trunk != "main" and integration.exists():
@@ -174,8 +178,11 @@ def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),
           sh: Runner = run, log_path: Path | None = None, rejection: dict | None = None,
-          trunk: str = "main") -> str:
+          trunk: str = "main", checkout: Path | None = None) -> str:
     """Start a run of task on host and log run.started; return the run id.
+
+    With checkout, an absolute task.path inside it is repository-relative in the brief;
+    paths outside it, paths already relative and checkout=None keep their given spelling.
 
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
@@ -199,6 +206,13 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     A rejection's text is its `findings` when it has them (a gate's, fab.gates.screen), read
     from no machine; otherwise rejection_text from the first gate host.
     """
+    if checkout is not None and Path(task.path).is_absolute():
+        try:
+            spec = Path(task.path).resolve().relative_to(checkout.resolve()).as_posix()
+        except ValueError:
+            pass
+        else:
+            task = replace(task, path=spec)
     events = list(events)
     branch = branch_for(task, kind, events)
     if task.repo not in REMOTES:
