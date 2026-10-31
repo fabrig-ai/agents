@@ -10,12 +10,14 @@ call's subject and never a task; every later call of the subject carries it in i
 
 from __future__ import annotations
 
+import argparse
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import log
+from fab import atomic, log, plan
 from fab.plan import Plan
 from fab.report import LANDING
 
@@ -237,12 +239,29 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     text, then a blank line and excerpt(Path(report)) when report is not "". The reports are
     latest_reports(fab.log.home() / "reports"). Return render(entries, reports, now,
     unread)."""
-    raise NotImplementedError
+    plans, unread = [], []
+    for directory in directories:
+        path = directory / "plan.toml"
+        try:
+            if not path.exists():
+                continue
+            plans.append((plan.load_plan(path), path))
+        except (plan.PlanError, OSError) as error:
+            unread.append(f"{directory}: {' '.join(str(error).splitlines())}")
+    entries = []
+    for ask in asks(plans, events):
+        body = excerpt(Path(ask.report)) if ask.kind == "call" else ask.text
+        if ask.kind == "parked" and ask.report:
+            body += "\n\n" + excerpt(Path(ask.report))
+        entries.append((ask, body))
+    return render(entries, latest_reports(log.home() / "reports"), now, unread)
 
 
 def write(text: str) -> Path:
     """Write the page to FAB_HOME/PAGE through fab.atomic.write and return its path."""
-    raise NotImplementedError
+    path = log.home() / PAGE
+    atomic.write(path, text)
+    return path
 
 
 def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
@@ -257,7 +276,19 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
     or when no such ask is open: the message names the subject and the open subjects in
     order, comma-separated, or `none`. A plan's question is not answered here: its answer is
     written in its plan.toml (13.3)."""
-    raise NotImplementedError
+    text = text.strip()
+    opened = asks((), events)
+    subjects = ", ".join(dict.fromkeys(ask.subject for ask in opened)) or "none"
+    if not text:
+        raise ValueError(f"answer text for {subject!r} is blank; open subjects: {subjects}")
+    matching = [ask for ask in opened if ask.subject == subject]
+    if not matching:
+        raise ValueError(f"no open call or parked chain for {subject!r}; open subjects: {subjects}")
+    ask = matching[-1]
+    question = (next(line for line in excerpt(Path(ask.report)).splitlines() if line.strip())
+                if ask.kind == "call" else f"parked: {ask.text}")
+    return log.append(ANSWERED, path=log_path, subject=subject, call=ask.call, by=by,
+                      question=question, answer=text)
 
 
 def main(argv: list[str]) -> int:
@@ -269,7 +300,29 @@ def main(argv: list[str]) -> int:
     single spaces; answer(SUBJECT, text, fab.log.read()), then write the page as write does,
     and print `answered <SUBJECT>` and the page's path. Exit 0; an OSError or ValueError
     prints `fab page: <error>` on stderr and exits 1; bad arguments exit 2 (argparse)."""
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(prog="fab page", description=__doc__)
+    commands = parser.add_subparsers(dest="command", required=True)
+    for command in ("show", "write"):
+        commands.add_parser(command).add_argument("plans", nargs="*", type=Path)
+    replying = commands.add_parser("answer")
+    replying.add_argument("subject")
+    replying.add_argument("text", nargs="+")
+    args = parser.parse_args(argv)
+    try:
+        if args.command == "answer":
+            answer(args.subject, " ".join(" ".join(args.text).split()), log.read())
+        text = compose(plan_dirs(getattr(args, "plans", ())), log.read(), log.now())
+        if args.command == "show":
+            print(text, end="")
+        else:
+            path = write(text)
+            if args.command == "answer":
+                print(f"answered {args.subject}")
+            print(path)
+        return 0
+    except (OSError, ValueError) as error:
+        print(f"fab page: {error}", file=sys.stderr)
+        return 1
 
 
 def _log_asks(events: Iterable[dict]) -> list[Ask]:

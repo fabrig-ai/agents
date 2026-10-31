@@ -1,9 +1,11 @@
+import io
 import os
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import channel, code_report, landing_report, log, report
+from fab import channel, cli, code_report, landing_report, log, report
 from fab.plan import Plan, Question
 from fab.tests.support import tmp_home
 
@@ -322,3 +324,125 @@ capacity
         self.assertNotIn("## Unread", rendered)
         self.assertTrue(rendered.endswith("\n"))
         self.assertFalse(rendered.endswith("\n\n"))
+
+    def test_compose_loads_questions_reports_and_unread_plans_in_order(self):
+        directory = self.home / "draft"
+        plan_path = _write(directory / "plan.toml", '''draft = "demo"
+repo = "agents"
+part = []
+[[question]]
+id = "budget"
+text = "How much?"
+parts = ["core"]
+''')
+        broken = self.home / "broken"
+        _write(broken / "plan.toml", "not TOML")
+        missing = self.home / "not-cut"
+        call_report = _write(self.fab_home / "calls/cut-1/report.md", "Question: Which host?\nOptions.")
+        review_report = _write(self.fab_home / "runs/review-1/report.md", "Failed: capacity\nFindings.")
+        daily = _write(self.fab_home / "reports/demo/2026-10-30.md",
+                       "## Signals\n- **Capacity:** buy a builder (user)\n- red tests (ops)\n")
+        events = [question(1), parked(2, "demo/ui", report=str(review_report)),
+                  parked(3, "demo/other")]
+        page = channel.compose([directory, missing, broken], events, ts(4))
+        sections = ["### demo: question budget", f"### demo/core, asked {ts(1)}",
+                    f"### demo/ui, parked {ts(2)}", f"### demo/other, parked {ts(3)}",
+                    "## Daily reports", "## Unread"]
+        self.assertEqual([page.index(section) for section in sections],
+                         sorted(page.index(section) for section in sections))
+        for quoted in ("How much?", str(plan_path), "Question: Which host?\nOptions.",
+                       str(call_report), "Choose capacity\n\nFailed: capacity\nFindings.",
+                       str(review_report), str(daily), "- **Capacity:** buy a builder (user)"):
+            self.assertIn(quoted, page)
+        self.assertIn(f"- {broken}: ", page)
+        self.assertNotIn(str(missing), page)
+        self.assertNotIn("red tests", page)
+        self.assertIn("Choose capacity\n\n- Answer: `fab page answer demo/other TEXT`", page)
+
+    def test_compose_plan_read_failure_is_one_unread_line(self):
+        directory = self.home / "draft"
+        _write(directory / "plan.toml", "present")
+        with patch("fab.plan.load_plan", side_effect=OSError("first\nsecond")):
+            page = channel.compose([directory], [], ts(1))
+        self.assertIn(f"## Unread\n\n- {directory}: first second\n", page)
+
+    def test_write_replaces_whole_page_under_fab_home(self):
+        path = channel.write("old page\n")
+        self.assertEqual(path, self.fab_home / "user.md")
+        self.assertEqual(channel.write("new page\n"), path)
+        self.assertEqual(path.read_text(), "new page\n")
+        self.assertEqual(list(self.fab_home.iterdir()), [path])
+
+    def test_answer_call_logs_first_nonblank_report_line_and_stripped_text(self):
+        _write(self.fab_home / "calls/cut-1/report.md", "\n  \nQuestion: Which host?  \nOptions.")
+        path = self.home / "custom/log.jsonl"
+        with patch("fab.log.now", return_value=ts(2)):
+            record = channel.answer("demo/core", "  hel8  ", [question(1)], log_path=path)
+        self.assertEqual(record, dict(ts=ts(2), ev="call.answered", subject="demo/core",
+                                      call="cut-1", by="user", question="Question: Which host?", answer="hel8"))
+        self.assertEqual(log.read(path), [record])
+        self.assertEqual(log.read(), [])
+
+    def test_answer_uses_last_open_ask_and_parked_reason(self):
+        record = channel.answer("demo/core", "Buy it", [question(1), parked(2)], by="free")
+        self.assertEqual((record["call"], record["question"], record["by"]),
+                         ("root-1", "parked: Choose capacity", "free"))
+        self.assertEqual(log.read(), [record])
+        self.assertEqual(channel.asks((), [question(1), parked(2), record]), [])
+
+    def test_answer_refuses_blank_unknown_and_plan_id_without_logging(self):
+        events = [question(1), parked(2), question(3, "other", "other-1")]
+        for subject, text in (("demo/core", " \t"), ("missing", "yes"), ("budget", "100")):
+            with self.subTest(subject=subject), self.assertRaises(ValueError) as caught:
+                channel.answer(subject, text, events)
+            self.assertIn(subject, str(caught.exception))
+            self.assertIn("open subjects: demo/core, other", str(caught.exception))
+            self.assertEqual(log.read(), [])
+        with self.assertRaisesRegex(ValueError, "open subjects: none"):
+            channel.answer("missing", "yes", [])
+        self.assertFalse(log.default_path().exists())
+
+    def test_main_show_and_write_through_cli(self):
+        directory = self.home / "draft"
+        _write(directory / "plan.toml", 'draft = "demo"\nrepo = "agents"\npart = []\n')
+        output = io.StringIO()
+        with patch("fab.log.now", return_value=ts(0)), redirect_stdout(output):
+            self.assertEqual(cli.main(["page", "show", str(directory)]), 0)
+        self.assertEqual(output.getvalue(), channel.compose([directory], [], ts(0)))
+        self.assertFalse((self.fab_home / channel.PAGE).exists())
+        output = io.StringIO()
+        with patch("fab.log.now", return_value=ts(0)), redirect_stdout(output):
+            self.assertEqual(cli.main(["page", "write", str(directory)]), 0)
+        self.assertEqual(output.getvalue(), str(self.fab_home / channel.PAGE) + "\n")
+        self.assertEqual((self.fab_home / channel.PAGE).read_text(), channel.compose([directory], [], ts(0)))
+
+    def test_main_answer_logs_and_rewrites_page_without_question(self):
+        log.append("call.ended", subject="demo/core", call="cut-1", outcome="question", ts=ts(1))
+        _write(self.fab_home / "calls/cut-1/report.md", "Question: Which host?\n")
+        channel.write(channel.compose([], log.read(), ts(1)))
+        output = io.StringIO()
+        with patch("fab.log.now", return_value=ts(2)), redirect_stdout(output):
+            self.assertEqual(cli.main(["page", "answer", "demo/core", " Use  ", "\nhel8 "]), 0)
+        self.assertEqual(log.read()[-1]["answer"], "Use hel8")
+        self.assertEqual(log.read()[-1]["by"], "user")
+        self.assertEqual(output.getvalue(), f"answered demo/core\n{self.fab_home / channel.PAGE}\n")
+        page = (self.fab_home / channel.PAGE).read_text()
+        self.assertNotIn("Which host?", page)
+        self.assertIn("## Questions\n\n(none)", page)
+
+    def test_main_errors_exit_one_without_logging(self):
+        errors = io.StringIO()
+        with redirect_stderr(errors):
+            self.assertEqual(cli.main(["page", "answer", "missing", "yes"]), 1)
+            with patch.object(channel, "write", side_effect=OSError("disk full")):
+                self.assertEqual(cli.main(["page", "write"]), 1)
+        self.assertIn("fab page: no open call or parked chain", errors.getvalue())
+        self.assertIn("fab page: disk full", errors.getvalue())
+        self.assertEqual(log.read(), [])
+
+    def test_main_bad_arguments_exit_two(self):
+        for argv in ([], ["unknown"], ["answer"], ["answer", "demo/core"],
+                     ["answer", "demo/core", "yes", "--by", "other"]):
+            with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
+                cli.main(["page", *argv])
+            self.assertEqual(caught.exception.code, 2)
