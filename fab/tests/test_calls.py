@@ -7,11 +7,12 @@ import json
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
 from fab import call_review, calls, cli, log
-from fab.plan import Part, Plan, Slice, Task, load_tasks
+from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, tmp_home
 
@@ -171,6 +172,35 @@ class BriefTest(unittest.TestCase):
             partial = calls.skeleton_brief(plan, "core", tasks, {"demo/one": "landed", "demo/two": "done"},
                                            root, call_id="c", branch="b", report="r")
             self.assertIn("| base | Base primitives | feature | - | designed |", partial)
+
+    def test_skeleton_and_contract_include_marker_readers_and_all_questions(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            plan.parts["core"] = replace(plan.parts["core"], contract=True)
+            plan.parts["last"] = Part("last", "Last", "feature", ("core",), "design.md")
+            plan = replace(plan, questions=(Question("open", "Which machine?", ("core",)),
+                                           Question("answered", "How much?", ("core", "base"), "ten"),
+                                           Question("elsewhere", "Other part?", ("next",))))
+            for role in ("skeleton", "contract"):
+                text = calls.skeleton_brief(plan, "core", tasks, {}, root, role=role,
+                                            call_id="c", branch="b", report="r")
+                self.assertTrue(text.startswith("# Role\n\n" + calls.ROLES[role].read_text()))
+                details = "- Design: design.md, 2 and 8\n- Contract: yes\n"
+                if role == "contract":
+                    details += "- Readers: next, last\n"
+                else:
+                    self.assertNotIn("- Readers:", text)
+                details += "- Question open: Which machine?\n  Answer: (open)\n"
+                details += "- Question answered: How much?\n  Answer: ten"
+                self.assertIn(details, text)
+                self.assertNotIn("- Question elsewhere:", text)
+            text = calls.skeleton_brief(plan, "last", tasks, {}, root, role="contract",
+                                        call_id="c", branch="b", report="r")
+            self.assertIn("- Readers: (none)", text)
+            self.assertNotIn("- Contract:", text)
+            with self.assertRaisesRegex(ValueError, "role"):
+                calls.skeleton_brief(plan, "core", tasks, {}, root, role="decision",
+                                     call_id="c", branch="b", report="r")
 
     def test_absolute_spec_paths_are_presented_relative_to_the_checkout(self):
         with tmp_home() as root:

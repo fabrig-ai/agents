@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, foreman, log
+from fab import atomic, foreman, log, state
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -30,6 +30,8 @@ ROLES = {
     "answer": Path(__file__).resolve().parent / "roles" / "answerer.md",
     "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
     "amend": Path(__file__).resolve().parent / "roles" / "amender.md",
+    **{role: Path(__file__).resolve().parent / "roles" / f"{role}.md"
+       for role in ("cut", "contract", "decision", "retire")},
 }
 MODEL = "claude-opus-5-5"  # every Claude call's model, explicit (the user, 10-30): Opus 5.5
 BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the call reads the rest itself
@@ -137,13 +139,28 @@ def drafts_text(plan: Plan, root: Path) -> str:
 
 
 def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: dict[str, str],
-                   root: Path, *, call_id: str, branch: str, report: str) -> str:
+                   root: Path, *, call_id: str, branch: str, report: str,
+                   role: str = "skeleton") -> str:
     """The skeleton author's brief: its role text; the call's facts (call, branch, report path);
     the plan's parts and slices as a table with each part's status (designed, done, or not
     designed); the part to design (id, title, mode, needs, design citation); the user's drafts
     (drafts_text); the cited design text; the inventory; and the task specs that exist for the part's needs, as examples of
-    the format. Raises ValueError past BRIEF_LIMIT, naming the largest section."""
+    the format. role selects skeleton or contract (ValueError otherwise); the part includes
+    its contract marker and questions with answers, plus its readers for contract.
+    Raises ValueError past BRIEF_LIMIT, naming the largest section."""
+    if role not in ("skeleton", "contract"):
+        raise ValueError(f"unknown skeleton brief role {role!r}")
     part = plan.parts[part_id]
+    details = (f"- Id: {part.id}\n- Title: {part.title}\n- Mode: {part.mode}\n"
+               f"- Needs: {', '.join(part.needs) or '(none)'}\n- Design: {part.design}")
+    if part.contract:
+        details += "\n- Contract: yes"
+    if role == "contract":
+        readers = [item.id for item in plan.parts.values() if part_id in item.needs]
+        details += f"\n- Readers: {', '.join(readers) or '(none)'}"
+    for question in plan.questions:
+        if part_id in question.parts:
+            details += f"\n- Question {question.id}: {question.text}\n  Answer: {question.answer or '(open)'}"
     examples = []
     for task in tasks.values():
         if task.part in part.needs:
@@ -151,11 +168,10 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
             label = path.relative_to(root) if path.is_absolute() else path
             examples.append(f"## {task.id} ({label})\n\n{(root / path).read_text(encoding='utf-8')}")
     return _brief([
-        ("Role", ROLES["skeleton"].read_text(encoding="utf-8")),
+        ("Role", ROLES[role].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
         ("Plan parts and slices", _parts_table(plan, tasks, statuses)),
-        ("Part to design", f"- Id: {part.id}\n- Title: {part.title}\n- Mode: {part.mode}\n"
-         f"- Needs: {', '.join(part.needs) or '(none)'}\n- Design: {part.design}"),
+        ("Part to design", details),
         ("The user's drafts", drafts_text(plan, root)),
         ("Cited design", design_text(root, part.design)),
         ("Inventory", render_inventory(inventory(root))),
@@ -165,10 +181,9 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
 
 def _parts_table(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, str]) -> str:
     rows = ["| Part | Title | Mode | Needs | Status |", "| --- | --- | --- | --- | --- |"]
+    parts = state.part_statuses(plan, tasks, statuses)
     for item in plan.parts.values():
-        specs = [task for task in tasks.values() if task.part == item.id]
-        status = ("done" if item.done or specs and all(statuses.get(task.id) == "landed" for task in specs)
-                  else "designed" if specs else "not designed")
+        status = parts[item.id]
         rows.append(f"| {item.id} | {item.title} | {item.mode} | {', '.join(item.needs) or '-'} | {status} |")
     rows.extend(["", "| Slice | Story | Parts | Walk |", "| --- | --- | --- | --- |"])
     for item in plan.slices:
@@ -399,17 +414,20 @@ def _call_result(text: str, report_path: Path) -> tuple[str, str]:
 
 
 def main(argv: list[str]) -> int:
-    """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
+    """Compile and run calls with --plan PLAN_DIR; delegate cut, contract, decision and retire
+    to fab.designer.main. Own subcommands are skeleton PART, answer, review and amend ROOT.
 
     Answer briefs contain only queued questions and include any foreman report.
     Amend requires a known chain in state amend and reuses its subject and branch.
     --brief-only prints the brief; otherwise print outcome and branch, exiting 0 for Done
     and 1 for a failed call, invalid chain or compilation error."""
-    from fab import call_review
+    from fab import call_review, designer
 
+    if argv and argv[0] in designer.ROLES:
+        return designer.main(argv)
     parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
     commands = parser.add_subparsers(dest="role", required=True)
-    for role in ROLES:
+    for role in (name for name in ROLES if name not in designer.ROLES):
         command = commands.add_parser(role)
         if role in ("skeleton", "amend"):
             command.add_argument("part" if role == "skeleton" else "root")
