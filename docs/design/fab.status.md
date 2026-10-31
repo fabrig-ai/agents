@@ -183,6 +183,12 @@
   every 2 minutes and wants pile up unread in `FAB_HOME/tick.want`. Once
   they land, `fab wake --install` on hel8 starts the units, and each
   builder needs ssh to hel8 for its runs' wakes.
+- **Replaying a manual run (13.12) is being built:** the tasks
+  `replay-options` (the plan's options, the cut's `--set`), `replay-trunk`
+  (runs, gates, precheck and spec edits on a trunk), `integration-merge`
+  (the tick merges into the trunk; reviews off) and `integration-check` (the
+  end check, its repairs, the ready). Until they land, every plan lands
+  through `fab land` or the queue, and every call is reviewed.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
