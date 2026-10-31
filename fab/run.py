@@ -14,7 +14,7 @@ from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Failed, Runner, run, ssh
 
-KINDS = ("implement", "repair", "rebase", "review")
+KINDS = ("implement", "repair", "rebase", "review", "fix")  # fix: after a self-critique (fab.critique)
 OUTCOMES = {"Done:": "done", "Question:": "question", "Infra:": "infra", "Failed:": "failed"}
 REMOTES = {"agents": "git@github.com:fabrig-ai/agents.git", "fabrig": "git@github.com:fabrig-ai/fabrig.git"}
 ROLE = Path(__file__).resolve().parent / "roles" / "implementer.md"
@@ -23,7 +23,8 @@ NOTIFY = "fab@hel8"  # codex-run posts its end here; nothing waits on it
 MODEL = "gpt-6.1-sol"  # every Codex run's model, explicit (the user, 10-30): Sol 6.1
 # The Codex efforts the user's model sets by role (execution-modes.md): implementers high,
 # reviewers medium; a task spec's effort applies only to kinds not named here.
-EFFORTS = {"implement": "high", "repair": "high", "rebase": "high", "review": "medium"}
+EFFORTS = {"implement": "high", "repair": "high", "rebase": "high", "review": "medium",
+           "fix": "high"}
 SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
 LAUNCHER = "fab"  # "fab" (fab codex start) or "codex-run" (fabrig's, retired); see fab/codex.py
 
@@ -44,8 +45,9 @@ def next_run(task_id: str, events: Iterable[dict]) -> str:
 
 
 def branch_for(task: Task, kind: str, events: Iterable[dict]) -> str:
-    """implement and review: the task id; repair: the branch of the task's last run.started
-    (the task id if none); rebase: `<task>-r<n>`, n counting the task's earlier rebase runs from 1."""
+    """implement and review: the task id; repair and fix: the branch of the task's last
+    run.started (the task id if none); rebase: `<task>-r<n>`, n counting the task's earlier
+    rebase runs from 1."""
     if kind not in KINDS:
         raise ValueError(f"unknown run kind {kind!r}")
     started = [event for event in events
@@ -79,7 +81,15 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
     """The brief Codex gets: the role text, then a `# Your task` section listing run, branch,
     base, report path, the files it may change and the expected minutes, then the spec's body.
     A rejection adds the failed step and queue log between the facts and body; start supplies
-    its log text in `text`. Only the last matching step, at most 120 lines, is included."""
+    its log text in `text`. Only the last matching step, at most 120 lines, is included.
+
+    A rejection whose step is `critique` (fab.critique.STEP: a fix run's, its findings in
+    `findings` and its log the critic's report) is a self-critique, not a refusal: the section
+    is `## The self-critique found`, then the paragraph `A read-only review of this branch
+    against its skeleton, the taste file and the gates' output found what follows. Fix each
+    finding within your task's files, or say in your report why one does not hold; then run
+    your checks again and push.`, then the line `- Critique report:` and the log in
+    backquotes, then the text, at most 120 lines, in the same ```text fence."""
     files = ", ".join(task.files) or "(none)"
     refusal = ""
     if rejection is not None:
@@ -134,7 +144,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
 
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
-    (implement, review, rebase: a new branch from origin/main; repair: the existing
+    (implement, review, rebase: a new branch from origin/main; repair and fix: the existing
     origin/<branch>); write the brief to FAB_HOME/runs/<run>/brief.md; then
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
@@ -145,7 +155,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
     idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
     naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
-    (`git switch -C <branch> origin/main`; repair: `origin/<branch>`). dir is the slot, and
+    (`git switch -C <branch> origin/main`; repair and fix: `origin/<branch>`). dir is the slot, and
     run.started also carries slot (the number). The launcher is `fab codex start` (same
     arguments and output as codex-run task) once LAUNCHER says so.
 

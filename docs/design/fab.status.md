@@ -80,6 +80,17 @@
   `call-review-tick`. Until it lands, every question waits for the
   answerer. Answers land through `fab land`, so a plan whose specs live
   outside this repository cannot be settled by its foreman yet.
+- **The self-critique is a skeleton:** `fab/critique.py` holds 13.1's
+  fold of where each task's critique stands, the critic run's brief and
+  start, and the findings a fix run's brief quotes; `fab.run` has the kind
+  `fix` and amended docstrings for it. `fab/roles/critic.md` is written, and
+  `fab/tests/critiques.py` is the part's test vocabulary, its exemplar test
+  pending. The task `critic-run` fills them; `critique-tick` makes the tick
+  critique every done task's branch before it lands or is readied, after
+  `design-eligibility`. Until then every branch lands or is readied
+  uncritiqued. A task is critiqued once: the user's model checks every
+  branch, and a repaired or rebased tip goes on without a second critique
+  (14).
 - **The foreman only settles questions.** The user's execution model
   (`docs/design/draft/execution-modes.md`, roles) also has it write rebase
   and mechanical repair tasks; here the dispatcher starts rebase and repair

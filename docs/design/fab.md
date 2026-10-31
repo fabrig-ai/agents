@@ -67,7 +67,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, fix, review, foreman or critique |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
@@ -441,6 +441,27 @@ it, and the flow grows from a small start rather than to a fixed cap.
   output; the implementer's next run on the same branch fixes what it finds,
   once, before the branch lands or is readied. A critique with no findings
   lets it through at once.
+  - `fab/critique.py` folds where each task's critique stands: to critique,
+    critiquing, to fix, or clear. A done task to critique is gated first (this
+    repository's gates; fabrig's have none yet), and a clean gating starts
+    the critic; only a clear task lands or is readied.
+  - A critic run is an ordinary run whose task is `<task>/critique` (run
+    `<task>/critique-<n>`), which no task has, so it is not one of the task's
+    runs; `of` names the run whose branch it reads. It reads a worktree
+    detached at the branch's tip, started as review runs are
+    (`fab.run.launch_detached`), on the builder with most free places, even
+    at none. Its brief holds the role text, the taste file, the task's facts
+    and spec, and the digest the gates read.
+  - Its report's first line is `Done: no findings`, which clears the task,
+    or `Failed: <findings>`; any outcome but done and infra is findings. An
+    `Infra:` critique runs again, up to three times; after the third the
+    branch goes on uncritiqued, the reason printed with its landing.
+  - Findings go to a run of kind `fix` on the task's branch (as a repair
+    continues it), its brief quoting them under "The self-critique found".
+    Fix runs, as rebase runs, do not count toward the task's run limit. Once
+    a fix run ends done the task is clear.
+  - A critique runs once per task: a later repair or rebase lands or is
+    readied without another, gated as every landing is.
 - **The foreman writes the rebase and repair tasks,** as the user's model
   has it. When the landing refuses a branch, a foreman run reads the task,
   the refusal and the failing step's log, and writes the repair: an
@@ -690,8 +711,10 @@ things fab follows, whatever the clock says:
 
 ## 14. Later
 
-- (The self-critique is 13.1's, part `critique`, not later.)
-
+- A self-critique of each repaired or rebased tip, not only a task's first
+  done branch, if the numbers show repairs bring what the critic would find.
+- The flow (13.2) counting a fix run as part of a task's first attempt: today
+  a task fixed after its critique does not grow the target when it lands.
 - fabrig's gates, over Rust and its public API against the skeleton.
 - Gates on the calls' own branches (skeletons, reviews), which have no task
   `files` to check against.
