@@ -162,8 +162,22 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   that expects main's parent, ready and task branches deleted. Its record is
   `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
   `collateral`), which the dispatcher reads; the tips it has tried and
-  their collateral reds (13.8) are its only other state. The port
-  drops train, worker and recovery, and the publication journal (section 9).
+  their collateral reds (13.8) are its only other state.
+- **Retiring a landed branch:** `ready/<name>` is deleted with a lease on
+  its tip, and `<name>` only when it is still that tip; a branch readied by
+  hand (its ready ref alone, or a task ref that moved on) lands cleanly.
+- **Short of disk is the gate's fault:** a check step that exits 75 (heavy
+  waited out its disk cap) is an error, not a red: nothing is rejected or
+  marked tried, and the batch goes again.
+- **Dropped from the old queue** (the user, 10-31), not deferred: the train
+  and its worker, the publication journal and recovery (the queue re-derives
+  its state from git: a crash between push and cleanup leaves ready refs
+  contained in main, which the next cycle deletes), the authority locks and
+  the hot-swapped runtimes with their drain restart (the unit's stop drains
+  instead), the lead and coordinator mail routes (the dispatcher imports the
+  queue's record), repair priorities and holds, the launcher's CPU and wall
+  budgets, the tools-suite policy, and the hourly and idle full runs with
+  the selection-gap alert (every fifth batch is full).
 - **The queue's unit is fab's** (`fab queue install`, `fab-queue.service`):
   the deploy runs it on every machine after moving fab's install to main.
   On a gate (role `gate` in `fab/hosts.toml`) it writes the unit and
@@ -251,9 +265,6 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `run.ended` and `branch.*` events carry tips, and the queue reuses a
   receipt only for its tip and main (13.8); a check binding receipts to
   trees attaches at `fab land` and the queue's intake.
-- **Publication journal and recovery:** the queue re-derives its state from
-  git (main, ready refs) on start; a crash between push and cleanup leaves
-  ready refs contained in main, which the next cycle deletes.
 - **Acknowledgement protocols for reclaiming:** reclaim touches unclaimed
   slots only, so no acknowledgement is needed; a slot kept for inspection is
   claimed by a person.
@@ -1030,9 +1041,20 @@ only as tweaks once a replay matches its run.
   contract (`<id> <state>`, `ended`, `result.json`, the report), so
   `fab run status` and `collect` read it as any run. Its report's first line
   is `Done: green <tip>` or `Failed: <first red step>`.
-  - Green: with `ready`, the trunk is readied once (`ready/<draft>/integration`,
-    `branch.ready` for task `<draft>/integration`); without, the plan stops
-    there, logging nothing more.
+  - Green: with `ready`, the trunk is readied (`ready/<draft>/integration`,
+    `branch.ready` for task `<draft>/integration`) and the queue lands it;
+    without, the plan stops there, logging nothing more.
+  - **Caught up with main first:** before each check of a plan with
+    `ready`, the tick merges `origin/main` into the trunk when the trunk
+    lacks it (an old-form baseline conflict recounted, as at a task's
+    merge), pushes the trunk and logs `branch.landed` for task
+    `<draft>/integration`, branch `main`; the check runs on the new tip. Any
+    other conflict is aborted and logged as `branch.rejected`, step
+    `catch-up`: the plan stops for judgement until its trunk moves.
+  - **A queue rejection is checked again:** the trunk is caught up and
+    checked once more, then readied again (the queue asked to forget its
+    tried tip when the tip is unchanged). A red check goes to repairs as
+    any red; the third rejection by the queue stops the plan for judgement.
   - Red: a repair task `<draft>/repair-<n>` (folded from the log, never a
     spec file; files `**`, its body the check's failing steps and report)
     runs as an implement run from the trunk's tip, is merged like any task,
@@ -1184,8 +1206,7 @@ login that still works reused across them before more are signed in.
 - The landing checks' next steps (13.8): a collateral red sent to the
   failing test's owner, not only signalled; receipts reused for batches of
   more than one, once numbers show how often a set's receipts all name its
-  main; receipts on the gate pruned; a step that exits for disk (heavy's
-  75) at the gate an error, not a red.
+  main; receipts on the gate pruned.
 - after-landing live: its unit on a builder and its slot, the old tool
   stopped, fabrig's package map moved to `.config/tiers/`; then new reds
   reaching their tasks through the dispatcher, bisection when several

@@ -103,10 +103,46 @@ class IntegrationTest(unittest.TestCase):
         events = [merged()] + checked()
         self.assertEqual(integration.next_step(PLAN, {}, events), integration.Step("ready", "tip", "tip"))
         self.assertIsNone(integration.next_step(replace(PLAN, ready=False), {}, events))
-        events.append(dict(ev="branch.ready", task="foreign/integration"))
+        events.append(dict(ev="branch.ready", task="foreign/integration", tip="tip"))
         self.assertIsNotNone(integration.next_step(PLAN, {}, events))
-        events.append(dict(ev="branch.ready", task="demo/integration"))
+        events.append(dict(ev="branch.ready", task="demo/integration", tip="tip"))
         self.assertIsNone(integration.next_step(PLAN, {}, events))
+
+    def test_a_queue_rejection_checks_again_then_readies_and_a_landing_ends(self):
+        ready = dict(ev="branch.ready", task="demo/integration", tip="tip")
+        rejected = dict(ev="branch.rejected", task="demo/integration", tip="tip", step="default",
+                        queue_ts="t1")
+        events = [merged(), *checked(), ready]
+        self.assertIsNone(integration.next_step(PLAN, {}, events))
+        events.append(rejected)
+        self.assertEqual(integration.next_step(PLAN, {}, events),
+                         integration.Step("check", "tip", "queue rejected default: catch up and check again"))
+        events += checked(2)
+        self.assertEqual(integration.next_step(PLAN, {}, events), integration.Step("ready", "tip", "tip"))
+        events.append(ready)
+        self.assertIsNone(integration.next_step(PLAN, {}, events))
+        landed = dict(ev="branch.landed", task="demo/integration", tip="tip", main="m", queue_ts="t2")
+        self.assertIsNone(integration.next_step(PLAN, {}, [*events, rejected, landed]))
+
+    def test_a_trunk_caught_up_with_main_is_readied_at_its_new_tip(self):
+        events = [merged(), *checked(), dict(ev="branch.ready", task="demo/integration", tip="tip"),
+                  dict(ev="branch.rejected", task="demo/integration", tip="tip", step="merge", queue_ts="t1"),
+                  dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                       main="caught", tip="main-tip")]
+        self.assertEqual(integration.next_step(PLAN, {}, events), integration.Step("check", "caught", "caught"))
+        events += checked(2, tip="caught")
+        self.assertEqual(integration.next_step(PLAN, {}, events), integration.Step("ready", "caught", "caught"))
+
+    def test_three_queue_rejections_or_a_catch_up_conflict_stop(self):
+        rejections = [dict(ev="branch.rejected", task="demo/integration", tip="tip", step="default",
+                           queue_ts=f"t{n}") for n in range(integration.QUEUE_LIMIT)]
+        step = integration.next_step(PLAN, {}, [merged(), *checked(), *rejections])
+        self.assertEqual(step.kind, "stop")
+        conflict = dict(ev="branch.rejected", task="demo/integration", tip="tip",
+                        step=integration.CATCH_UP, branch="main")
+        self.assertEqual(integration.next_step(PLAN, {}, [merged(), conflict]),
+                         integration.Step("stop", "tip", "main conflicts with the trunk; needs judgement"))
+        self.assertEqual(integration.next_step(PLAN, {}, [merged(), conflict, merged("fixed")]).kind, "check")
 
     def test_next_step_red_waits_for_repair_then_checks_new_tip_and_third_red_stops(self):
         events = [merged()] + checked(outcome="failed")

@@ -3868,6 +3868,59 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.queue.assert_not_called()
 
 
+class CatchUpTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.origin, self.clone = git_pair(self.home)
+        self.plan = plan.Plan("demo", "fabrig", (), 1, 2, {}, (), landing="integration")
+        self.path = self.home / "events.jsonl"
+        git(self.clone, "switch", "-qc", self.plan.trunk)
+        self.tip = self.commit("trunk.txt", "trunk\n")
+        git(self.clone, "push", "-q", "origin", f"HEAD:refs/heads/{self.plan.trunk}")
+        git(self.clone, "switch", "-q", "main")
+
+    def commit(self, name, text):
+        write(self.clone / name, text)
+        git(self.clone, "add", name)
+        git(self.clone, "commit", "-qm", name)
+        return git(self.clone, "rev-parse", "HEAD")
+
+    def sh(self, argv, **kwargs):
+        return run(argv, env={**os.environ, **GIT_ENV}, **kwargs)
+
+    def catch_up(self):
+        return dispatch._catch_up(self.plan, self.tip, self.clone, sh=self.sh, log_path=self.path)
+
+    def test_a_trunk_that_contains_main_is_checked_as_it_is(self):
+        self.assertEqual(self.catch_up(), self.tip)
+        self.assertEqual(log.read(self.path), [])
+
+    def test_main_merges_into_the_trunk_and_is_logged_as_a_landing(self):
+        main = self.commit("main.txt", "main\n")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+        caught = self.catch_up()
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), caught)
+        self.assertEqual(git(self.origin, "rev-parse", f"{caught}^1", f"{caught}^2").split(), [self.tip, main])
+        (record,) = log.read(self.path)
+        self.assertEqual((record["ev"], record["task"], record["branch"], record["main"], record["into"]),
+                         ("branch.landed", "demo/integration", "main", caught, self.plan.trunk))
+
+    def test_a_conflict_with_main_is_aborted_and_rejected(self):
+        git(self.clone, "switch", "-q", self.plan.trunk)
+        self.tip = self.commit("both.txt", "trunk\n")
+        git(self.clone, "push", "-q", "origin", f"HEAD:refs/heads/{self.plan.trunk}")
+        git(self.clone, "switch", "-q", "main")
+        self.commit("both.txt", "main\n")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.assertIsNone(self.catch_up())
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), self.tip)
+        (record,) = log.read(self.path)
+        self.assertEqual((record["ev"], record["step"], record["tip"]),
+                         ("branch.rejected", integration.CATCH_UP, self.tip))
+        self.assertIn("both.txt", record["findings"])
+        self.assertEqual(git(self.clone, "status", "--porcelain"), "")
+
+
 class IntegrationCheckTickTest(unittest.TestCase):
     def setUp(self):
         self.home = self.enterContext(tmp_home())
@@ -3989,6 +4042,23 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertEqual((readied[0]["task"], readied[0]["branch"], readied[0]["tip"]),
                          ("draft/integration", self.plan.trunk, "trunk-tip"))
         self.assertEqual(self.fake.argvs().count(["git", "push", "origin", "trunk-tip:refs/heads/ready/draft/integration"]), 1)
+
+    def test_a_queue_rejection_rechecks_then_untries_and_readies_again(self):
+        self.hosts["gate"] = Host("gate", "fake@gate", ("gate",))
+        self.tick()
+        self.append(run_ended("draft/integration"))
+        self.tick()
+        self.append(event("branch.rejected", task="draft/integration", branch=self.plan.trunk,
+                          tip="trunk-tip", step="default", queue_ts="2026-10-31T00:00:00.000Z"))
+        self.tick()
+        started = [entry for entry in log.read(self.path) if entry["ev"] == "run.started"]
+        self.assertEqual([entry["base"] for entry in started], ["trunk-tip", "trunk-tip"])
+        self.assertIn(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], self.fake.argvs())
+        self.append(run_ended("draft/integration", 2))
+        self.tick()
+        self.assertIn(["fab", "queue", "untry", self.plan.trunk], self.commands())
+        readied = [entry["tip"] for entry in log.read(self.path) if entry["ev"] == "branch.ready"]
+        self.assertEqual(readied, ["trunk-tip", "trunk-tip"])
 
     def test_failed_launch_releases_claimed_slot(self):
         with patch.object(runs, "launch", side_effect=ValueError("bad launch")):

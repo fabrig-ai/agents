@@ -37,6 +37,9 @@
   `fab queue install`, which the deploy runs on every machine (section 6).
   It ran as a transient unit on hetzner8 from 10-30 21:15Z (it landed the
   cutover) until 10-31 10:08Z, when hetzner8 also became a builder.
+- **An integration trunk through the queue is untried live:** the catch-up
+  with main, the re-check after a rejection and the stops are tested against
+  fakes and real git only; no plan has yet run with `ready = true`.
 - **Retire, step 1 done by hand** (the user's OK, 10-30 23:17Z): the dead
   `claim`, `precheck`, `ready-check` and `codex-run` links removed on all
   three hosts; hel8 on fab's heavy, the old reconcile timer disabled;

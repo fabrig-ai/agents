@@ -14,6 +14,10 @@ from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run
 
 
+CATCH_UP = "catch-up"  # the step of a rejection when main does not merge into the trunk
+QUEUE_LIMIT = 3  # queue rejections of a trunk before its plan stops for judgement
+
+
 @dataclass(frozen=True)
 class Step:
     """The next integration action, its trunk tip and the detail printed by the tick."""
@@ -76,9 +80,10 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str])
 
 
 def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> Step | None:
-    """Check an entirely merged trunk, ready its green tip once when requested, or stop
+    """Check an entirely merged trunk, ready its green tip when requested (queue_step), or stop
     after three failed checks. Wait for unfinished tasks, absent merges and checks in flight.
-    The third red stops before its generated repair can start. Pure."""
+    The third red stops before its generated repair can start. A trunk whose catch-up with
+    main conflicted at its tip (branch.rejected, step catch-up) stops for judgement. Pure."""
     if plan.landing != "integration":
         return None
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
@@ -95,14 +100,44 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
         return Step("stop", tip, "red 3 times; needs judgement")
     if any(view.status != "landed" for view in state.fold(tasks, events).values()):
         return None
+    if any(event.get("ev") == "branch.rejected" and event.get("step") == CATCH_UP
+           and event.get("task") == f"{plan.draft}/integration" and event.get("tip") == tip
+           for event in events):
+        return Step("stop", tip, "main conflicts with the trunk; needs judgement")
     checked = next((check for check in reversed(checks) if check.get("base") == tip), None)
     if checked is None:
         return Step("check", tip, tip)
-    if (checked["outcome"] == "done" and plan.ready
-            and not any(event.get("ev") == "branch.ready"
-                        and event.get("task") == f"{plan.draft}/integration" for event in events)):
-        return Step("ready", tip, tip)
+    if checked["outcome"] == "done" and plan.ready:
+        return queue_step(plan, events, tip)
     return None
+
+
+def queue_step(plan: Plan, events: Sequence[dict], tip: str) -> Step | None:
+    """What the queue's record asks of a ready plan's trunk, green at tip. Pure.
+
+    Landed by the queue (an imported branch.landed): nothing. Rejected by the queue
+    QUEUE_LIMIT times: stop for judgement. Not readied at tip yet: ready it. Readied at tip
+    and rejected since: check again (the tick catches the trunk up with main first), and once
+    that check has started, ready again. Otherwise the queue has it: wait."""
+    subject = f"{plan.draft}/integration"
+    mine = [(position, event) for position, event in enumerate(events) if event.get("task") == subject]
+    if any(event.get("ev") == "branch.landed" and "queue_ts" in event for _, event in mine):
+        return None
+    rejections = [(position, event) for position, event in mine
+                  if event.get("ev") == "branch.rejected" and "queue_ts" in event]
+    if len(rejections) >= QUEUE_LIMIT:
+        return Step("stop", tip, f"rejected by the queue {QUEUE_LIMIT} times; needs judgement")
+    readied = [(position, event) for position, event in mine if event.get("ev") == "branch.ready"]
+    if not readied or readied[-1][1].get("tip") != tip:
+        return Step("ready", tip, tip)
+    rejected = next(((position, event) for position, event in reversed(rejections)
+                     if position > readied[-1][0]), None)
+    if rejected is None:
+        return None
+    if any(position > rejected[0] and event.get("ev") == "run.started"
+           and event.get("kind") == "check" and event.get("base") == tip for position, event in mine):
+        return Step("ready", tip, tip)
+    return Step("check", tip, f"queue rejected {rejected[1].get('step', '?')}: catch up and check again")
 
 
 def baselines(paths: Sequence[str]) -> list[str]:

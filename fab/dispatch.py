@@ -23,7 +23,9 @@ from pathlib import Path
 from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
-from fab.sh import Failed, Runner, run, ssh
+from fab.sh import Failed, Result, Runner, run, ssh
+
+FAB_GIT = ("git", "-c", "user.name=fab", "-c", "user.email=fab@localhost")  # the tick's own commits
 
 MAX_RUNS = 4  # a task with this many runs (rebases aside) and still not landed parks for judgement
 ANSWER_AFTER = 30  # minutes the oldest queued question waits before an answer call (the user, 10-30)
@@ -422,40 +424,84 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
         raise ValueError("branch has no tip")
     if any(event.get("tip") == tip for event in landed):
         return True
-    merged = sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
-                 "merge", "--no-ff", "--no-edit", tip], cwd=str(checkout))
-    if not merged.ok:
-        paths = sh(["git", "diff", "--name-only", "--diff-filter=U"],
-                   cwd=str(checkout), check=True).out.splitlines()
-        trees = integration.baselines(paths)
-        findings = "\n".join((merged.out.splitlines() + merged.err.splitlines())[-40:])
-        try:
-            if trees:
-                integration.recount(checkout, trees, sh=sh)
-                sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
-                    "commit", "--no-edit"], cwd=str(checkout), check=True)
-        except Exception as error:
-            findings += f"\nRecount failed: {error}"
-            trees = []
-        if not trees:
-            sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
-            ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
-            cutting = any(event.get("ev") == "call.started" and event.get("role") == "cut"
-                          and event.get("subject") == f"{plan.draft}/cut"
-                          and f"calls/{event['call']}" == branch and event["call"] not in ended
-                          for event in events)
-            if cutting:
-                log.append("note", path=log_path, task=task or branch, branch=branch,
-                           tip=tip, text=f"cut merge conflict: {findings}")
-            else:
-                log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
-                           tip=tip, step="merge", findings=findings)
-            return False
+    merged = sh([*FAB_GIT, "merge", "--no-ff", "--no-edit", tip], cwd=str(checkout))
+    findings = _settle_merge(merged, checkout, sh=sh)
+    if findings is not None:
+        ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+        cutting = any(event.get("ev") == "call.started" and event.get("role") == "cut"
+                      and event.get("subject") == f"{plan.draft}/cut"
+                      and f"calls/{event['call']}" == branch and event["call"] not in ended
+                      for event in events)
+        if cutting:
+            log.append("note", path=log_path, task=task or branch, branch=branch,
+                       tip=tip, text=f"cut merge conflict: {findings}")
+        else:
+            log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
+                       tip=tip, step="merge", findings=findings)
+        return False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
     log.append("branch.landed", path=log_path, task=task or branch, branch=branch,
                tip=tip, main=main, into=plan.trunk)
     return True
+
+
+def _settle_merge(merged: Result, checkout: Path, *, sh: Runner) -> str | None:
+    """None when a merge went through, or its only conflicts were old-form baselines, then
+    recounted and committed; otherwise abort it and return its findings: the last 40 lines of
+    its output, and a recount's failure."""
+    if merged.ok:
+        return None
+    paths = sh(["git", "diff", "--name-only", "--diff-filter=U"],
+               cwd=str(checkout), check=True).out.splitlines()
+    trees = integration.baselines(paths)
+    findings = "\n".join((merged.out.splitlines() + merged.err.splitlines())[-40:])
+    try:
+        if trees:
+            integration.recount(checkout, trees, sh=sh)
+            sh([*FAB_GIT, "commit", "--no-edit"], cwd=str(checkout), check=True)
+            return None
+    except Exception as error:
+        findings += f"\nRecount failed: {error}"
+    sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
+    return findings
+
+
+def _catch_up(plan: Plan, tip: str, checkout: Path, *, sh: Runner,
+              log_path: Path | None) -> str | None:
+    """Merge origin/main into a ready plan's trunk, at tip, before its check; return the tip
+    to check.
+
+    A trunk that contains main is left as it is: tip. A merge (old-form baseline conflicts
+    recounted) is pushed and logged as branch.landed into the trunk, task <draft>/integration,
+    branch main. Any other conflict is aborted and logged as branch.rejected, step
+    integration.CATCH_UP, at the trunk's tip; then None."""
+    subject = f"{plan.draft}/integration"
+    sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+    sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
+    if sh(["git", "merge-base", "--is-ancestor", "origin/main", "HEAD"], cwd=str(checkout)).ok:
+        return tip
+    main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
+    merged = sh([*FAB_GIT, "merge", "--no-ff", "-m", f"Merge main into {plan.trunk}", main],
+                cwd=str(checkout))
+    findings = _settle_merge(merged, checkout, sh=sh)
+    if findings is not None:
+        log.append("branch.rejected", path=log_path, task=subject, branch="main", tip=tip,
+                   step=integration.CATCH_UP, findings=findings)
+        return None
+    sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
+    caught = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
+    log.append("branch.landed", path=log_path, task=subject, branch="main", tip=main,
+               main=caught, into=plan.trunk)
+    return caught
+
+
+def _untry(branch: str, hosts: Mapping[str, Host], *, sh: Runner) -> None:
+    """Ask the queue on the first gate by name to forget the tip it tried for branch."""
+    gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
+    if not gate_hosts:
+        raise ValueError("no gate host configured for queue untry")
+    sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "untry", branch]), check=True)
 
 
 def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
@@ -525,7 +571,6 @@ def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
 
     A tip without a receipt is readied all the same; the queue checks it in full.
     """
-    gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
     repo = log.home() / "repos" / task.repo
     if not (repo / ".git").exists():
         repo.parent.mkdir(parents=True, exist_ok=True)
@@ -541,10 +586,7 @@ def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
                       if event.get("ev") == "branch.rejected"
                       and event.get("task") == action.task), None)
     if rejection is not None and tip == rejection.get("tip"):
-        if not gate_hosts:
-            raise ValueError("no gate host configured for queue untry")
-        sh(ssh(hosts[gate_hosts[0]].ssh,
-               ["fab", "queue", "untry", action.branch]), check=True)
+        _untry(action.branch, hosts, sh=sh)
         log.append("note", path=log_path,
                    text=f"retry {action.task}: same tip after repair")
     receipts.deliver(action.task, tip, log.read(log_path), hosts, sh=sh, log_path=log_path)
@@ -1282,8 +1324,14 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
     detail = step.detail
     try:
         if step.kind == "check":
-            _integration_check(plan, step.tip, hosts, events, sh=sh, log_path=log_path)
+            tip = (_catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)
+                   if plan.ready else step.tip)
+            if tip is not None:
+                _integration_check(plan, tip, hosts, events, sh=sh, log_path=log_path)
         elif step.kind == "ready":
+            if any(event.get("ev") == "branch.rejected" and "queue_ts" in event
+                   and event.get("task") == subject and event.get("tip") == step.tip for event in events):
+                _untry(plan.trunk, hosts, sh=sh)
             sh(["git", "push", "origin", f"{step.tip}:refs/heads/ready/{plan.trunk}"],
                cwd=str(checkout), check=True)
             log.append("branch.ready", path=log_path, task=subject, branch=plan.trunk, tip=step.tip)
