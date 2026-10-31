@@ -206,6 +206,17 @@ class TaskTest(unittest.TestCase):
         self.assertEqual(result.draft, "draft")
         self.assertEqual(result.name, "task")
 
+    def test_consolidation_defaults_to_false_and_accepts_only_booleans(self):
+        self.assertIs(self.parse(spec()).consolidation, False)
+        for value, expected in (("true", True), ("false", False)):
+            with self.subTest(value=value):
+                self.assertIs(self.parse(spec(HEADER + f"consolidation = {value}\n")).consolidation,
+                              expected)
+        for value in ('"true"', '1', '[]'):
+            with self.subTest(value=value), self.assertRaisesRegex(
+                    PlanError, r"task\.md: consolidation has the wrong type"):
+                self.parse(spec(HEADER + f"consolidation = {value}\n"))
+
     def test_optional_fields_and_full_ids(self):
         header = HEADER.replace('id = "task"', 'id = "other/task"') + '''repo = "other-repo"
 needs = ["first", "other/second"]

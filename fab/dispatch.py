@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state
+from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -223,8 +223,9 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     1. collect: only this draft's owned runs, including its calls' review runs.
     2. land (repo "agents") or ready (any other repo): every task whose status is done, with
        the branch of its last run.
-    3. start: for rejected tasks first, then runnable ones in the tasks' order, while the
-       draft's runs in flight plus the starts so far are below the target and a builder has a
+    3. start: for rejected and runnable tasks in fab.buffer.order's order, refused
+       being those whose start carries a refusal, while the draft's runs in flight plus
+       the starts so far are below the target and a builder has a
        free place by places(hosts, flight, calm) (the builder with most free places first;
        ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
@@ -254,6 +255,9 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
 
     candidates = [identifier for status in ("rejected", "runnable")
                   for identifier, view in views.items() if view.status == status]
+    refused = {identifier for identifier in candidates
+               if _start_kind(views[identifier], events)[1] is not None}
+    candidates = buffer.order(plan, tasks, candidates, refused)
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)}
     actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
 

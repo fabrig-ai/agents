@@ -174,8 +174,9 @@ def parse_task(text: str, path: str, draft: str, default_repo: str) -> Task:
     """Parse a spec: a `+++` line, TOML, a `+++` line, then the Markdown body (kept verbatim).
 
     Required: id, part, kind; defaults: repo=default_repo, needs=(), files=(), effort="high",
-    minutes=25. Short ids in `id` and `needs` become full ids. Raises PlanError naming path
-    for a missing header, a bad value (unknown kind or effort, minutes not a positive int).
+    minutes=25, consolidation=false. Short ids in `id` and `needs` become full ids.
+    Raises PlanError naming path for a missing header, a bad value (unknown kind or effort,
+    minutes not a positive int).
     """
     lines = text.splitlines(keepends=True)
     if not lines or lines[0].rstrip("\r\n") != "+++":
@@ -222,7 +223,8 @@ def parse_task(text: str, path: str, draft: str, default_repo: str) -> Task:
     if minutes <= 0:
         raise PlanError(f"{path}: minutes must be a positive int")
     return Task(full(identifier), part, kind, repo, tuple(map(full, needs)), files,
-                effort, minutes, "".join(lines[end + 1:]), path)
+                effort, minutes, "".join(lines[end + 1:]), path,
+                consolidation=value("consolidation", bool, False))
 
 
 def load_tasks(directory: Path, draft: str, default_repo: str) -> dict[str, Task]:

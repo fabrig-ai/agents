@@ -24,7 +24,14 @@ def group(plan: Plan, task: Task, refused: bool) -> str:
     - "contract": its part is in plan.parts with contract true;
     - "slice": anything else, a task whose part is not in plan.parts among them.
     """
-    raise NotImplementedError
+    if task.consolidation:
+        return "consolidation"
+    if refused:
+        return "repair"
+    part = plan.parts.get(task.part)
+    if part is not None and part.contract:
+        return "contract"
+    return "slice"
 
 
 def order(plan: Plan, tasks: Mapping[str, Task], candidates: Iterable[str],
@@ -43,4 +50,18 @@ def order(plan: Plan, tasks: Mapping[str, Task], candidates: Iterable[str],
     of a slice 2 part. Returns a new list; candidates and tasks are not changed. A
     candidate missing from tasks is a KeyError.
     """
-    raise NotImplementedError
+    slices = {}
+    for position, item in enumerate(plan.slices):
+        for part in item.parts:
+            if part in plan.parts:
+                slices.setdefault(part, position)
+    parts = {part: position for position, part in enumerate(plan.parts)}
+    specs = {identifier: position for position, identifier in enumerate(tasks)}
+
+    def rank(identifier):
+        task = tasks[identifier]
+        return (GROUPS.index(group(plan, task, identifier in refused)),
+                slices.get(task.part, len(plan.slices)),
+                parts.get(task.part, len(plan.parts)), specs[identifier])
+
+    return sorted(candidates, key=rank)

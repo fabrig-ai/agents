@@ -17,6 +17,7 @@ from fab import call_review, channel, cli, designer, dispatch, drafts, flow, for
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
+from fab.tests.buffer_order import ids, sliced, spec, specs
 from fab.tests.test_repairs import (TASK as REPAIR_TASK, foreman_run, rejected, report,
                                     settled, task_run)
 from fab.tests.support import (FakeRunner, call_ended, call_started, run_ended, run_started,
@@ -206,6 +207,68 @@ class ForemanActionsTest(unittest.TestCase):
         self.assertEqual(dispatch.foreman_actions(tasks, events), expected)
         self.assertEqual((tasks, events), before)
         self.assertEqual(dispatch.foreman_actions({}, events), [])
+
+
+class BufferDecideTest(unittest.TestCase):
+    def setUp(self):
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}
+
+    def test_consolidation_starts_before_rejected_task(self):
+        the_plan = sliced(["early"], ["late"])
+        tasks = specs(spec("fix", "early"), spec("merge", "late", consolidation=True))
+        actions = dispatch.decide(the_plan, tasks, [event("branch.rejected", "fix", step="test")],
+                                  self.hosts)
+        self.assertEqual([action.task for action in actions if action.kind == "start"], ids("merge"))
+
+    def test_refused_slice_two_task_starts_before_runnable_slice_one(self):
+        the_plan = sliced(["early"], ["late"])
+        tasks = specs(spec("early", "early"), spec("fix", "late"))
+        actions = dispatch.decide(the_plan, tasks, [event("branch.rejected", "fix", step="merge")],
+                                  self.hosts)
+        self.assertEqual([(action.task, action.run_kind) for action in actions if action.kind == "start"],
+                         [("draft/fix", "rebase")])
+
+    def test_infra_rerun_keeps_its_slice_place(self):
+        the_plan = sliced(["early"], ["late"])
+        tasks = specs(spec("late", "late"), spec("early", "early"))
+        for name, expected_kind in (("late", "implement"), ("early", "repair")):
+            with self.subTest(infra=name):
+                events = [started(name), ended(name, outcome="infra")]
+                actions = dispatch.decide(the_plan, tasks, events, self.hosts)
+                start, = [action for action in actions if action.kind == "start"]
+                self.assertEqual((start.task, start.run_kind, start.rejection),
+                                 ("draft/early", expected_kind, None))
+
+    def test_contract_task_starts_before_slice_one_task(self):
+        the_plan = sliced(["early"], ["wire"], contracts=["wire"])
+        tasks = specs(spec("early", "early"), spec("wire", "wire"))
+        actions = dispatch.decide(the_plan, tasks, [], self.hosts)
+        self.assertEqual([action.task for action in actions if action.kind == "start"], ids("wire"))
+
+    def test_refused_runnable_and_rejected_tasks_keep_spec_order(self):
+        the_plan = sliced(["core"])
+        tasks = specs(spec("earlier", "core"), spec("later", "core"))
+        rejection = event("branch.rejected", "earlier", step="merge")
+        events = [started("earlier"), ended("earlier"), rejection,
+                  event("question.asked", "earlier", text="Proceed?"),
+                  event("question.answered", "earlier", answer="yes"),
+                  event("branch.rejected", "later", step="test")]
+        views = state.fold(tasks, events)
+        self.assertEqual(views["draft/earlier"].status, "runnable")
+        self.assertEqual(views["draft/later"].status, "rejected")
+        actions = dispatch.decide(the_plan, tasks, events, self.hosts)
+        start, = [action for action in actions if action.kind == "start"]
+        self.assertEqual((start.task, start.run_kind, start.rejection),
+                         ("draft/earlier", "rebase", rejection))
+
+    def test_run_limit_parks_even_after_the_order_fills_the_place(self):
+        the_plan = sliced(["early"], ["late"])
+        tasks = specs(spec("exhausted", "late"), spec("merge", "early", consolidation=True))
+        events = [entry for n in range(1, MAX_RUNS + 1)
+                  for entry in (started("exhausted", n), ended("exhausted", n, outcome="infra"))]
+        actions = dispatch.decide(the_plan, tasks, events, self.hosts)
+        self.assertEqual([(action.kind, action.task) for action in actions[1:]],
+                         [("start", "draft/merge"), ("park", "draft/exhausted")])
 
 
 class DecideTest(unittest.TestCase):
