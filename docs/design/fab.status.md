@@ -190,9 +190,13 @@
   repairs and the ready, reviews off, answers at once, the flow kept at
   the builders' places, and the run-derived texts (`cut-direct.md`,
   `fabrig-integration.md`). Simulated against codex-kit
-  (`coord/fab-replay/simulation.md`), never ticked on fabrig. The builders'
-  and hel8's installs must move to this main before a live run
-  (`fab precheck --onto`, `fab check start`).
+  (`coord/fab-replay/simulation.md`), then run live once (10-31,
+  15:32-16:49Z, hetzner11 and hetzner12): `component-kit/integration` green
+  on the first end check at T+76.1 (codex-kit 54.75), never landed
+  (`coord/fab-replay/report.md`). Five bugs found live are fixed on main;
+  what is left to match the run is in section 14. The replay ticked from
+  its own install on hel8 (`FAB_HOME/replay-install`, a local hosts.toml),
+  as a background command of a session, not a unit.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

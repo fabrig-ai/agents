@@ -1061,6 +1061,25 @@ only as tweaks once a replay matches its run.
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
+- What the first live replay (codex-kit's run, 10-31: 76.1 min against
+  54.75; `coord/fab-replay/report.md`) shows fab needs to match its run, the
+  user to choose among:
+  - a faster cut: start the ratchet and contract tasks while the cut writes
+    the rest, or a smaller cut brief (the first implementer came at T+13.7,
+    the lead's at T+4.8);
+  - needs that do not funnel: the ratchet task in every task's needs held
+    everything until T+22.6, and every stage task waited for one
+    (codex-kit ran its first three side by side and eight stage tasks at
+    T+11);
+  - task files wide enough for mechanical fallout and the cut's
+    pre-approved defaults for representation choices (three of seven
+    questions were "outside my files");
+  - merges off the tick's serial path (about 35 s each, the gates
+    archiving two full trees), with collection never waiting behind them;
+  - fabrig briefs without implementer.md's agents-repository test rules,
+    and spec paths relative to the repository, not hel8's checkout;
+  - the tick settling a refusal the gate caused by its own fault, which an
+    operator did by hand in the replay.
 - An integration plan's lighter checks (13.12): a workspace clippy of the
   trunk after each merge, the codex-kit run's lesson (two parallel branches
   meeting at clippy found only at the end check); once the replay matches
