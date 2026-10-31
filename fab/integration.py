@@ -111,7 +111,7 @@ def baselines(paths: Sequence[str]) -> list[str]:
 
 def recount(checkout: Path, trees: Sequence[str], *, sh: Runner = run) -> None:
     """Resolve each tree's baseline from ours, recount with --write and stage it.
-    A nonzero command raises Failed, so a count increase cannot complete a merge."""
+    A nonzero command raises Failed, so a failed recount cannot complete a merge."""
     for tree in trees:
         baseline = f"{tree}/scripts/old-forms.txt"
         sh(["git", "checkout", "--ours", "--", baseline], cwd=str(checkout), check=True)

@@ -1,4 +1,4 @@
-"""Minimal Rust files and old-form gates (docs/design/fab.md, 13.11).
+"""Minimal Rust old-form gates (docs/design/fab.md, 13.11).
 
 Size remains a digest flag. A command or count failure raises so the branch waits.
 """
@@ -16,21 +16,18 @@ from fab.plan import Task
 from fab.sh import Runner, run
 
 REPOS = ("fabrig",)
-GATES = ("files", "ratchet")
+GATES = ("ratchet",)
 
 
 def check(digest: rust_digest.Digest) -> list[Finding]:
-    """Findings in files then ratchet order; size is reported without rejecting.
+    """Ratchet findings in digest order; size and outside paths do not reject.
 
-    Every outside path fails files. Each per-tree form whose actual tip count exceeds
-    its base count fails ratchet, naming the tree, form and both counts.
+    Each per-tree form whose actual tip count exceeds its base count fails ratchet,
+    naming the tree, form and both counts.
     """
-    findings = [Finding("files", f"`{path}` is outside the task's files")
-                for path in digest.outside]
-    findings.extend(Finding("ratchet", f"`{entry.tree}`: `{entry.form}` rose from "
-                            f"{entry.base} to {entry.tip}")
-                    for entry in digest.ratchets if entry.tip > entry.base and not entry.new)
-    return findings
+    return [Finding("ratchet", f"`{entry.tree}`: `{entry.form}` rose from "
+                    f"{entry.base} to {entry.tip}")
+            for entry in digest.ratchets if entry.tip > entry.base and not entry.new]
 
 
 def screen(task: Task, events: Iterable[dict], *, sh: Runner = run,

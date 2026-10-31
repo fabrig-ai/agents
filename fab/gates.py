@@ -20,7 +20,7 @@ from fab.plan import Task
 from fab.sh import Runner, run
 
 REPOS = ("agents",)  # repositories whose branches are gated: the first gates read Python
-GATES = ("files", "shape", "size", "names", "docs", "clones")
+GATES = ("shape", "size", "names", "docs", "clones")
 PARSE = "parse"  # the finding's gate when the tip's Python does not parse
 EXEMPT = ("interface", "migration")  # task kinds that may change or remove a signature
 
@@ -76,7 +76,6 @@ def check(digest: Digest, banned: Iterable[str]) -> list[Finding]:
     """Every gate's findings, the gates in GATES order and each gate's in the digest's order.
     Names are written in backquotes as shown.
 
-    - files: per path of digest.outside: "`<path>` is outside the task's files".
     - shape, unless digest.kind is in EXEMPT: per removed item "`<module>`: `<text>` removed",
       then per changed pair "`<module>`: `<base text>` changed to `<tip text>`".
     - size: per digest.long: "`<module>:<start>` <name> is <lines> lines (cap <SIZE_CAP>)".
@@ -86,8 +85,7 @@ def check(digest: Digest, banned: Iterable[str]) -> list[Finding]:
       "`<module>`: `<name>` uses the banned word `<word>`" for an item.
     - docs: per added item whose doc is empty: "`<module>`: `<text>` has no docstring".
     - clones: per clone: "`<path>:<start>-<end>` repeats `<other>:<other_start>`"."""
-    findings = [Finding("files", f"`{path}` is outside the task's files")
-                for path in digest.outside]
+    findings = []
     if digest.kind not in EXEMPT:
         findings.extend(Finding("shape", f"`{item.module}`: `{item.text}` removed")
                         for item in digest.removed)

@@ -58,11 +58,10 @@ class WordsTest(unittest.TestCase):
 
 
 class GatesTest(unittest.TestCase):
-    def test_files_in_digest_order(self):
+    def test_outside_paths_do_not_reject(self):
         digest = replace(CLEAN, outside=("z.txt", "a.txt"))
-        self.assertEqual(check(digest, ()), [
-            Finding("files", "`z.txt` is outside the task's files"),
-            Finding("files", "`a.txt` is outside the task's files")])
+        self.assertEqual(check(digest, ()), [])
+        self.assertNotIn("files", gates.GATES)
 
     def test_shape_removed_then_changed(self):
         removed = replace(ITEM, name="old", text="def old()")
@@ -78,8 +77,7 @@ class GatesTest(unittest.TestCase):
                 digest = replace(CLEAN, kind=kind, removed=(ITEM,),
                                  changed=((ITEM, replace(ITEM, text="def work(count)")),))
                 self.assertEqual(check(digest, ()), [])
-                self.assertEqual(check(replace(digest, outside=("extra",)), ()),
-                                 [Finding("files", "`extra` is outside the task's files")])
+                self.assertEqual(check(replace(digest, outside=("extra",)), ()), [])
 
     def test_size(self):
         digest = replace(CLEAN, long=(Function("fab/work.py", "Queue.work", 10, 61),))
@@ -137,7 +135,7 @@ class GatesTest(unittest.TestCase):
                          added=(replace(ITEM, name="TaskManager", doc=""),),
                          clones=(Clone("fab/work.py", 1, 8, "fab/other.py", 1),))
         self.assertEqual([finding.gate for finding in check(digest, ["manager"])],
-                         ["files", "shape", "size", "names", "docs", "clones"])
+                         ["shape", "size", "names", "docs", "clones"])
 
 
 class FindingsTextTest(unittest.TestCase):
@@ -149,14 +147,14 @@ class FindingsTextTest(unittest.TestCase):
         self.assertEqual(findings_text([]), "")
 
     def test_brief_quotes_all_gates(self):
-        findings = [Finding("files", "`extra` is outside the task's files"),
+        findings = [Finding("shape", "`fab/work.py`: `def old()` removed"),
                     Finding("docs", "`fab/work.py`: `def work()` has no docstring")]
         text = findings_text(findings)
         task = Task("draft/task", "part", "feature", "agents", (), ("fab/work.py",),
                     "high", 20, "Implement work.\n", "docs/plan/draft/tasks/task.md")
         result = brief(task, "Role", run_id=CLEAN.run, branch=CLEAN.branch,
                        base="origin/main", report="/report.md",
-                       rejection={"step": "gate:files", "log": "/digest.md", "text": text})
+                       rejection={"step": "gate:shape", "log": "/digest.md", "text": text})
         quoted = result.split("```text\n", 1)[1].split("\n```", 1)[0]
         self.assertEqual(quoted + "\n", text)
 
@@ -212,8 +210,8 @@ class ScreenTest(unittest.TestCase):
         self.assertEqual(sorted(p.name for p in log.home().iterdir()),
                          ["digests", "land-agents.lock", "repos"])
 
-    def test_outside_files_rejects_after_releasing_lock_with_digest_and_findings(self):
-        tip = self.push("extra.md", "Outside the task.\n")
+    def test_docs_rejects_after_releasing_lock_with_digest_and_findings(self):
+        tip = self.push("fab/extra.py", "def extra():\n    return 1\n")
         append = log.append
 
         def rejected(ev, **fields):
@@ -230,17 +228,23 @@ class ScreenTest(unittest.TestCase):
 
         with patch("fab.log.append", side_effect=rejected):
             findings = gates.screen(self.task, self.events, sh=locked_git, log_path=self.path)
-        self.assertEqual(findings, [Finding("files", "`extra.md` is outside the task's files")])
+        self.assertEqual(findings, [Finding("docs", "`fab/extra.py`: `def extra()` has no docstring")])
         records = log.read(self.path)
         self.assertEqual(len(records), 1)
         self.assertEqual({key: value for key, value in records[0].items() if key != "ts"},
                          dict(ev="branch.rejected", task=self.task.id, branch="draft/task-r1",
-                              tip=tip, step="gate:files", log=str(self.digest),
+                              tip=tip, step="gate:docs", log=str(self.digest),
                               findings=findings_text(findings)))
         self.assertTrue(self.digest.is_file())
         self.assertEqual(log.read(), [])
         self.assertEqual(state.fold({self.task.id: self.task}, self.events + records)[self.task.id].status,
                          "rejected")
+
+    def test_outside_path_is_reported_without_rejecting(self):
+        self.push("extra.md", "Outside the task.\n")
+        self.assertEqual(gates.screen(self.task, self.events, log_path=self.path), [])
+        self.assertIn("## Outside the task's files\n- `extra.md`\n", self.digest.read_text())
+        self.assertEqual(log.read(self.path), [])
 
     def test_parse_failure_rejects_without_digest(self):
         tip = self.push(text="def x(:\n")

@@ -405,7 +405,7 @@ class DecideTest(unittest.TestCase):
     def test_rejections_use_last_step(self):
         for step, expected in (("merge", "rebase"), ("rebase", "rebase"),
                                ("test", "repair"), ("push", "repair"), ("paths", "repair"),
-                               ("gate:files", "repair"), ("gate:parse", "repair")):
+                               ("gate:names", "repair"), ("gate:parse", "repair")):
             with self.subTest(step=step):
                 events = [event("branch.rejected", step="rebase"),
                           event("branch.rejected", step=step)]
@@ -1788,12 +1788,12 @@ parts = []
 
     def test_gate_findings_reject_without_landing_and_print_unique_gates(self):
         self.append(started(), ended())
-        self.screen.return_value = [gates.Finding("files", "outside"),
-                                    gates.Finding("files", "also outside"),
+        self.screen.return_value = [gates.Finding("names", "banned word"),
+                                    gates.Finding("names", "another banned word"),
                                     gates.Finding("docs", "no docstring")]
         self.tick()
         self.land.assert_not_called()
-        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a rejected gate:files,docs\n"
+        self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\nland draft/a rejected gate:names,docs\n"
                          + f"page - {log.home() / channel.PAGE}\n")
         self.assertFalse(any(entry["ev"] == "note" for entry in log.read()))
 
@@ -2788,8 +2788,8 @@ class RepairTickTest(unittest.TestCase):
                          "gate": self.hosts["gate"]}
 
                 def refuse(task, events, **kwargs):
-                    self.append(rejected("03", step="gate:files", findings="outside files"))
-                    return [gates.Finding("files", "outside files")]
+                    self.append(rejected("03", step="gate:names", findings="banned word"))
+                    return [gates.Finding("names", "banned word")]
 
                 self.screen.side_effect = refuse
                 self.examine.reset_mock()
@@ -2797,10 +2797,10 @@ class RepairTickTest(unittest.TestCase):
                 self.assertEqual([action.kind for action in actions], ["land", "examine", "collect", "collect"])
                 args = self.examine.call_args.args
                 self.assertEqual((args[0].step, args[0].findings, args[2]),
-                                 ("gate:files", "outside files", hosts[expected]))
+                                 ("gate:names", "banned word", hosts[expected]))
                 self.assertEqual(args[3][-1]["ev"], "branch.rejected")
                 self.assertEqual(self.examine.call_args.kwargs, dict(sh=self.fake, log_path=self.path, trunk="main"))
-                self.assertIn(f"examine draft/task gate:files {expected}\n", self.out.getvalue())
+                self.assertIn(f"examine draft/task gate:names {expected}\n", self.out.getvalue())
                 self.assertFalse(any(entry.get("kind") == "repair" for entry in log.read(self.path)))
         self.land.assert_not_called()
         self.assertEqual(log.read(), [])
@@ -3433,11 +3433,11 @@ class IntegrationMergeTest(unittest.TestCase):
         for entry in (started(), ended()):
             log.append(path=self.path, **entry)
         action, = dispatch.decide(self.plan, tasks, log.read(self.path), {})[1:]
-        with patch.object(rust_gates, "screen", return_value=[]) as screen:
+        self.assertNotIn("feature.txt", tasks["draft/a"].files)
+        with patch.object(rust_gates, "screen", side_effect=AssertionError("unexpected gate")) as screen:
             dispatch._take(action, tasks, {}, self.checkout, plan=self.plan, checkout=self.checkout,
                            sh=self.runner, log_path=self.path)
-        screen.assert_called_once_with(tasks["draft/a"], log.read(self.path)[:2],
-                                       trunk=self.plan.trunk, sh=self.runner, log_path=self.path)
+        screen.assert_not_called()
         merged = git(self.origin, "rev-parse", self.plan.trunk)
         self.assertNotEqual(merged, self.base)
         self.assertEqual(git(self.origin, "rev-parse", "main"), self.base)
@@ -3515,8 +3515,9 @@ class IntegrationMergeTest(unittest.TestCase):
                                                    sh=self.runner, log_path=self.path))
         self.assertEqual((self.checkout / "skein/scripts/old-forms.txt").read_text(), "a=1 b=1\n")
         self.assertEqual([entry["ev"] for entry in log.read(self.path)], ["branch.landed", "branch.landed"])
-        recounts = [call for call in self.runner.calls if call.argv[:1] == ["python3"] and "--write" in call.argv]
-        self.assertEqual(len(recounts), 1)
+        recounts = [call for call in self.runner.calls if call.argv[:1] == ["python3"]]
+        self.assertEqual([call.argv for call in recounts],
+                         [["python3", "-I", "-B", "scripts/old_forms.py", "--write"]])
         self.assertEqual(recounts[0].cwd, str(self.checkout / "skein"))
         self.assertIn(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "--no-edit"],
                       self.runner.argvs())
@@ -3537,22 +3538,22 @@ class IntegrationMergeTest(unittest.TestCase):
         self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), before)
         self.assertEqual(git(self.checkout, "status", "--porcelain"), "")
 
-    def test_clean_merge_with_count_increase_is_refused_before_push(self):
+    def test_clean_merge_with_count_increase_pushes_without_checking_ratchet(self):
         write(self.checkout / "skein/scripts/old_forms.py", "# fake old-forms counter\n")
         git(self.checkout, "add", "skein")
         git(self.checkout, "commit", "-q", "-m", "Add ratchet")
         git(self.checkout, "push", "-q", "origin", self.plan.trunk)
         before = git(self.origin, "rev-parse", self.plan.trunk)
-        self.branch("draft/a", "skein/src/lib.rs", "more old forms\n")
+        tip = self.branch("draft/a", "skein/src/lib.rs", "more old forms\n")
         self.runner.on(["python3"], Result(1, "old forms raised\n", "baseline exceeded\n"))
-        self.assertFalse(dispatch._merge_branch("draft/a", self.plan, self.checkout,
-                                                sh=self.runner, log_path=self.path))
-        rejection, = log.read(self.path)
-        self.assertEqual((rejection["step"], rejection["findings"]),
-                         ("gate:ratchet", "old forms raised\nbaseline exceeded\n"))
-        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), before)
-        self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), before)
-        self.assertFalse(any(call.argv[:3] == ["git", "push", "origin"] for call in self.runner.calls))
+        self.assertTrue(dispatch._merge_branch("draft/a", self.plan, self.checkout,
+                                               sh=self.runner, log_path=self.path))
+        landed, = log.read(self.path)
+        self.assertEqual((landed["ev"], landed["tip"]), ("branch.landed", tip))
+        self.assertNotEqual(git(self.origin, "rev-parse", self.plan.trunk), before)
+        self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), landed["main"])
+        self.assertFalse(any(call.argv[0] == "python3" for call in self.runner.calls))
+        self.assertIn(["git", "push", "origin", f"HEAD:refs/heads/{self.plan.trunk}"], self.runner.argvs())
 
     def test_uncut_chain_without_reviews_merges_calls_branch_into_trunk(self):
         cut_plan = write_plan(self.home / "cut-plan", "draft")
@@ -3627,14 +3628,26 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.assertIn(["git", "merge", "--abort"], self.fake.argvs())
         self.assertFalse(any(argv[:3] == ["git", "push", "origin"] for argv in self.fake.argvs()))
 
-    def test_gate_findings_print_rejection_and_skip_merge(self):
+    def test_merge_runs_only_fetch_reset_merge_and_push_without_gates(self):
         self.append(started(), ended())
-        with patch.object(rust_gates, "screen", return_value=[gates.Finding("files", "outside"),
-                                                             gates.Finding("files", "again")]) as screen:
+        with (
+            patch.object(rust_gates, "screen", side_effect=AssertionError("unexpected Rust gate")) as rust_screen,
+            patch.object(gates, "screen", side_effect=AssertionError("unexpected Python gate")) as screen,
+        ):
             self.take(Action("merge", task="draft/a", branch="draft/a"))
-        self.assertEqual(screen.call_args.kwargs["trunk"], self.plan.trunk)
-        self.assertIn("merge draft/a rejected gate:files\n", self.out.getvalue())
-        self.assertEqual(self.fake.argvs(), [])
+        rust_screen.assert_not_called()
+        screen.assert_not_called()
+        self.assertEqual(self.fake.argvs(), [
+            ["git", "fetch", "origin"],
+            ["git", "reset", "-q", "--hard", f"origin/{self.plan.trunk}"],
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/draft/a^{commit}"],
+            ["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
+             "merge", "--no-ff", "--no-edit", "branch-tip"],
+            ["git", "push", "origin", f"HEAD:refs/heads/{self.plan.trunk}"],
+            ["git", "rev-parse", "HEAD"]])
+        landed = log.read(self.path)[-1]
+        self.assertEqual((landed["ev"], landed["tip"], landed["main"], landed["into"]),
+                         ("branch.landed", "branch-tip", "merged-tip", self.plan.trunk))
 
     def test_foremen_start_on_integration_trunk(self):
         hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}

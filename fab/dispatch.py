@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gate, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
+from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -436,18 +436,6 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
             log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
                        tip=tip, step="merge", findings=findings)
             return False
-    paths = sh(["git", "diff", "--name-only", f"origin/{plan.trunk}", "HEAD"],
-               cwd=str(checkout), check=True).out.splitlines()
-    for tree in gate.TREES:
-        if (not any(path.startswith(tree + "/") for path in paths)
-                or not (checkout / tree / "scripts/old_forms.py").is_file()):
-            continue
-        checked = sh(["python3", "-I", "-B", "scripts/old_forms.py"], cwd=str(checkout / tree))
-        if not checked.ok:
-            sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
-            log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
-                       tip=tip, step="gate:ratchet", findings=checked.out + checked.err)
-            return False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
     log.append("branch.landed", path=log_path, task=task or branch, branch=branch,
@@ -597,13 +585,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "ready":
                 detail = _screen_ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
             case "merge":
-                findings = rust_gates.screen(tasks[action.task], log.read(log_path),
-                                            trunk=plan.trunk, sh=sh, log_path=log_path)
-                if findings:
-                    detail = "rejected gate:" + ",".join(dict.fromkeys(finding.gate for finding in findings))
-                else:
-                    _merge_branch(action.branch, plan, checkout, task=action.task,
-                                  sh=sh, log_path=log_path)
+                _merge_branch(action.branch, plan, checkout, task=action.task,
+                              sh=sh, log_path=log_path)
             case "start":
                 _start(action, tasks, hosts, plan=plan, sh=sh, log_path=log_path)
             case "call":

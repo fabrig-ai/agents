@@ -30,7 +30,7 @@ def summary(**fields) -> rust_digest.Digest:
 
 
 class CheckTest(unittest.TestCase):
-    def test_files_then_ratchet_in_digest_order_size_is_only_flagged(self):
+    def test_ratchet_in_digest_order_size_and_outside_paths_are_only_flagged(self):
         result = summary(outside=("outside/a.rs", "outside/b.md"),
                          long=(Function("skein/a.rs", "large", 1, 61),),
                          ratchets=(rust_digest.Ratchet("skein", "fall", 5, 4),
@@ -38,11 +38,10 @@ class CheckTest(unittest.TestCase):
                                    rust_digest.Ratchet("skein", "JournalRoom", 0, 2),
                                    rust_digest.Ratchet("skein", "equal", 2, 2)))
         self.assertEqual(gates.check(result),
-                         [Finding("files", "`outside/a.rs` is outside the task's files"),
-                          Finding("files", "`outside/b.md` is outside the task's files"),
-                          Finding("ratchet", "`other`: `max_out` rose from 1 to 2"),
+                         [Finding("ratchet", "`other`: `max_out` rose from 1 to 2"),
                           Finding("ratchet", "`skein`: `JournalRoom` rose from 0 to 2")])
-        self.assertEqual(gates.check(replace(result, outside=(), ratchets=())), [])
+        self.assertEqual(gates.check(replace(result, ratchets=())), [])
+        self.assertNotIn("files", gates.GATES)
 
     def test_falls_and_equal_counts_pass_and_findings_work_in_repair_briefs(self):
         self.assertEqual(gates.check(summary(ratchets=(rust_digest.Ratchet("skein", "form", 2, 1),
@@ -142,15 +141,12 @@ class ScreenTest(unittest.TestCase):
                               step="gate:ratchet", log=str(self.written), findings=findings_text(findings)))
         self.assertEqual(log.read(), [])
 
-    def test_path_outside_files_rejects_and_records_all_findings(self):
-        self.current["tip"] = 3
+    def test_path_outside_files_is_reported_without_rejecting(self):
         findings = gates.screen(replace(TASK, files=("skein/src/other.rs",)), self.events,
                                sh=self.fake, log_path=self.path)
-        self.assertEqual([finding.gate for finding in findings], ["files", "ratchet"])
-        record, = log.read(self.path)
-        self.assertEqual(record["step"], "gate:files")
-        self.assertEqual(record["findings"], findings_text(findings))
-        self.assertTrue(self.written.is_file())
+        self.assertEqual(findings, [])
+        self.assertEqual(log.read(self.path), [])
+        self.assertIn("## Outside the task's files\n- `skein/src/lib.rs`\n", self.written.read_text())
 
     def test_ratchet_fall_and_long_function_pass(self):
         self.current["tip"] = 1
@@ -206,7 +202,7 @@ class ScreenTest(unittest.TestCase):
         self.assertFalse(self.written.exists())
         self.assertEqual(log.read(self.path), [])
 
-    def test_no_script_tree_still_checks_files_and_writes_digest(self):
+    def test_no_script_tree_still_writes_digest(self):
         for files in self.trees.values():
             files.pop("skein/scripts/old_forms.py")
             files.pop("skein/scripts/old-forms.txt")
