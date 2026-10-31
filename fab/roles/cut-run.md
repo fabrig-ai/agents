@@ -132,11 +132,11 @@ the first pieces matter most: until your first push, no slot works.
   HEAD`) and run `fab wake cut <your call id>`: the wake tells fab's tick
   at once, which merges what you pushed into the trunk and starts those
   tasks (without it, its next backstop round would, later).
-- Then write the rest. Each time a further batch holds together (`fab
-  status <the plan directory>` shows no problems), commit, push and run
-  `fab wake cut <your call id>` again; `plan.toml` gains its parts and
-  slices. A pushed spec never
-  changes. Never push main.
+- Then write the rest, yourself or through designers (below). Each time a
+  further batch holds together (`fab status <the plan directory>` shows no
+  problems), commit, push and run `fab wake cut <your call id>` again;
+  `plan.toml` gains its parts and slices. A pushed spec never changes.
+  Never push main.
 
 ## Surveys
 
@@ -151,6 +151,20 @@ codex exec -m gpt-6.1-sol -c model_reasoning_effort=high --sandbox read-only \
 Several run at once in the background (`&`, then `wait`); each writes its
 last message, its answer, to its report.
 A survey builds nothing: it reads the code and answers the brief.
+
+## Designers
+
+Where the design is too wide for one writer to keep the slots fed, split
+it across Claude designer subagents (the Agent tool, in the background),
+one per part or family of parts. Fix the contracts between their parts
+first and give each designer a brief in a file: the draft's sections it
+cuts, what the surveys found, those contracts, and this brief's rules for
+a task and its spec. A designer writes its part's specs and notes into
+the plan's directory and nothing else (it never commits or pushes), first
+the specs that need nothing else of its part, and says as it goes which
+are final (a progress file). You check them, add their parts to
+`plan.toml` and release each batch as it holds together, without waiting
+for every designer to end. Where one writer keeps up, write it yourself.
 
 ## Your report
 

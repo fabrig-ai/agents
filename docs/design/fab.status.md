@@ -198,6 +198,9 @@
   without gates and the `files` gate removed (`light-merges`), the cut's
   early release of specs (`cut-early`) and the run's own texts
   (`run-texts`);
+  `cut-run.md` allows designer subagents where the design is too wide for
+  one writer (the user, 10-31: the playground replay's cut started four,
+  then hit the call's 40-minute limit before they ended);
   what is left to match the run is in section 14. The replay ticked from
   its own install on hel8 (`FAB_HOME/replay-install`, a local hosts.toml),
   as a background command of a session, not a unit.

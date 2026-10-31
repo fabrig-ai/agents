@@ -1011,7 +1011,13 @@ only as tweaks once a replay matches its run.
     for no survey: the lead was not told to make one, and made it as it
     saw fit; when it surveys, the survey is a read-only Codex run at high it starts
     with `codex exec --sandbox read-only` on hel8 (the user, 10-31; `lead.md`
-    said so too). It is one call throughout: it never waits for, watches or
+    said so too). Where the design is too wide for one writer, it may
+    split it across Claude designer subagents, one per part or family, from
+    contracts it fixes first, as playground-kit's lead did with two
+    designers from shared binding calls; they write specs and notes only,
+    and the cut checks and releases them batch by batch (the user, 10-31,
+    after the playground replay's cut ran out of time with its four
+    designers in flight). It is one call throughout: it never waits for, watches or
     reacts to a run, and hands its output over in pieces (the early release)
     only so fab can start them. It carries the plan and spec formats, and the brief leaves out
     the Designs, Plans and Inventory sections.
