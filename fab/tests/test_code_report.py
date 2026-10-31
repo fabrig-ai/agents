@@ -1,9 +1,10 @@
 import unittest
 from dataclasses import replace
+from pathlib import Path
 from unittest.mock import patch
 
 from fab import code_report as code
-from fab import hosts, report
+from fab import atomic, hosts, report
 from fab.heavy import EX_TEMPFAIL
 from fab.plan import Part, Plan, Task
 from fab.sh import Result
@@ -341,6 +342,39 @@ class CodeReportTest(unittest.TestCase):
         self.assertIn("| Call | Role | Subject | Minutes | Turns | Peak context | Weight (M) | Over target |", rendered)
         self.assertIn("| root | decision | demo/core/decision | 1.2 | 2 | 600001 | 2.0 | yes |", rendered)
         self.assertIn("| old | answer | demo | 0.0 | - | - | - | - |", rendered)
+
+    def test_code_render_hand_totals_and_both_weight_ratios(self):
+        home = Path.home()
+        atomic.write(home / "fab/hand-sessions", "session demo\n")
+        transcript = home / ".claude/projects/project/session.jsonl"
+        atomic.write(transcript, '\n'.join([
+            '{"type":"assistant","requestId":"one","message":{"usage":{"input_tokens":1000000,"cache_creation_input_tokens":800000}}}',
+            '{"type":"assistant","requestId":"one","message":{"usage":{"input_tokens":1000000,"cache_creation_input_tokens":800000}}}',
+            '{"type":"assistant","requestId":"two","message":{"usage":{"input_tokens":1000000}}}']))
+        atomic.write(transcript.parent / "session/subagents/agent.jsonl",
+                     '{"type":"assistant","requestId":"three","message":{"usage":{"input_tokens":1000000}}}\n')
+        records = [event("00:01", "call.ended", None, subject="demo", tokens="2000000/0/0"),
+                   event("00:02", "run.ended", run="run", tokens="1000000/0/0")]
+        window = report.Window(ts("00:00"), ts("01:00"))
+        rendered = code.render(self.plan, {}, report.Sources(records, [], {}), {}, window)
+        self.assertIn("| Hand input tokens | 3800000 |", rendered)
+        self.assertIn("| Hand output tokens | 0 |", rendered)
+        self.assertIn("| Hand weight, millions | 4.0 |", rendered)
+        self.assertIn("| Claude to Codex weight, without Hand | 2.0 (prev -) |", rendered)
+        self.assertIn("| Claude to Codex weight, with Hand | 6.0 |", rendered)
+        self.assertIn("Hand figures cover the listed sessions in full.", rendered)
+        rendered = code.render(self.plan, {}, report.Sources([], [], {}), {}, window)
+        self.assertIn("| Claude to Codex weight, with Hand | - |", rendered)
+
+    def test_code_render_hand_missing_manifest_has_no_line_and_unread_is_a_note(self):
+        window = report.Window(ts("00:00"), ts("01:00"))
+        sources = report.Sources([], [], {})
+        self.assertNotIn("Hand", code.render(self.plan, {}, sources, {}, window))
+        atomic.write(Path.home() / "fab/hand-sessions", "missing demo\n")
+        rendered = code.render(self.plan, {}, sources, {}, window)
+        self.assertIn("unread: hand session missing", rendered)
+        self.assertIn("| Hand weight, millions | 0.0 |", rendered)
+        self.assertEqual(sources.unread, [])
 
     def test_code_render_empty_and_no_landing(self):
         window = report.Window(ts("00:00"), ts("01:00"))

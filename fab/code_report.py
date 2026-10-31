@@ -508,6 +508,7 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     measured = part_rows(plan, tasks, events, _part_numstat(plan, tasks, events))
     current = figures(plan, tasks, events, sources.heavy, hosts, window)
     previous = figures(plan, tasks, events, sources.heavy, hosts, window.previous())
+    hand, unread = accounting.hand_usage(plan.draft)
     history = [event for event in events if _belongs(plan.draft, event)]
     first_run = next((event["ts"] for event in history if event["ev"] == "run.started"), None)
     first_landing = next((event["ts"] for event in history if event["ev"] == "branch.landed"), None)
@@ -521,8 +522,9 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     sections = [
         [f"# Code report: {plan.draft}, {window.start[:10]}",
          f"{window.start} to {window.end}; each figure beside the previous window's.", first],
-        ["## Figures", *report.figure_table(FIGURES, current, previous)],
-        ["## Signals", *report.signal_lines(signals(current, previous, sources.unread)
+        ["## Figures", *_figure_lines(current, previous, hand),
+         *(["Hand figures cover the listed sessions in full."] if hand else [])],
+        ["## Signals", *report.signal_lines(signals(current, previous, [*sources.unread, *unread])
                                            + _part_signals(measured))],
         ["## Hours", *report.table(("Hour", "In flight", "Started", "Ready", "Landed"),
             ((hour.start[11:13] + ":00", hour.peak, hour.started, hour.ready, hour.landed)
@@ -545,6 +547,24 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     sections.append(["## Rejections by step", *report.table(("Step", "Count"),
                      sorted(rejections.items(), key=lambda item: (-item[1], item[0])))])
     return "\n\n".join("\n".join(section) for section in sections) + "\n"
+
+
+def _figure_lines(current: Mapping[str, Figure], previous: Mapping[str, Figure],
+                  hand: Mapping[str, Figure]) -> list[str]:
+    """Show hand totals and the inclusive ratio beside the window's existing figures."""
+    lines = report.figure_table(FIGURES, current, previous)
+    if not hand:
+        return lines
+    weight = current["claude_weight"] + hand["hand_weight"]
+    codex = current["codex_weight"]
+    rows = [("Hand input tokens", report.show(hand["hand_input_tokens"])),
+            ("Hand output tokens", report.show(hand["hand_output_tokens"])),
+            ("Hand weight, millions", report.show(hand["hand_weight"])),
+            ("Claude to Codex weight, with Hand", report.show(weight / codex if codex else None))]
+    index = next(index for index, line in enumerate(lines) if line.startswith("| Claude to Codex weight |"))
+    lines[index] = lines[index].replace("Claude to Codex weight |", "Claude to Codex weight, without Hand |")
+    lines[index + 1:index + 1] = report.table(("Figure", "Value"), rows)[2:]
+    return lines
 
 
 def _belongs(draft: str, event: dict) -> bool:

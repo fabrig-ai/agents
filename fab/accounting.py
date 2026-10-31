@@ -9,8 +9,12 @@ nothing here ends a call, and TARGET only flags.
 
 from __future__ import annotations
 
+import json
 import re
 from collections.abc import Iterable
+from pathlib import Path
+
+from fab import log
 
 from fab.report import Figure, Window
 
@@ -163,6 +167,79 @@ def call_rows(draft: str, events: list[dict], window: Window) -> list[tuple]:
                      weight / MILLION if weight is not None else None,
                      "-" if peak is None else "yes" if peak > TARGET else "no"))
     return rows
+
+
+def hand_usage(draft: str, *, home: Path | None = None,
+               projects: Path | None = None) -> tuple[dict[str, Figure], list[str]]:
+    """Read the draft's whole hand sessions, apart from windowed calls (13.11).
+
+    home defaults to FAB_HOME, projects to ~/.claude/projects. No matching sessions
+    gives no figures. Return input (including both caches), output and Claude weight M,
+    with notes for unread transcripts. Each requestId counts once across all files.
+    """
+    manifest = (home if home is not None else log.home()) / "hand-sessions"
+    notes = []
+    try:
+        lines = manifest.read_text(encoding="utf-8").splitlines()
+    except FileNotFoundError:
+        return {}, notes
+    except (OSError, UnicodeError) as error:
+        return {}, [f"{manifest}: {error}"]
+    sessions = set()
+    for number, line in enumerate(lines, 1):
+        fields = line.split("#", 1)[0].split()
+        if not fields:
+            continue
+        if len(fields) != 2 or not re.fullmatch(r"[A-Za-z0-9_-]+", fields[0]):
+            notes.append(f"{manifest}:{number}: expected <session id> <draft>")
+        elif fields[1] == draft:
+            sessions.add(fields[0])
+    if not sessions:
+        return {}, notes
+    projects = projects if projects is not None else Path.home() / ".claude/projects"
+    totals = [0, 0, 0, 0]
+    seen = set()
+    for session in sorted(sessions):
+        try:
+            transcripts = sorted(projects.glob(f"*/{session}.jsonl"))
+            transcripts += sorted(projects.glob(f"*/{session}/subagents/*.jsonl"))
+        except OSError as error:
+            notes.append(f"{projects}/{session}: {error}")
+            continue
+        if not transcripts:
+            notes.append(f"hand session {session}: no transcripts under {projects}")
+        for path in transcripts:
+            _hand_transcript(path, seen, totals, notes)
+    incoming, written, cached, outgoing = totals
+    weight = call_weight({"tokens": f"{incoming}/{cached}/{outgoing}", "cache_write": written})
+    return {"hand_input_tokens": incoming + written + cached, "hand_output_tokens": outgoing,
+            "hand_weight": weight / MILLION}, notes
+
+
+def _hand_transcript(path: Path, seen: set[str], totals: list[int], notes: list[str]) -> None:
+    """Add valid assistant usage once per request; torn lines do not stop a transcript."""
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(record, dict) or record.get("type") != "assistant":
+                    continue
+                request = record.get("requestId")
+                message = record.get("message")
+                usage = message.get("usage") if isinstance(message, dict) else None
+                if not isinstance(request, str) or not request or request in seen or not isinstance(usage, dict):
+                    continue
+                seen.add(request)
+                for index, key in enumerate(("input_tokens", "cache_creation_input_tokens",
+                                             "cache_read_input_tokens", "output_tokens")):
+                    value = usage.get(key)
+                    if type(value) is int and value >= 0:
+                        totals[index] += value
+    except (OSError, UnicodeError) as error:
+        notes.append(f"{path}: {error}")
 
 
 def _cache_write(event: dict) -> int:

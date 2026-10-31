@@ -1,9 +1,12 @@
 """Usage accounting over plain log records (docs/design/fab.md, 13.5)."""
 
 import unittest
+from unittest.mock import patch
 
 from fab import accounting as counts
+from fab import atomic
 from fab.report import Window
+from fab.tests.support import tmp_home
 
 
 def event(ev="call.ended", minute="10", **fields):
@@ -96,3 +99,72 @@ class AccountingTest(unittest.TestCase):
             ("", "", "demo/review", 0.0, None, None, None, "-"),
             ("", "", "demo/core", 0.0, 1, counts.TARGET, None, "no"),
         ])
+
+
+class HandUsageTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.projects = self.home / "transcripts"
+        self.manifest = self.home / "fab/hand-sessions"
+        self.transcript = self.projects / "project/session.jsonl"
+
+    def test_accounting_hand_requests_and_subagents_count_once(self):
+        atomic.write(self.manifest, "# hand sessions\n\n session demo # a draft\nsession demo\nother demo2\n")
+        atomic.write(self.transcript, '\n'.join([
+            '{"type":"assistant","requestId":"one","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":8,"cache_read_input_tokens":3,"output_tokens":4}}}',
+            '{"type":"assistant","requestId":"one","message":{"usage":{"input_tokens":10,"cache_creation_input_tokens":8,"cache_read_input_tokens":3,"output_tokens":4}}}',
+            '{"type":"assistant","requestId":"two","message":{"usage":{"input_tokens":5,"cache_read_input_tokens":7,"output_tokens":9}}}',
+            '{"type":"user","requestId":"ignored","message":{"usage":{"input_tokens":999}}}',
+            '{torn', '[]']))
+        subagent = self.projects / "project/session/subagents/agent.jsonl"
+        atomic.write(subagent, '{"type":"assistant","requestId":"three","message":{"usage":{"input_tokens":2,"cache_creation_input_tokens":4,"cache_read_input_tokens":1,"output_tokens":3}}}\n')
+        # A duplicate request in another file is still the same request.
+        atomic.write(self.projects / "copy/session.jsonl", self.transcript.read_text())
+        result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(notes, [])
+        self.assertEqual(result["hand_input_tokens"], 40)
+        self.assertEqual(result["hand_output_tokens"], 16)
+        self.assertAlmostEqual(result["hand_weight"], 113.1 / counts.MILLION)
+        self.assertEqual(counts.hand_usage("unlisted", projects=self.projects), ({}, []))
+
+    def test_accounting_hand_missing_manifest_and_missing_transcript(self):
+        self.assertEqual(counts.hand_usage("demo", projects=self.projects), ({}, []))
+        atomic.write(self.manifest, "missing demo\n")
+        result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(result["hand_weight"], 0.0)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("missing", notes[0])
+
+    def test_accounting_hand_unreadable_transcript_is_a_note(self):
+        atomic.write(self.manifest, "session demo\n")
+        self.transcript.mkdir(parents=True)
+        result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(result["hand_input_tokens"], 0)
+        self.assertEqual(len(notes), 1)
+        self.assertIn(str(self.transcript), notes[0])
+
+    def test_accounting_hand_invalid_counts_and_usage_are_skipped(self):
+        atomic.write(self.manifest, "session demo\n../outside demo\nmalformed\n")
+        atomic.write(self.transcript, '\n'.join([
+            '{"type":"assistant","requestId":"one","message":null}',
+            '{"type":"assistant","requestId":"one","message":{"usage":{"input_tokens":5,"output_tokens":true,"cache_creation_input_tokens":-1,"cache_read_input_tokens":"8"}}}',
+            '{"type":"assistant","message":{"usage":{"input_tokens":999}}}',
+            '{"type":"assistant","requestId":[],"message":{"usage":{}}}']))
+        result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(result["hand_input_tokens"], 5)
+        self.assertEqual(result["hand_output_tokens"], 0)
+        self.assertEqual(len(notes), 2)
+
+    def test_accounting_hand_unreadable_manifest_is_a_note(self):
+        self.manifest.mkdir(parents=True)
+        result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(result, {})
+        self.assertEqual(len(notes), 1)
+        self.assertIn(str(self.manifest), notes[0])
+
+    def test_accounting_hand_unreadable_projects_is_a_note(self):
+        atomic.write(self.manifest, "session demo\n")
+        with patch.object(type(self.projects), "glob", side_effect=PermissionError("unreadable")):
+            result, notes = counts.hand_usage("demo", projects=self.projects)
+        self.assertEqual(result["hand_weight"], 0.0)
+        self.assertIn("unreadable", notes[0])
