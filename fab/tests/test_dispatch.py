@@ -311,15 +311,19 @@ class DecideTest(unittest.TestCase):
         self.assertEqual(dispatch.places(hosts, [], {"builder": True}), {"builder": 1})
 
     def test_flow_is_first_and_target_caps_starts_with_rejections_first(self):
-        hosts = {"builder": replace(self.hosts["builder"], places=10)}
-        tasks = {t.id: t for t in (task("a"), task("b"), task("c"))}
+        hosts = {"builder": replace(self.hosts["builder"], places=4),
+                 "second": Host("second", "fake@second", ("builder",), places=4),
+                 "gate": Host("gate", "fake@gate", ("gate",), places=9)}
+        tasks = {t.id: t for t in (task(name) for name in "abcdefghi")}
         actions = dispatch.decide(self.plan, tasks, [], hosts)
-        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
-        self.assertEqual([a.task for a in actions[1:]], ["draft/a", "draft/b"])
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 8, 0 in flight"))
+        self.assertEqual([a.task for a in actions[1:]], [f"draft/{name}" for name in "abcdefgh"])
         events = [event("branch.rejected", "c", step="test")]
         actions = dispatch.decide(self.plan, tasks, events, hosts)
-        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 1, 0 in flight"))
-        self.assertEqual([(a.task, a.run_kind) for a in actions[1:]], [("draft/c", "repair")])
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 4, 0 in flight"))
+        self.assertEqual([(a.task, a.run_kind) for a in actions[1:]],
+                         [("draft/c", "repair"), ("draft/a", "implement"),
+                          ("draft/b", "implement"), ("draft/d", "implement")])
 
     def test_decide_collects_only_owned_runs_including_call_reviews(self):
         events = [run_started("other/task"), call_started("own", "answer", "draft"),
@@ -329,10 +333,10 @@ class DecideTest(unittest.TestCase):
         self.assertEqual([a.run for a in actions if a.kind == "collect"], ["own-1", "draft/a/foreman-1"])
 
     def test_only_drafts_runs_count_toward_target_including_unspecified_tasks(self):
-        hosts = {"builder": replace(self.hosts["builder"], places=10)}
+        hosts = {"builder": replace(self.hosts["builder"], places=2)}
         tasks = {t.id: t for t in (task("a"), task("b"), task("c"))}
-        foreign = [dict(started("foreign"), task="other/foreign"),
-                   dict(started("outside"), task="drafted/outside")]
+        foreign = [dict(started("foreign", host="foreign"), task="other/foreign"),
+                   dict(started("outside", host="foreign"), task="drafted/outside")]
         events = foreign + [started("not-in-specs")]
         actions = dispatch.decide(self.plan, tasks, events, hosts)
         self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 1 in flight"))
@@ -376,8 +380,9 @@ class DecideTest(unittest.TestCase):
 
     def test_rejected_before_runnable_and_task_order_within_each(self):
         tasks = [task(name) for name in ("a", "b", "c", "d")]
-        events = growth() + [event("branch.rejected", name, step="test") for name in ("d", "b")]
-        actions = self.decide(tasks, events)
+        hosts = {"builder": replace(self.hosts["builder"], places=8)}
+        events = [event("branch.rejected", name, step="test") for name in ("d", "b")]
+        actions = self.decide(tasks, events, hosts=hosts)
         self.assertEqual([a.task for a in actions], ["draft/b", "draft/d"])
         self.assertEqual([a.run_kind for a in actions], ["repair", "repair"])
 
@@ -493,7 +498,7 @@ class DecideTest(unittest.TestCase):
                 spec.parts["core"] = replace(dependency, done=True)
                 self.assertEqual(self.decide([], spec=spec), [Action("design", detail="reader")])
 
-    def test_design_buffer_uses_starting_flow_target_regardless_of_places(self):
+    def test_design_buffer_uses_starting_flow_target_from_places(self):
         for places in (0, 1, 2, 20):
             for low in (0.5, 1, 1.5):
                 for count in range(4):
@@ -503,7 +508,7 @@ class DecideTest(unittest.TestCase):
                         tasks = [task(str(n)) for n in range(count)]
                         actions = self.decide(tasks, hosts=hosts, spec=spec)
                         expected = ([Action("design", detail="next" if count else "core, next")]
-                                    if count < 2 * low else [])
+                                    if count < max(1, places) * low else [])
                         self.assertEqual([a for a in actions if a.kind == "design"], expected)
         spec = make_plan(part("core"))
         self.assertEqual(self.decide([], hosts={}, spec=spec), [Action("design", detail="core")])
@@ -962,8 +967,8 @@ walk = false
             actions = dispatch.tick(self.directory, sh=self.fake, hosts=self.hosts)
         self.assertEqual(decide.call_args.args[-1], {"builder": True})
         self.assertEqual([a.kind for a in actions], ["flow", "start", "collect"])
-        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 2, 0 in flight"))
-        self.assertEqual(self.out.getvalue().splitlines()[0], "flow draft target 2, 0 in flight")
+        self.assertEqual(actions[0], Action("flow", task="draft", detail="target 1, 0 in flight"))
+        self.assertEqual(self.out.getvalue().splitlines()[0], "flow draft target 1, 0 in flight")
         self.assertEqual(self.fake.argvs().count(probe), 1)
         self.assertEqual([e["ev"] for e in log.read()], ["run.started"])
         self.start.assert_called_once()
@@ -1277,7 +1282,7 @@ parts = []
         fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
         fake.on(["git", "remote", "get-url", "origin"], Result(0, runs.REMOTES["agents"]))
         self.assertEqual(dispatch.tick(directory, sh=fake, hosts={}),
-                         [Action("flow", task="new", detail="target 2, 0 in flight")])
+                         [Action("flow", task="new", detail="target 1, 0 in flight")])
         with patch.object(dispatch, "run", fake), patch("fab.hosts.load", return_value={}):
             self.assertEqual(dispatch.main([str(directory), "--dry-run"]), 0)
         lookups = [call for call in fake.calls if call.argv == ["git", "rev-parse", "--show-toplevel"]]
@@ -1697,11 +1702,11 @@ parts = []
         self.assertEqual(self.tick(hosts={}), [])
         self.land.assert_called_once()
         self.assertEqual(self.out.getvalue().splitlines(),
-                         ["flow draft target 2, 0 in flight", "finish answer-1 ",
+                         ["flow draft target 1, 0 in flight", "finish answer-1 ",
                           f"page - {log.home() / channel.PAGE}",
                           "again - tick 1: question.answered, call.finished",
                           "wake - tick 1: question.answered, call.finished",
-                          "flow draft target 2, 0 in flight", f"page - {log.home() / channel.PAGE}"])
+                          "flow draft target 1, 0 in flight", f"page - {log.home() / channel.PAGE}"])
 
     def test_finish_skeleton_needs_no_report_and_respects_explicit_log(self):
         path = self.home / "custom.jsonl"
@@ -1921,7 +1926,7 @@ parts = []
     def test_explicit_empty_hosts_does_not_load_config_or_import_queue(self):
         with patch("fab.hosts.load", side_effect=AssertionError("unexpected load")):
             self.assertEqual(dispatch.tick(self.directory, sh=self.fake, hosts={}),
-                             [Action("flow", task="draft", detail="target 2, 0 in flight")])
+                             [Action("flow", task="draft", detail="target 1, 0 in flight")])
         self.assertEqual(len(self.fake.calls), 1)
 
     def test_explicit_log_path_used_for_import_run_calls_and_park(self):
@@ -2624,7 +2629,7 @@ class MultiPlanTickTest(unittest.TestCase):
             self.assertEqual(dispatch.main([str(one), str(two), "--dry-run"]), 1)
         lines = self.out.getvalue().splitlines()
         self.assertTrue(lines[0].startswith(f"load {one} failed: "))
-        self.assertEqual(lines[1:], ["flow two target 2, 0 in flight", "start two/a implement builder"])
+        self.assertEqual(lines[1:], ["flow two target 1, 0 in flight", "start two/a implement builder"])
         self.assertFalse(log.home().exists())
         self.starts.assert_not_called()
 
@@ -2639,8 +2644,8 @@ class MultiPlanTickTest(unittest.TestCase):
              patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
             self.assertEqual(dispatch.main([str(one), str(two), "--dry-run"]), 0)
         self.assertEqual(self.out.getvalue().splitlines(),
-                         ["flow one target 2, 0 in flight", "start one/a implement builder",
-                          "flow two target 2, 0 in flight", "start two/a implement builder"])
+                         ["flow one target 1, 0 in flight", "start one/a implement builder",
+                          "flow two target 1, 0 in flight", "start two/a implement builder"])
         self.assertEqual([call.args[2] for call in decide.call_args_list], [before, before])
         self.assertTrue(all(len(call.args) == 4 for call in decide.call_args_list))
         self.assertEqual(log.read(), before)
