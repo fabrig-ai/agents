@@ -16,6 +16,7 @@ across tasks. It is yours for this run; never touch another slot.
   --all-targets -- -D warnings` for every package you changed; their tests and
   their direct dependents' (`heavy cargo nextest run -p ...`). Never the whole
   workspace: precheck selects what the queue will run.
-- **Then precheck your pushed tip:** `fab precheck <your slot> <tip>`. It must
-  print outcome green. Put its receipt path in your report. A red is yours to
-  repair within the task; a conflict with main is a `Question:`.
+- **Then precheck your pushed tip:** `fab precheck <your slot> <tip> --onto <trunk>`. It must
+  print outcome green. Use the trunk your task's facts name (`origin/main`
+  when they name none). Put its receipt path in your report. A red is yours to
+  repair within the task; a conflict with the trunk is a `Question:`.

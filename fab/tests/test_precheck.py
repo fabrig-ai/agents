@@ -8,7 +8,7 @@ from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import precheck
+from fab import atomic, gate, precheck
 from fab.sh import Result, run
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
@@ -131,6 +131,22 @@ class PrecheckGitTest(unittest.TestCase):
         self.assertFalse((self.slot / "generated").exists())
         self.assert_restored(tip)
 
+    def test_onto_checks_fetched_trunk_sha_and_restores_branch(self):
+        tip = self.commit("docs/task.md", "task\n")
+        trunk = "component-kit/integration"
+        git(self.slot, "checkout", "-qb", trunk, "main")
+        onto = self.commit("docs/trunk.md", "trunk\n")
+        git(self.slot, "push", "-q", "origin", f"HEAD:{trunk}")
+        git(self.slot, "checkout", "-q", self.branch)
+        git(self.slot, "update-ref", f"refs/remotes/origin/{trunk}", self.base)
+        receipt = self.check(tip, onto=f"origin/{trunk}")
+        self.assert_receipt(receipt, tip, onto)
+        self.assertEqual(receipt["outcome"], "green")
+        self.assertIn(["git", "rev-parse", "--verify", f"origin/{trunk}^{{commit}}"], self.commands)
+        self.assertIn(["git", "checkout", "--detach", "--force", onto], self.commands)
+        self.assertIn(["git", "diff", "--name-only", "--no-renames", "-z", onto, "HEAD", "--"], self.commands)
+        self.assert_restored(tip)
+
     def test_full_selection_skips_metadata_and_uses_build_lane(self):
         tip = self.commit("Cargo.toml", "workspace input\n")
         receipt = self.check(tip, load=lambda _: self.fail("full loaded metadata"))
@@ -232,6 +248,45 @@ class PrecheckGitTest(unittest.TestCase):
         self.assert_restored(tip)
 
 
+class PrecheckFullTest(unittest.TestCase):
+    def test_full_checks_all_available_ratchets_regardless_of_paths(self):
+        for absent, paths in ((None, ""), (None, "docs/guide.md\0"),
+                              (None, "skein/core/src/lib.rs\0"), (gate.TREES[0], "")):
+            with self.subTest(absent=absent, paths=paths), tmp_home() as home:
+                slot = home / "slot"
+                for tree in gate.TREES:
+                    if tree != absent:
+                        atomic.write(slot / tree / "scripts/old_forms.py", "# fake service\n")
+                atomic.write(slot / "outside/scripts/old_forms.py", "# outside TREES\n")
+                fake = (FakeRunner().on(["git", "rev-parse", "HEAD"], Result(0, "original\n"))
+                        .on(["git", "rev-parse", "--verify", "origin/component-kit/integration^{commit}"],
+                            Result(0, "trunk-sha\n"))
+                        .on(["git", "rev-parse", "--verify", "--end-of-options"], Result(0, "tip-sha\n"))
+                        .on(["git", "diff"], Result(0, paths)))
+                receipt = precheck.precheck(slot, "tip", onto="origin/component-kit/integration",
+                                            full=True, sh=fake,
+                                            load=lambda _: self.fail("full loaded metadata"))
+                trees = sorted(tree for tree in gate.TREES if tree != absent)
+                self.assertEqual(receipt["main"], "trunk-sha")
+                self.assertEqual(receipt["selection"], "full")
+                self.assertEqual(receipt["outcome"], "green")
+                self.assertEqual([step.rsplit(":", 2)[0] for step in receipt["steps"]],
+                                 [*(f"ratchet:{tree}" for tree in trees),
+                                  "fmt", "clippy", "build", "default", "fuzzy"])
+                checks = [call for call in fake.calls if call.argv[0] != "git"]
+                for call, tree in zip(checks, trees):
+                    self.assertEqual(call.argv, ["python3", "-I", "-B",
+                                                  str(slot / tree / "scripts/old_forms.py")])
+                    self.assertEqual(call.cwd, str(slot / tree))
+                self.assertEqual(checks[len(trees)].argv, ["cargo", "fmt", "--all", "--check"])
+                for call in checks[len(trees) + 1:]:
+                    self.assertEqual(call.argv[:2], ["heavy", "cargo"])
+                    self.assertIn("--workspace", call.argv)
+                self.assertEqual(fake.argvs()[-3:], [["git", "reset", "--hard", "original"],
+                                 ["git", "checkout", "--detach", "--force", "original"],
+                                 ["git", "clean", "-fd"]])
+
+
 class PrecheckMainTest(unittest.TestCase):
     def test_main_prints_receipt_path_and_outcome_with_exit_codes(self):
         with tmp_home() as home:
@@ -242,5 +297,16 @@ class PrecheckMainTest(unittest.TestCase):
                     with patch.object(precheck, "precheck", return_value=receipt) as check:
                         with redirect_stdout(io.StringIO()) as output:
                             self.assertEqual(precheck.main([str(home / "slot"), "tip"]), code)
-                    check.assert_called_once_with(home / "slot", "tip")
+                    check.assert_called_once_with(home / "slot", "tip", onto="origin/main", full=False)
                     self.assertEqual(output.getvalue(), f"{log_path.with_suffix('.json')}: {outcome}\n")
+
+    def test_main_passes_onto_and_full(self):
+        with tmp_home() as home:
+            receipt = {"log": str(home / "precheck/tip.log"), "outcome": "green"}
+            with patch.object(precheck, "precheck", return_value=receipt) as check:
+                with redirect_stdout(io.StringIO()):
+                    code = precheck.main([str(home / "slot"), "tip",
+                                          "--onto", "origin/component-kit/integration", "--full"])
+            self.assertEqual(code, 0)
+            check.assert_called_once_with(home / "slot", "tip",
+                                          onto="origin/component-kit/integration", full=True)
