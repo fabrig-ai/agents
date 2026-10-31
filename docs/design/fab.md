@@ -1009,7 +1009,7 @@ only as tweaks once a replay matches its run.
     and spec formats, that implementers read nothing but their spec, the
     notes it cites and the repository, and the early release above. It asks
     for no survey: the lead was not told to make one, and made it as it
-    saw fit; when it surveys, the survey is a read-only Codex run it starts
+    saw fit; when it surveys, the survey is a read-only Codex run at high it starts
     with `codex exec --sandbox read-only` on hel8 (the user, 10-31; `lead.md`
     said so too). It is one call throughout: it never waits for, watches or
     reacts to a run, and hands its output over in pieces (the early release)

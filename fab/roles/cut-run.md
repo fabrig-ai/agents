@@ -129,21 +129,22 @@ the first pieces matter most: until your first push, no slot works.
   other task (an independent fix, the counts, a contract whose surface the
   draft already gives), with the notes they cite, in a `plan.toml` that
   holds only their parts. Commit, push your branch (`git push origin
-  HEAD`) and run `fab wake cut <your call id>`: fab merges it and starts
-  those tasks.
+  HEAD`) and run `fab wake cut <your call id>`: the wake tells fab's tick
+  at once, which merges what you pushed into the trunk and starts those
+  tasks (without it, its next backstop round would, later).
 - Then write the rest. Each time a further batch holds together (`fab
-  status <the plan directory>` shows no problems), commit, push and wake
-  again; `plan.toml` gains its parts and slices. A pushed spec never
+  status <the plan directory>` shows no problems), commit, push and run
+  `fab wake cut <your call id>` again; `plan.toml` gains its parts and
+  slices. A pushed spec never
   changes. Never push main.
 
 ## Surveys
 
-Surveys and investigations are read-only Codex runs, at medium, or high when
-the question is subtle (fabrig's `agents/lead.md`). Start one from your
-worktree with its brief in a file:
+Surveys and investigations are read-only Codex runs at high effort. Start
+one from your worktree with its brief in a file:
 
 ```
-codex exec -m gpt-6.1-sol -c model_reasoning_effort=medium --sandbox read-only \
+codex exec -m gpt-6.1-sol -c model_reasoning_effort=high --sandbox read-only \
   --skip-git-repo-check -o <its report> - < <its brief>
 ```
 
