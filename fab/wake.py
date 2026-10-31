@@ -14,11 +14,12 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
-from fab import hosts as machines, log
+from fab import atomic, hosts as machines, log
 from fab.hosts import Host
 from fab.sh import Failed, Runner, run, ssh
 
@@ -206,7 +207,32 @@ def units(plan_dirs: Sequence[Path], *, checkout: Path | None = None,
       WantedBy=timers.target.
     Each file is its sections in that order, one blank line between them, ending with a
     newline."""
-    raise NotImplementedError
+    home = (home if home is not None else log.home()).absolute()
+    checkout = (checkout if checkout is not None else home / "install").absolute()
+    directories = [directory.absolute() for directory in plan_dirs]
+    for path in (home, checkout, *directories):
+        if any(character in str(path) for character in '\n\r%$"\\'):
+            raise ValueError(f"invalid unit path {str(path)!r}")
+    q = shlex.quote
+    prefix = (f"{{ git -C {q(str(checkout))} fetch -q origin && "
+              f"git -C {q(str(checkout))} checkout -q --detach origin/main; }} || true; "
+              f"exec {q(str(checkout / 'bin/fab'))} tick --trigger ")
+    plans = "".join(" " + q(str(directory)) for directory in directories)
+    files = {EVENT_PATH: ("[Unit]\nDescription=fab: start the tick while an event wants one\n\n"
+                          f"[Path]\nPathExists={home / WANT}\nUnit={EVENT_SERVICE}\n\n"
+                          "[Install]\nWantedBy=default.target\n")}
+    for name, description, trigger in (
+            (EVENT_SERVICE, "fab: the tick, started by an event", "event"),
+            (BACKSTOP_SERVICE, "fab: the tick's backstop", "backstop")):
+        script = (prefix + trigger + plans).replace('"', '\\"')
+        files[name] = (f"[Unit]\nDescription={description}\n\n"
+                       f"[Service]\nType=oneshot\nTimeoutStartSec={TIMEOUT}\n"
+                       f'ExecStart=/usr/bin/bash -lc "{script}"\n')
+    files[BACKSTOP_TIMER] = ("[Unit]\nDescription=fab: the tick's backstop, every 10 minutes\n\n"
+                             f"[Timer]\nOnCalendar={BACKSTOP}\nUnit={BACKSTOP_SERVICE}\n\n"
+                             "[Install]\nWantedBy=timers.target\n")
+    return {name: files[name] for name in
+            (EVENT_PATH, EVENT_SERVICE, BACKSTOP_TIMER, BACKSTOP_SERVICE)}
 
 
 def install(plan_dirs: Sequence[Path], *, sh: Runner = run, directory: Path | None = None,
@@ -219,7 +245,19 @@ def install(plan_dirs: Sequence[Path], *, sh: Runner = run, directory: Path | No
     daemon-reload`; `systemctl --user enable --now EVENT_PATH BACKSTOP_TIMER` (both
     check=True); then `systemctl --user stop OLD_TIMER` (check=False: the transient tick may
     be gone; a tick it started finishes on its own and shares the tick's lock)."""
-    raise NotImplementedError
+    files = units(plan_dirs, checkout=checkout)
+    if directory is None:
+        config = os.environ.get("XDG_CONFIG_HOME")
+        directory = (Path(config) if config else Path.home() / ".config") / "systemd/user"
+    paths = []
+    for name, text in files.items():
+        path = directory / name
+        atomic.write(path, text)
+        paths.append(path)
+    sh(["systemctl", "--user", "daemon-reload"], check=True)
+    sh(["systemctl", "--user", "enable", "--now", EVENT_PATH, BACKSTOP_TIMER], check=True)
+    sh(["systemctl", "--user", "stop", OLD_TIMER], check=False)
+    return paths
 
 
 def main(argv: list[str]) -> int:

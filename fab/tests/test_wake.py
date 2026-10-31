@@ -1,5 +1,6 @@
 import io
 import os
+import shlex
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -239,6 +240,113 @@ class RoundTest(WakeTestCase):
             wake.settle("unknown", ["codex 1"], [ended("demo/a-1")])
         self.assertNoWant()
         self.assertEqual(self.notes(), [])
+
+
+class UnitsTest(WakeTestCase):
+    def test_units_have_paths_triggers_plans_and_service_limits(self):
+        home = self.home / "state"
+        checkout = self.home / "install with space"
+        plans = [Path("relative plan"), self.home / "plan's two"]
+        files = wake.units(plans, checkout=checkout, home=home)
+        self.assertEqual(list(files), [wake.EVENT_PATH, wake.EVENT_SERVICE,
+                                      wake.BACKSTOP_TIMER, wake.BACKSTOP_SERVICE])
+        path = self.unit(files, wake.EVENT_PATH)
+        self.assertEqual(path, {
+            "Unit": {"Description": "fab: start the tick while an event wants one"},
+            "Path": {"PathExists": str(home / wake.WANT), "Unit": wake.EVENT_SERVICE},
+            "Install": {"WantedBy": "default.target"}})
+        timer = self.unit(files, wake.BACKSTOP_TIMER)
+        self.assertEqual(timer, {
+            "Unit": {"Description": "fab: the tick's backstop, every 10 minutes"},
+            "Timer": {"OnCalendar": "*:0/10", "Unit": wake.BACKSTOP_SERVICE},
+            "Install": {"WantedBy": "timers.target"}})
+        for name, trigger, description in (
+                (wake.EVENT_SERVICE, "event", "fab: the tick, started by an event"),
+                (wake.BACKSTOP_SERVICE, "backstop", "fab: the tick's backstop")):
+            unit = self.unit(files, name)
+            self.assertEqual(unit["Unit"], {"Description": description})
+            service = unit["Service"]
+            self.assertEqual(service["Type"], "oneshot")
+            self.assertEqual(service["TimeoutStartSec"], "10min")
+            command = shlex.split(service["ExecStart"])
+            self.assertEqual(command[:2], ["/usr/bin/bash", "-lc"])
+            before, tick = command[2].split("; exec ")
+            self.assertEqual(before, "{ git -C " + shlex.quote(str(checkout)) +
+                             " fetch -q origin && git -C " + shlex.quote(str(checkout)) +
+                             " checkout -q --detach origin/main; } || true")
+            self.assertEqual(shlex.split(tick), [str(checkout / "bin/fab"), "tick",
+                             "--trigger", trigger, *[str(path.absolute()) for path in plans]])
+
+    def test_defaults_are_absolute_and_preserve_dot_segments(self):
+        home = Path("relative/../state")
+        files = wake.units([Path("plan/../draft")], home=home)
+        self.assertEqual(self.unit(files, wake.EVENT_PATH)["Path"]["PathExists"],
+                         str(home.absolute() / wake.WANT))
+        command = self.unit(files, wake.EVENT_SERVICE)["Service"]["ExecStart"]
+        self.assertIn(str(home.absolute() / "install/bin/fab"), command)
+        self.assertIn(str(Path("plan/../draft").absolute()), command)
+        defaults = wake.units([])
+        self.assertEqual(self.unit(defaults, wake.EVENT_PATH)["Path"]["PathExists"],
+                         str(self.want))
+
+    def test_unsafe_path_characters_are_refused_in_every_path(self):
+        for character in '\n\r%$"\\':
+            for field in ("home", "checkout", "plan"):
+                with self.subTest(character=character, field=field):
+                    path = self.home / ("bad" + character + "path")
+                    kwargs = {field: path} if field != "plan" else {}
+                    with self.assertRaises(ValueError):
+                        wake.units([path] if field == "plan" else [], **kwargs)
+
+
+class InstallTest(WakeTestCase):
+    def test_install_writes_units_before_reloading_enabling_and_stopping(self):
+        for xdg in (None, str(self.home / "xdg")):
+            with self.subTest(xdg=xdg), patch.dict(os.environ):
+                if xdg is None:
+                    os.environ.pop("XDG_CONFIG_HOME", None)
+                else:
+                    os.environ["XDG_CONFIG_HOME"] = xdg
+                directory = (Path(xdg) if xdg else self.home / ".config") / "systemd/user"
+                plans = [self.home / "one", self.home / "two"]
+                files = wake.units(plans)
+
+                def reload(call):
+                    self.assertEqual({path.name: path.read_text() for path in directory.iterdir()}, files)
+                    return Result(0)
+
+                fake = FakeRunner().on(["systemctl", "--user", "daemon-reload"], reload)
+                paths = wake.install(plans, sh=fake)
+                self.assertEqual(paths, [directory / name for name in files])
+                self.assertEqual(fake.argvs(), [
+                    ["systemctl", "--user", "daemon-reload"],
+                    ["systemctl", "--user", "enable", "--now", wake.EVENT_PATH, wake.BACKSTOP_TIMER],
+                    ["systemctl", "--user", "stop", wake.OLD_TIMER]])
+
+    def test_explicit_directory_and_checkout_and_failed_old_timer_stop(self):
+        directory = self.home / "units"
+        checkout = self.home / "code"
+        fake = FakeRunner().on(["systemctl", "--user", "stop"], Result(1))
+        files = wake.units([], checkout=checkout)
+        paths = wake.install([], sh=fake, directory=directory, checkout=checkout)
+        self.assertEqual(paths, [directory / name for name in files])
+        self.assertEqual({path.name: path.read_text() for path in paths}, files)
+
+    def test_reload_or_enable_failure_raises_and_skips_later_commands(self):
+        for command, count in (("daemon-reload", 1), ("enable", 2)):
+            with self.subTest(command=command):
+                fake = FakeRunner().on(["systemctl", "--user", command], Result(1))
+                with self.assertRaises(Failed):
+                    wake.install([], sh=fake, directory=self.home / "units")
+                self.assertEqual(len(fake.calls), count)
+
+    def test_invalid_path_has_no_writes_or_commands(self):
+        fake = FakeRunner()
+        directory = self.home / "units"
+        with self.assertRaises(ValueError):
+            wake.install([Path("bad%path")], sh=fake, directory=directory)
+        self.assertFalse(directory.exists())
+        self.assertEqual(fake.calls, [])
 
 
 class MainTest(WakeTestCase):
