@@ -15,7 +15,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
 
-from fab import report
+from fab import accounting, report
 from fab.calls import open_questions
 from fab.hosts import Host
 from fab.plan import Plan, Task
@@ -46,10 +46,7 @@ FIGURES = (  # (key, label), in the report's order
     ("open", "questions open at the end"),
     ("idle_minutes", "minutes in idle gaps"),
     ("infra_minutes", "Codex minutes of runs ended Infra"),
-    ("calls", "Claude calls ended"),
-    ("call_minutes", "Claude call minutes"),
-    ("input_tokens", "Claude input tokens"),
-    ("output_tokens", "Claude output tokens"),
+    *accounting.FIGURES,
     ("lane_wait", "heavy lane wait minutes, builders"),
     ("disk_wait", "heavy disk wait minutes, builders"),
     ("disk_refused", "builds refused for disk"),
@@ -253,17 +250,6 @@ def figures(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
         elif event["ev"] == "question.answered" and window.holds(event["ts"]):
             if event["task"] in latest:
                 answers.append(report.minutes(latest[event["task"]], event["ts"]))
-    subjects = {plan.draft, *(f"{plan.draft}/{part}" for part in plan.parts)}
-    calls = [event for event in report.within(events, window)
-             if event["ev"] == "call.ended" and event.get("subject") in subjects]
-    input_tokens = output_tokens = 0
-    for event in calls:
-        try:
-            incoming, cached, outgoing = map(int, str(event.get("tokens", "")).split("/"))
-        except ValueError:
-            continue
-        input_tokens += incoming + cached
-        output_tokens += outgoing
     builders = [name for name, host in hosts.items() if "builder" in host.roles]
     waits = report.heavy_waits(heavy, builders, window)
     return {
@@ -285,10 +271,7 @@ def figures(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
         "open": len(open_questions(event for event in history if event["ts"] < window.end)),
         "idle_minutes": sum((gap.minutes for gap in gaps(plan, tasks, events, window)), 0.0),
         "infra_minutes": _run_minutes(event for event in ended if event.get("outcome") == "infra"),
-        "calls": len(calls),
-        "call_minutes": sum((float(event.get("minutes", 0)) for event in calls), 0.0),
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
+        **accounting.figures(plan.draft, events, window),
         **{key: waits[key] for key in ("lane_wait", "disk_wait", "disk_refused")},
     }
 
@@ -397,6 +380,10 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
              for stop in stops(plan.draft, events, window)))],
         ["## Parts", *report.table(("Part", "Tasks", "Landed", "Runs", "Codex minutes", "Questions"),
             ((*row[:4], report.show(row[4]), row[5]) for row in parts(plan, tasks, events, window)))],
+        ["## Calls", *report.table(("Call", "Role", "Subject", "Minutes", "Turns", "Peak context",
+                                   "Weight (M)", "Over target"),
+            ((*row[:3], *(report.show(value) for value in row[3:7]), row[7])
+             for row in accounting.call_rows(plan.draft, events, window)))],
     ]
     rejections = Counter(event.get("step", "") for event in report.within(history, window)
                          if event["ev"] == "branch.rejected")

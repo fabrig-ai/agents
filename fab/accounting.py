@@ -39,7 +39,10 @@ def token_counts(value: object) -> tuple[int, int, int] | None:
     """The three counts of a call.ended or run.ended `tokens` field, a string matching
     COUNTS: (input, cached, output). None for anything else: a missing field (None), a
     number, two or four parts, a part that is not decimal digits, the empty string."""
-    raise NotImplementedError
+    if not isinstance(value, str):
+        return None
+    match = COUNTS.fullmatch(value)
+    return tuple(map(int, match.groups())) if match else None
 
 
 def call_weight(event: dict) -> float | None:
@@ -49,7 +52,12 @@ def call_weight(event: dict) -> float | None:
     and cache writes) and cache_write from the event's `cache_write` field, 0 when it is
     missing or not a non-negative int (records before accounting have none). None when
     token_counts is None."""
-    raise NotImplementedError
+    counts = token_counts(event.get("tokens"))
+    if counts is None:
+        return None
+    incoming, cached, outgoing = counts
+    return (incoming * CLAUDE["input"] + _cache_write(event) * CLAUDE["cache_write"]
+            + cached * CLAUDE["cache_read"] + outgoing * CLAUDE["output"])
 
 
 def run_weight(event: dict) -> float | None:
@@ -57,14 +65,20 @@ def run_weight(event: dict) -> float | None:
     Codex's input includes its cached tokens, so max(0, input - cached) x CODEX["input"] +
     cached x CODEX["cache_read"] + output x CODEX["output"]. None when token_counts is None
     (runs ended before accounting, or a launcher that wrote no result)."""
-    raise NotImplementedError
+    counts = token_counts(event.get("tokens"))
+    if counts is None:
+        return None
+    incoming, cached, outgoing = counts
+    return (max(0, incoming - cached) * CODEX["input"]
+            + cached * CODEX["cache_read"] + outgoing * CODEX["output"])
 
 
 def draft_calls(draft: str, events: Iterable[dict]) -> list[dict]:
     """The draft's call.ended records, in log order: those whose subject is the draft
     itself (its answer calls) or starts `<draft>/` (its parts', and its cut, review,
     retire and decision calls; an amend call carries its root's subject)."""
-    raise NotImplementedError
+    return [event for event in events
+            if event.get("ev") == "call.ended" and _subject(draft, event)]
 
 
 def draft_runs(draft: str, events: Iterable[dict]) -> list[dict]:
@@ -73,7 +87,12 @@ def draft_runs(draft: str, events: Iterable[dict]) -> list[dict]:
     call.started of the draft (subject as draft_calls takes it): the review runs of its
     calls' chains, whose task is the root call's id. One pass collects the call ids, so a
     review run's record may come before or after its call's."""
-    raise NotImplementedError
+    events = list(events)
+    calls = {event.get("call") for event in events
+             if event.get("ev") == "call.started" and _subject(draft, event)}
+    calls.discard(None)
+    return [event for event in events if event.get("ev") == "run.ended"
+            and (event.get("task", "").startswith(draft + "/") or event.get("task") in calls)]
 
 
 def figures(draft: str, events: list[dict], window: Window) -> dict[str, Figure]:
@@ -90,7 +109,39 @@ def figures(draft: str, events: list[dict], window: Window) -> dict[str, Figure]
     - peak_context: the largest `peak` of the calls holding one as a non-negative int; None
       when none does. over_target: how many of those are over TARGET.
     Counts are ints, minutes and weights floats. Pure."""
-    raise NotImplementedError
+    calls = [event for event in draft_calls(draft, events) if window.holds(event["ts"])]
+    runs = [event for event in draft_runs(draft, events) if window.holds(event["ts"])]
+    incoming = outgoing = codex_incoming = codex_outgoing = 0
+    claude_weight = codex_weight = 0.0
+    peaks = []
+    for event in calls:
+        counts = token_counts(event.get("tokens"))
+        if counts is not None:
+            incoming += counts[0] + counts[1] + _cache_write(event)
+            outgoing += counts[2]
+            claude_weight += call_weight(event)
+        peak = event.get("peak")
+        if type(peak) is int and peak >= 0:
+            peaks.append(peak)
+    for event in runs:
+        counts = token_counts(event.get("tokens"))
+        if counts is not None:
+            codex_incoming += counts[0]
+            codex_outgoing += counts[2]
+            codex_weight += run_weight(event)
+    return {
+        "calls": len(calls),
+        "call_minutes": sum((float(event.get("minutes", 0)) for event in calls), 0.0),
+        "input_tokens": incoming,
+        "output_tokens": outgoing,
+        "codex_input_tokens": codex_incoming,
+        "codex_output_tokens": codex_outgoing,
+        "claude_weight": claude_weight / MILLION,
+        "codex_weight": codex_weight / MILLION,
+        "weight_ratio": claude_weight / codex_weight if codex_weight else None,
+        "peak_context": max(peaks, default=None),
+        "over_target": sum(peak > TARGET for peak in peaks),
+    }
 
 
 def call_rows(draft: str, events: list[dict], window: Window) -> list[tuple]:
@@ -100,4 +151,25 @@ def call_rows(draft: str, events: list[dict], window: Window) -> list[tuple]:
     not ints; the weight is None when call_weight is; over is "yes" when peak is over
     TARGET, "no" when it is not, "-" when peak is None. A missing call, role or subject is
     "". Pure."""
-    raise NotImplementedError
+    rows = []
+    for event in draft_calls(draft, events):
+        if not window.holds(event["ts"]):
+            continue
+        turns, peak = (event.get(key) if type(event.get(key)) is int else None
+                       for key in ("turns", "peak"))
+        weight = call_weight(event)
+        rows.append((event.get("call", ""), event.get("role", ""), event.get("subject", ""),
+                     float(event.get("minutes", 0)), turns, peak,
+                     weight / MILLION if weight is not None else None,
+                     "-" if peak is None else "yes" if peak > TARGET else "no"))
+    return rows
+
+
+def _cache_write(event: dict) -> int:
+    value = event.get("cache_write")
+    return value if type(value) is int and value >= 0 else 0
+
+
+def _subject(draft: str, event: dict) -> bool:
+    subject = event.get("subject")
+    return isinstance(subject, str) and (subject == draft or subject.startswith(draft + "/"))

@@ -223,7 +223,10 @@ class CodeReportTest(unittest.TestCase):
             "codex_minutes": 80.0, "runs_per_task": 4.0, "minutes_per_task": 70.0,
             "questions": 3, "question_rate": 0.75, "answer_median": 10.0,
             "answer_max": 50.0, "open": 1, "idle_minutes": 70.0, "infra_minutes": 10.0,
-            "calls": 3, "call_minutes": 9.0, "input_tokens": 25, "output_tokens": 13,
+            "calls": 4, "call_minutes": 109.0, "input_tokens": 205, "output_tokens": 103,
+            "codex_input_tokens": 0, "codex_output_tokens": 0,
+            "claude_weight": 630 / 1_000_000, "codex_weight": 0.0, "weight_ratio": None,
+            "peak_context": None, "over_target": 0,
             "lane_wait": 2.0, "disk_wait": 3.0, "disk_refused": 1,
         }
         self.assertEqual(set(result), {key for key, label in code.FIGURES})
@@ -310,7 +313,7 @@ class CodeReportTest(unittest.TestCase):
         self.assertIn(f"First run {ts('00:00')}; first landing {ts('02:20')}, 140.0 minutes later.", rendered)
         self.assertEqual([line for line in rendered.splitlines() if line.startswith("## ")], [
             "## Figures", "## Signals", "## Hours", "## Idle gaps", "## Stops, longest first",
-            "## Parts", "## Rejections by step",
+            "## Parts", "## Calls", "## Rejections by step",
         ])
         self.assertIn("| Codex runs started | 4 (prev 2) |", rendered)
         self.assertIn("| 01:00 | 1 | 2 | 0 | 0 |", rendered)
@@ -319,6 +322,22 @@ class CodeReportTest(unittest.TestCase):
         self.assertIn("unread: heavy one: offline", rendered)
         self.assertTrue(rendered.endswith("\n"))
         self.assertNotIn("\n\n\n", rendered)
+
+    def test_code_render_measured_calls_and_historical_gaps(self):
+        records = [event("00:01", "call.started", None, subject="demo/core/decision", call="root"),
+                   event("00:02", "run.ended", "root", run="review-1", outcome="done", tokens="1000000/0/0"),
+                   event("00:03", "call.ended", None, call="root", role="decision",
+                         subject="demo/core/decision", minutes=1.25, turns=2, peak=600001,
+                         tokens="1000000/0/0", cache_write=800000),
+                   event("00:04", "call.ended", None, call="old", role="answer", subject="demo")]
+        window = report.Window(ts("00:00"), ts("01:00"))
+        result = code.figures(self.plan, self.tasks, records, {}, self.hosts, window)
+        self.assertEqual((result["claude_weight"], result["codex_weight"], result["weight_ratio"]),
+                         (2.0, 1.0, 2.0))
+        rendered = code.render(self.plan, self.tasks, report.Sources(records, [], {}), self.hosts, window)
+        self.assertIn("| Call | Role | Subject | Minutes | Turns | Peak context | Weight (M) | Over target |", rendered)
+        self.assertIn("| root | decision | demo/core/decision | 1.2 | 2 | 600001 | 2.0 | yes |", rendered)
+        self.assertIn("| old | answer | demo | 0.0 | - | - | - | - |", rendered)
 
     def test_code_render_empty_and_no_landing(self):
         window = report.Window(ts("00:00"), ts("01:00"))
