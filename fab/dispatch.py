@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
+from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gate, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -84,7 +84,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(question.since) for question in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
-        if len(questions) >= ANSWER_AT or old_enough or blocking(
+        if plan.landing == "integration" or len(questions) >= ANSWER_AT or old_enough or blocking(
                 tasks, events, [{"task": question.task} for question in questions],
                 calls_in_flight=bool(roles), design=design, draft=plan.draft):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
@@ -250,7 +250,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     limit = flow.target(plan.draft, events,
                         start=sum(host.places for host in hosts.values() if "builder" in host.roles))
     occupied = sum(event["task"].startswith(plan.draft + "/") for event in flight)
-    tasks = specs.checked_tasks(plan, tasks, events)
+    tasks = {**integration.repair_tasks(plan, events, {}), **specs.checked_tasks(plan, tasks, events)}
     views = state.fold(tasks, events)
     actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]
     actions.extend(Action("collect", task=event["task"], run=event["run"], host=event["host"],
@@ -265,7 +265,9 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     candidates = buffer.order(plan, tasks, rebases + candidates, refused | set(rebases))
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
                 if refusal.task not in rebases}
-    actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
+    step = integration.next_step(plan, tasks, events)
+    if step is None or step.kind != "stop":
+        actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
 
     if len(candidates) < plan.low * limit:
         design = _design_action(plan, tasks, views, hosts, len(candidates))
@@ -356,9 +358,10 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
     Each cursor is its newest imported queue_ts, or empty before its first record.
     Remote torn lines and other plans' records are skipped; imported keys deduplicate.
     """
-    owners = {event["branch"]: draft for event in events
+    owners = {f"{draft}/integration": draft for draft in plan_drafts}
+    owners.update({event["branch"]: draft for event in events
               if event.get("ev") == "call.started" and isinstance(event.get("branch"), str)
-              for draft in plan_drafts if drafts.under(draft, event.get("subject"))}
+              for draft in plan_drafts if drafts.under(draft, event.get("subject"))})
     for event in events:
         if (event.get("ev") == "run.started" and event.get("kind") == foreman.KIND
                 and isinstance(event.get("run"), str) and isinstance(event.get("task"), str)):
@@ -415,10 +418,35 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
     merged = sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
                  "merge", "--no-ff", "--no-edit", tip], cwd=str(checkout))
     if not merged.ok:
-        sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
-        log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
-                   tip=tip, step="merge", findings="\n".join((merged.out.splitlines() + merged.err.splitlines())[-40:]))
-        return False
+        paths = sh(["git", "diff", "--name-only", "--diff-filter=U"],
+                   cwd=str(checkout), check=True).out.splitlines()
+        trees = integration.baselines(paths)
+        findings = "\n".join((merged.out.splitlines() + merged.err.splitlines())[-40:])
+        try:
+            if trees:
+                integration.recount(checkout, trees, sh=sh)
+                sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
+                    "commit", "--no-edit"], cwd=str(checkout), check=True)
+        except Exception as error:
+            findings += f"\nRecount failed: {error}"
+            trees = []
+        if not trees:
+            sh(["git", "merge", "--abort"], cwd=str(checkout), check=True)
+            log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
+                       tip=tip, step="merge", findings=findings)
+            return False
+    paths = sh(["git", "diff", "--name-only", f"origin/{plan.trunk}", "HEAD"],
+               cwd=str(checkout), check=True).out.splitlines()
+    for tree in gate.TREES:
+        if (not any(path.startswith(tree + "/") for path in paths)
+                or not (checkout / tree / "scripts/old_forms.py").is_file()):
+            continue
+        checked = sh(["python3", "-I", "-B", "scripts/old_forms.py"], cwd=str(checkout / tree))
+        if not checked.ok:
+            sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
+            log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
+                       tip=tip, step="gate:ratchet", findings=checked.out + checked.err)
+            return False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
     log.append("branch.landed", path=log_path, task=task or branch, branch=branch,
@@ -734,7 +762,7 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
                log_path: Path | None) -> list[Action]:
     """Take decisions, then question and refusal actions from one fresh snapshot in that
     order, then calls decided from the resulting log."""
-    tasks = specs.checked_tasks(plan, tasks, log.read(log_path))
+    tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, log.read(log_path)), log.read(log_path))
     actions = decide(plan, tasks, log.read(log_path), hosts, calm)
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
@@ -749,6 +777,7 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
     for action in followups:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     _check_calls(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
+    _integration(plan, tasks, checkout, hosts, sh=sh, log_path=log_path)
     return actions
 
 
@@ -785,7 +814,7 @@ def _load_plan(plan_dir: Path, events: list[dict], *, checkout: Path | None = No
         issues = specs.problems(plan, tasks)
         if issues:
             raise specs.PlanError(f"{plan_dir}: " + "\n".join(issues))
-        return plan, tasks
+        return plan, _integration_tasks(plan, tasks, events)
     draft = plan_dir.name
     cut = next((event for event in reversed(events)
                 if event.get("ev") == "call.started" and event.get("role") == "cut"
@@ -1154,3 +1183,75 @@ def _screen_ready(action: Action, task: Task, hosts: Mapping[str, Host], *,
         return "rejected gate:" + ",".join(dict.fromkeys(finding.gate for finding in findings))
     _ready(action, task, hosts, sh=sh, log_path=log_path)
     return action.detail
+
+
+def _integration_tasks(plan: Plan, tasks: Mapping[str, Task], events: list[dict]) -> dict[str, Task]:
+    """Add log-derived repairs, reading collected check reports locally; unreadable is empty."""
+    reports = {}
+    for event in events:
+        if (event.get("ev") == "run.started" and event.get("kind") == "check"
+                and event.get("task") == f"{plan.draft}/integration"):
+            try:
+                reports[event["run"]] = (log.home() / "runs" / event["run"] / "report.md").read_text()
+            except (OSError, UnicodeError):
+                reports[event["run"]] = ""
+    return {**tasks, **integration.repair_tasks(plan, events, reports)}
+
+
+def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
+                 hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
+    """Take the trunk's next check, ready or stop after the plan's other actions."""
+    events = log.read(log_path)
+    tasks = _integration_tasks(plan, tasks, events)
+    step = integration.next_step(plan, tasks, events)
+    if step is None:
+        return
+    subject = f"{plan.draft}/integration"
+    detail = step.detail
+    try:
+        if step.kind == "check":
+            _integration_check(plan, step.tip, hosts, events, sh=sh, log_path=log_path)
+        elif step.kind == "ready":
+            sh(["git", "push", "origin", f"{step.tip}:refs/heads/ready/{plan.trunk}"],
+               cwd=str(checkout), check=True)
+            log.append("branch.ready", path=log_path, task=subject, branch=plan.trunk, tip=step.tip)
+        elif not any(event.get("ev") == "note" and event.get("task") == subject
+                     and event.get("tip") == step.tip and event.get("text") == detail for event in events):
+            log.append("note", path=log_path, task=subject, tip=step.tip, text=detail)
+    except (OSError, ValueError, Failed) as error:
+        detail = "failed: " + " ".join(str(error).splitlines())
+        log.append("note", path=log_path, task=subject, text=detail)
+    print(f"integration {plan.draft} {step.kind} {detail}")
+
+
+def _integration_check(plan: Plan, tip: str, hosts: Mapping[str, Host], events: list[dict], *,
+                       sh: Runner, log_path: Path | None) -> None:
+    """Claim an idle slot on the builder with most free places and launch the full check.
+    A failure after claiming releases the slot before propagating."""
+    host = _builder(hosts, events)
+    listed = sh(ssh(host.ssh, ["fab", "slot", "list"]), check=True)
+    idle = []
+    for line in listed.out.splitlines():
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if (isinstance(entry, dict) and entry.get("claim", True) is None
+                and type(entry.get("slot")) is int and isinstance(entry.get("idle"), (int, float))):
+            idle.append(entry)
+    if not idle:
+        raise ValueError(f"{host.name}: no idle slot")
+    slot = min(idle, key=lambda entry: entry["idle"])["slot"]
+    subject = f"{plan.draft}/integration"
+    run_id = runs.next_run(subject, events)
+    sh(ssh(host.ssh, ["fab", "slot", "claim", str(slot), run_id, subject]), check=True)
+    try:
+        worktree = Path(runs.remote_home(host)).parent / "slots" / str(slot)
+        sh(ssh(host.ssh, ["git", "-C", str(worktree), "fetch", "origin"]), check=True)
+        runs.launch(host, run_id, task=subject, kind="check", workdir=str(worktree),
+                    branch=plan.trunk, base=tip, brief=f"Full integration check of {tip}\n",
+                    effort="high", slot=slot, sh=sh, log_path=log_path,
+                    command=["fab", "check", "start", "--tip", tip, "--onto", f"origin/{plan.trunk}"])
+    except Exception:
+        sh(ssh(host.ssh, ["fab", "slot", "release", str(slot), run_id]), check=True)
+        raise

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, rust_gates, state, wake
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, wake
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, run, ssh
@@ -567,6 +567,11 @@ class CallActionsTest(unittest.TestCase):
         self.assertEqual(self.actions(questions[:-1] + [self.question("other")]), [])
         questions.append(event("question.answered", "0"))
         self.assertEqual(self.actions(questions), [])
+
+    def test_integration_answers_one_queued_question_at_once(self):
+        self.plan = replace(self.plan, landing="integration")
+        self.assertEqual(self.actions([self.question()]), [Action("call", task="draft", run_kind="answer")])
+        self.assertEqual(self.actions([self.question(), self.call()]), [])
 
     def test_answer_age_threshold_uses_oldest_timestamp(self):
         for ts, expected in (("2026-10-30T12:00:00.001Z", False),
@@ -3426,6 +3431,80 @@ class IntegrationMergeTest(unittest.TestCase):
         self.assertFalse((self.checkout / ".git/MERGE_HEAD").exists())
         self.assertEqual(git(self.checkout, "status", "--porcelain"), "")
 
+    def baselines(self, *, fail=False):
+        """Two branches lower different counts on one baseline line; the script is a fake."""
+        write(self.checkout / "skein/scripts/old-forms.txt", "a=2 b=2\n")
+        write(self.checkout / "skein/a.txt", "2\n")
+        write(self.checkout / "skein/b.txt", "2\n")
+        write(self.checkout / "skein/scripts/old_forms.py", "# fake old-forms counter\n")
+        git(self.checkout, "add", "skein")
+        git(self.checkout, "commit", "-q", "-m", "Count old forms")
+        git(self.checkout, "push", "-q", "origin", self.plan.trunk)
+        base = git(self.checkout, "rev-parse", "HEAD")
+        for name, counts, filename in (("a", "a=1 b=2\n", "a.txt"), ("b", "a=2 b=1\n", "b.txt")):
+            git(self.checkout, "switch", "-q", "-c", f"draft/{name}", base)
+            write(self.checkout / "skein/scripts/old-forms.txt", counts)
+            write(self.checkout / "skein" / filename, "1\n")
+            git(self.checkout, "commit", "-q", "-a", "-m", f"Lower {name}")
+            git(self.checkout, "push", "-q", "origin", f"draft/{name}")
+        git(self.checkout, "switch", "-q", self.plan.trunk)
+        def count(call):
+            tree = Path(call.cwd)
+            baseline = tree / "scripts/old-forms.txt"
+            counts = f"a={int((tree / 'a.txt').read_text())} b={int((tree / 'b.txt').read_text())}\n"
+            if "--write" in call.argv:
+                if fail:
+                    return Result(1, "count increased\n")
+                write(baseline, counts)
+            return Result(0 if baseline.read_text() == counts else 1, "count checked\n")
+        self.runner.on(["python3"], count)
+
+    def test_baseline_only_conflict_recounts_combined_tree_then_pushes(self):
+        self.baselines()
+        for name in ("a", "b"):
+            self.assertTrue(dispatch._merge_branch(f"draft/{name}", self.plan, self.checkout,
+                                                   sh=self.runner, log_path=self.path))
+        self.assertEqual((self.checkout / "skein/scripts/old-forms.txt").read_text(), "a=1 b=1\n")
+        self.assertEqual([entry["ev"] for entry in log.read(self.path)], ["branch.landed", "branch.landed"])
+        recounts = [call for call in self.runner.calls if call.argv[:1] == ["python3"] and "--write" in call.argv]
+        self.assertEqual(len(recounts), 1)
+        self.assertEqual(recounts[0].cwd, str(self.checkout / "skein"))
+        self.assertIn(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "--no-edit"],
+                      self.runner.argvs())
+        self.assertEqual(git(self.origin, "show", f"{self.plan.trunk}:skein/scripts/old-forms.txt"), "a=1 b=1")
+
+    def test_failed_recount_aborts_without_moving_trunk(self):
+        self.baselines(fail=True)
+        self.assertTrue(dispatch._merge_branch("draft/a", self.plan, self.checkout,
+                                               sh=self.runner, log_path=self.path))
+        before = git(self.origin, "rev-parse", self.plan.trunk)
+        self.assertFalse(dispatch._merge_branch("draft/b", self.plan, self.checkout,
+                                                sh=self.runner, log_path=self.path))
+        rejection = log.read(self.path)[-1]
+        self.assertEqual(rejection["step"], "merge")
+        self.assertIn("Recount failed", rejection["findings"])
+        self.assertIn("count increased", rejection["findings"])
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), before)
+        self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), before)
+        self.assertEqual(git(self.checkout, "status", "--porcelain"), "")
+
+    def test_clean_merge_with_count_increase_is_refused_before_push(self):
+        write(self.checkout / "skein/scripts/old_forms.py", "# fake old-forms counter\n")
+        git(self.checkout, "add", "skein")
+        git(self.checkout, "commit", "-q", "-m", "Add ratchet")
+        git(self.checkout, "push", "-q", "origin", self.plan.trunk)
+        before = git(self.origin, "rev-parse", self.plan.trunk)
+        self.branch("draft/a", "skein/src/lib.rs", "more old forms\n")
+        self.runner.on(["python3"], Result(1, "old forms raised\n", "baseline exceeded\n"))
+        self.assertFalse(dispatch._merge_branch("draft/a", self.plan, self.checkout,
+                                                sh=self.runner, log_path=self.path))
+        rejection, = log.read(self.path)
+        self.assertEqual((rejection["step"], rejection["findings"]),
+                         ("gate:ratchet", "old forms raised\nbaseline exceeded\n"))
+        self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), before)
+        self.assertEqual(git(self.checkout, "rev-parse", "HEAD"), before)
+        self.assertFalse(any(call.argv[:3] == ["git", "push", "origin"] for call in self.runner.calls))
+
     def test_uncut_chain_without_reviews_merges_calls_branch_into_trunk(self):
         cut_plan = write_plan(self.home / "cut-plan", "draft")
         contents = 'landing = "integration"\nreviews = false\n' + (cut_plan / "plan.toml").read_text()
@@ -3539,3 +3618,160 @@ class IntegrationDeliveryTest(unittest.TestCase):
                     self.assertEqual(any(entry["ev"] == settled_ev for entry in log.read(self.path)), merged)
         self.land.assert_not_called()
         self.queue.assert_not_called()
+
+
+class IntegrationCheckTickTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.directory = write_plan(self.home / "plan", "draft", tasks=("a",), repo="fabrig")
+        path = self.directory / "plan.toml"
+        write(path, 'landing = "integration"\nreviews = false\n' + path.read_text())
+        self.plan, self.tasks = plan.load(self.directory)
+        self.path = self.home / "events.jsonl"
+        self.hosts = {name: Host(name, f"fake@{name}", ("builder",), places=places, slots=2)
+                      for name, places in (("builder", 2), ("other", 1))}
+        self.torn = False
+        self.fake = FakeRunner().on(["ssh"], self.remote)
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "repair-tip"))
+        self.fake.on(["git", "rev-parse", "HEAD"], Result(0, "fixed-tip"))
+        self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
+        self.enterContext(patch.object(dispatch, "_check_calls"))
+        self.output = io.StringIO()
+        self.enterContext(redirect_stdout(self.output))
+        self.append(event("branch.landed", into=self.plan.trunk, main="trunk-tip", tip="a-tip"))
+
+    def remote(self, call):
+        argv = shlex.split(shlex.split(call.argv[-1])[2])
+        if argv == ["fab", "slot", "list"]:
+            return Result(0, ('torn\n[]\n' if self.torn else "") + json.dumps(dict(slot=2, claim=None, idle=0)) + '\n')
+        if argv[:3] in (["fab", "check", "start"], ["fab", "codex", "start"]):
+            return Result(0, "unit-id /state/unit-id\n")
+        return Result(0)
+
+    def append(self, *events):
+        for entry in events:
+            log.append(path=self.path, **entry)
+
+    def tick(self):
+        return dispatch._tick_plan(self.plan, self.tasks, self.directory, self.home, self.hosts, {},
+                                   sh=self.fake, log_path=self.path)
+
+    def commands(self):
+        return [shlex.split(shlex.split(call.argv[-1])[2]) for call in self.fake.calls if call.argv[:1] == ["ssh"]]
+
+    def test_all_merged_starts_one_check_in_claimed_slot_on_freest_builder(self):
+        self.torn = True
+        self.tick()
+        record = log.read(self.path)[-1]
+        self.assertEqual((record["ev"], record["kind"], record["task"], record["run"], record["base"], record["slot"], record["host"]),
+                         ("run.started", "check", "draft/integration", "draft/integration-1", "trunk-tip", 2, "builder"))
+        self.assertEqual(record["branch"], self.plan.trunk)
+        commands = self.commands()
+        self.assertIn(["fab", "slot", "claim", "2", "draft/integration-1", "draft/integration"], commands)
+        self.assertTrue(any(argv[:3] == ["git", "-C", record["dir"]] and argv[-2:] == ["fetch", "origin"] for argv in commands))
+        launch = next(argv for argv in commands if argv[:3] == ["fab", "check", "start"])
+        self.assertEqual(launch[3:7], ["--tip", "trunk-tip", "--onto", "origin/draft/integration"])
+        self.assertIn("integration draft check trunk-tip\n", self.output.getvalue())
+        with patch.object(runs, "collect", return_value=None) as collect:
+            self.tick()
+        collect.assert_called_once()
+        self.assertEqual(sum(argv[:3] == ["fab", "check", "start"] for argv in self.commands()), 1)
+
+    def test_failed_check_generates_repair_starts_from_trunk_merges_and_rechecks(self):
+        self.tick()
+        self.append(run_ended("draft/integration", outcome="failed"))
+        write(log.home() / "runs/draft/integration-1/report.md", "Failed: fmt red\nfmt:1:0.1\n/check.log\n")
+        loaded, tasks = dispatch._load_plan(self.directory, log.read(self.path))
+        self.assertIn("Failed: fmt red", tasks["draft/repair-1"].body)
+        actions = self.tick()
+        start, = [action for action in actions if action.kind == "start"]
+        self.assertEqual((start.task, start.run_kind), ("draft/repair-1", "implement"))
+        record = log.read(self.path)[-1]
+        self.assertEqual((record["task"], record["base"], record["branch"]),
+                         ("draft/repair-1", "origin/draft/integration", "draft/repair-1"))
+        self.assertIn("Failed: fmt red", (log.home() / "runs/draft/repair-1-1/brief.md").read_text())
+        self.append(run_ended("draft/repair-1"))
+        actions = self.tick()
+        self.assertTrue(any(action.kind == "merge" and action.task == "draft/repair-1" for action in actions))
+        check = log.read(self.path)[-1]
+        self.assertEqual((check["kind"], check["run"], check["base"]), ("check", "draft/integration-2", "fixed-tip"))
+        self.assertTrue(any(entry["ev"] == "branch.landed" and entry["task"] == "draft/repair-1"
+                            and entry["into"] == self.plan.trunk for entry in log.read(self.path)))
+
+    def test_collect_failed_check_keeps_report_releases_slot_then_starts_repair(self):
+        self.tick()
+        report = "Failed: fmt red\nfmt:1:0.1\n/check.log\n"
+        current = dict(ended=True, report=report, outcome="failed", tokens=None)
+        original = self.fake.rules[0][1]
+        def remote(call):
+            argv = shlex.split(shlex.split(call.argv[-1])[2])
+            if argv[:3] == ["fab", "slot", "release"]:
+                return Result(0, "0\n")
+            return original(call)
+        self.fake.rules[0] = (["ssh"], remote)
+        with patch.object(runs, "status", return_value=current):
+            self.tick()
+        collected = [entry for entry in log.read(self.path) if entry["ev"] == "run.ended"]
+        self.assertEqual(len(collected), 1)
+        self.assertEqual((collected[0]["task"], collected[0]["outcome"], collected[0]["freed"]),
+                         ("draft/integration", "failed", 0))
+        self.assertEqual((log.home() / "runs/draft/integration-1/report.md").read_text(), report)
+        self.assertIn(["fab", "slot", "release", "2", "draft/integration-1"], self.commands())
+        self.tick()
+        self.assertEqual(log.read(self.path)[-1]["task"], "draft/repair-1")
+
+    def test_green_without_ready_starts_nothing_more(self):
+        self.plan = replace(self.plan, ready=False)
+        self.tick()
+        self.append(run_ended("draft/integration"))
+        before = log.read(self.path)
+        self.tick()
+        self.tick()
+        self.assertEqual(log.read(self.path), before)
+        self.assertFalse(any(argv[:3] == ["git", "push", "origin"] for argv in self.fake.argvs()))
+
+    def test_green_readies_trunk_once(self):
+        self.tick()
+        self.append(run_ended("draft/integration"))
+        self.tick()
+        self.tick()
+        readied = [entry for entry in log.read(self.path) if entry["ev"] == "branch.ready"]
+        self.assertEqual(len(readied), 1)
+        self.assertEqual((readied[0]["task"], readied[0]["branch"], readied[0]["tip"]),
+                         ("draft/integration", self.plan.trunk, "trunk-tip"))
+        self.assertEqual(self.fake.argvs().count(["git", "push", "origin", "trunk-tip:refs/heads/ready/draft/integration"]), 1)
+
+    def test_failed_launch_releases_claimed_slot(self):
+        with patch.object(runs, "launch", side_effect=ValueError("bad launch")):
+            self.tick()
+        self.assertIn(["fab", "slot", "release", "2", "draft/integration-1"], self.commands())
+        self.assertFalse(any(entry["ev"] == "run.started" for entry in log.read(self.path)))
+        self.assertIn("integration draft check failed: bad launch", self.output.getvalue())
+
+    def test_unreadable_report_still_generates_repair(self):
+        self.append(run_started("draft/integration", kind="check", base="trunk-tip"),
+                    run_ended("draft/integration", outcome="failed"))
+        tasks = dispatch._load_plan(self.directory, log.read(self.path))[1]
+        self.assertIn("draft/repair-1", tasks)
+        self.assertIn("`trunk-tip`", tasks["draft/repair-1"].body)
+
+    def test_third_red_parks_without_starting_repair_and_notes_once_per_tip(self):
+        for n in range(1, 4):
+            self.append(run_started("draft/integration", n, kind="check", base="trunk-tip"),
+                        run_ended("draft/integration", n, "failed"))
+        self.tick()
+        self.tick()
+        notes = [entry for entry in log.read(self.path) if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertEqual((notes[0]["text"], notes[0]["tip"]), ("red 3 times; needs judgement", "trunk-tip"))
+        self.assertEqual(self.fake.calls, [])
+
+    def test_import_queue_accepts_integration_landing_without_a_spec(self):
+        gate = Host("gate", "fake@gate", ("gate",))
+        fake = FakeRunner().on(["ssh"], Result(0, json.dumps(dict(ts="now", ev="landed",
+                    branch=self.plan.trunk, tip="trunk-tip", main="main-tip")) + "\n"))
+        dispatch._import_queue(self.tasks, [], {"gate": gate}, sh=fake, log_path=self.path, plan_drafts=["draft"])
+        landed = log.read(self.path)[-1]
+        self.assertEqual((landed["ev"], landed["task"], landed["main"]),
+                         ("branch.landed", "draft/integration", "main-tip"))
+        self.assertNotIn("into", landed)

@@ -142,8 +142,12 @@ def retire_due(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) ->
     (fab.state.part_statuses over fab.state.fold(tasks, events)), and no call.started with
     role retire and subject `<draft>/retire` has a call.ended with outcome done. A retire
     call in flight, a parked subject or an open chain is fab.dispatch.call_actions' to
-    check, as for every call. Pure."""
+    check, as for every call. Integration plans also wait for their trunk to land on main. Pure."""
     if plan.retired or not plan.parts:
+        return False
+    if plan.landing == "integration" and not any(
+            event.get("ev") == "branch.landed" and not event.get("into")
+            and event.get("task") == f"{plan.draft}/integration" for event in events):
         return False
     statuses = {key: view.status for key, view in state.fold(tasks, events).items()}
     if any(status != "done" for status in state.part_statuses(plan, tasks, statuses).values()):

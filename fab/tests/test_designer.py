@@ -251,6 +251,14 @@ class RetireDueTest(unittest.TestCase):
         self.assertFalse(designer.retire_due(self.plan, tasks, events[:1]))
         self.assertTrue(designer.retire_due(self.plan, tasks, events))
 
+    def test_integration_retire_waits_for_trunk_landing_on_main(self):
+        plan = replace(self.plan, landing="integration")
+        self.assertFalse(designer.retire_due(plan, {}, []))
+        event = dict(ev="branch.landed", task="demo/integration", tip="tip", main="main")
+        self.assertFalse(designer.retire_due(plan, {}, [{**event, "into": plan.trunk}]))
+        self.assertFalse(designer.retire_due(plan, {}, [{**event, "task": "foreign/integration"}]))
+        self.assertTrue(designer.retire_due(plan, {}, [event]))
+
     def test_matching_successful_retire_suppresses_another_call(self):
         start = dict(ev="call.started", call="retire-1", role="retire", subject="demo/retire")
         for outcome, expected in (("done", False), ("failed", True), ("question", True), ("infra", True)):
