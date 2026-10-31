@@ -20,6 +20,18 @@ kache_gb = 50
 headroom_gb = 10
 builds = 3
 
+[hetzner9]
+ssh = "free@2.29.101.185"
+hostname = "hetzner9"
+roles = ["builder"]
+disk_gb = 301
+places = 4
+slots = 6
+slot_bound_gb = 25
+kache_gb = 50
+headroom_gb = 10
+builds = 2
+
 [hetzner8]
 ssh = "free@2.29.110.236"
 hostname = "debian-16gb-hel1-8"
