@@ -29,11 +29,25 @@ def trunk_tip(plan: Plan, events: Sequence[dict]) -> str | None:
                  if event.get("ev") == "branch.landed" and event.get("into") == plan.trunk), None)
 
 
+def _first_merge(plan: Plan, events: Sequence[dict]) -> int | None:
+    """The position of the first merge of one of the plan's tasks into its trunk; the
+    cut's, answers' and repair sections' branches are not tasks."""
+    return next((position for position, event in enumerate(events)
+                 if event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
+                 and str(event.get("task", "")).startswith(f"{plan.draft}/")), None)
+
+
 def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
-    """This plan's check starts in log order, carrying their collected outcomes when ended."""
+    """This plan's check starts after its first task merge, in log order, carrying their
+    collected outcomes when ended. A check before any task merged checks no work of the
+    plan and is ignored."""
+    first = _first_merge(plan, events)
+    if first is None:
+        return []
     ended = {event["run"]: event for event in events if event.get("ev") == "run.ended"}
     return [{**event, "outcome": ended.get(event["run"], {}).get("outcome")}
-            for event in events if event.get("ev") == "run.started"
+            for position, event in enumerate(events) if position > first
+            and event.get("ev") == "run.started"
             and event.get("kind") == "check" and event.get("task") == f"{plan.draft}/integration"]
 
 
@@ -69,7 +83,8 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
         return None
     tip = trunk_tip(plan, events)
     checks = _checks(plan, events)
-    if tip is None or any(check["outcome"] is None for check in checks):
+    if tip is None or _first_merge(plan, events) is None or any(
+            check["outcome"] is None for check in checks):
         return None
     if sum(check["outcome"] == "failed" for check in checks) >= 3:
         return Step("stop", tip, "red 3 times; needs judgement")

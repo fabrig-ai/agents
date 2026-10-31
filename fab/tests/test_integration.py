@@ -35,7 +35,7 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(integration.trunk_tip(PLAN, events), "new")
 
     def test_repair_tasks_order_contract_and_report_limit(self):
-        events = checked(1, "failed") + checked(2, "done") + checked(3, "failed", "new")
+        events = [merged()] + checked(1, "failed") + checked(2, "done") + checked(3, "failed", "new")
         events += [run_started("foreign/integration", kind="check"), run_ended("foreign/integration", outcome="failed")]
         reports = {"demo/integration-1": "\n".join(f"line {n}" for n in range(130)),
                    "demo/integration-3": "Failed: fmt red\nfmt:1:0.1"}
@@ -54,6 +54,16 @@ class IntegrationTest(unittest.TestCase):
         self.assertIn(reports["demo/integration-3"], second.body)
         self.assertEqual(integration.repair_tasks(replace(PLAN, landing="queue"), events, reports), {})
         self.assertEqual(len(integration.repair_tasks(PLAN, events, {})), 2)
+
+    def test_a_check_before_any_task_merged_is_ignored(self):
+        cut = merged("cut-tip", task="calls/cut-1")
+        self.assertIsNone(integration.next_step(PLAN, {}, [cut]))
+        early = [cut, *checked(1, "failed", tip="cut-tip")]
+        self.assertEqual(integration.repair_tasks(PLAN, early, {}), {})
+        events = early + [merged()]
+        self.assertEqual(integration.repair_tasks(PLAN, events, {}), {})
+        self.assertEqual(integration.next_step(PLAN, {TASK.id: TASK}, events),
+                         integration.Step("check", "tip", "tip"))
 
     def test_next_step_waits_for_merge_and_tasks_and_check(self):
         tasks = {TASK.id: TASK}
