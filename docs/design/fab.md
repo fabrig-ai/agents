@@ -951,7 +951,10 @@ only as tweaks once a replay matches its run.
   grows), and wakes the tick each time (`fab wake cut <call>`). Replay 2
   (10-31) showed why first: its cut released at T+13.5 of a 21.5-minute
   call, after it had designed the whole plan; the lead's first task went
-  out at T+4.8. No prompt names a timing figure (the user, 10-31). The tick merges an
+  out at T+4.8. No prompt names a timing figure (the user, 10-31). Nor
+  does a family wait behind one story task (`cut-run.md`, the meeting
+  point): replay 2 held every stage task behind echo-stage, codex-kit ran
+  them beside it. The tick merges an
   in-flight cut's pushed branch into the trunk whenever its tip is not yet
   there, so those tasks start from the trunk as any; the cut's last push
   is merged when the call ends, as today. A spec the cut has released is

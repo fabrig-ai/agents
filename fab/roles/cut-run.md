@@ -32,7 +32,9 @@ messages), fab does it instead; everything else in the brief holds.
   another crate's interface needs is a question, whose answer makes it the
   next interface step.
 - **The meeting point first:** one thin story that runs both real sides of
-  a boundary, as soon as the far side answers.
+  a boundary, as soon as the far side answers. But don't hold a family of
+  tasks behind one task just to prove the story first: a task waits only
+  for the code it builds on.
 - A task is one file, read literally; its departures from the implementer's
   text are stated. It holds: the goal in 2-3 lines; the design sections to
   read, never a whole design; sketches of the outer layer (modules, names,
