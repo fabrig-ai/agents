@@ -9,15 +9,15 @@ subject parks for the user. The calls of one branch and their review runs are a 
 
 from __future__ import annotations
 
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import calls, log, run as runs
+from fab import calls, designer, log, run as runs
 from fab.hosts import Host
 from fab.sh import Runner, run
 
-REVIEWED = ("skeleton", "answer", "review")  # call roles whose branch is reviewed before it lands
+REVIEWED = ("skeleton", "answer", "review") + designer.ROLES  # call roles whose branch is reviewed before it lands
 AMEND = "amend"  # the role of the call that answers a refusal on the same branch
 KIND = "review"  # the review run's kind in run.started (fab.run.KINDS)
 EFFORT = "medium"  # the review run's Codex effort
@@ -98,16 +98,18 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
 
 
 def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: str,
-          report: str) -> str:
+          report: str, designs: Sequence[str] = ()) -> str:
     """The review run's brief, its sections in this order, joined by blank lines and ending
     with a newline:
 
-    1. The role text, ROLE's.
+    1. The role text, CONSISTENCY's for retire chains, ROLE's otherwise.
     2. `# Your review`: one line each, `- Run: <run_id>`, `- Call: <root> (<role>)`, and when
        latest is not the root `- Amended by: <latest>`, `- Subject: <subject>`,
        `- Branch: \\`<branch>\\``, `- Base: \\`<base>\\``, `- Tip: \\`<tip>\\``,
        `- Report: write it to \\`<report>\\``, then the line `Your checkout is the tip, read-only;
        \\`git diff <base> <tip>\\` is the change.`
+       For retire only, follow with `# Designs changed since the plan started`, one
+       `- \\`<path>\\`` line per designs entry, or `(none)`. Other roles ignore designs.
     3. `# Earlier findings`, only when the chain has refusals: per refusal in order,
        `## <run>` and the first FINDINGS_LINES lines of FAB_HOME/runs/<run>/report.md
        (`(report missing)` when it cannot be read).
@@ -125,7 +127,11 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
     facts.extend([f"- Subject: {chain.subject}", f"- Branch: `{chain.branch}`",
                   f"- Base: `{base}`", f"- Tip: `{tip}`", f"- Report: write it to `{report}`",
                   f"Your checkout is the tip, read-only; `git diff {base} {tip}` is the change."])
-    sections = [ROLE.read_text().rstrip("\n"), "# Your review\n\n" + "\n".join(facts)]
+    role = CONSISTENCY if chain.role == "retire" else ROLE
+    sections = [role.read_text().rstrip("\n"), "# Your review\n\n" + "\n".join(facts)]
+    if chain.role == "retire":
+        sections.append("# Designs changed since the plan started\n\n" +
+                        ("\n".join(f"- `{path}`" for path in designs) or "(none)"))
     if chain.refusals:
         sections.append("# Earlier findings\n\n" + _findings(chain.refusals))
     cut = len(diff) > DIFF_LIMIT
@@ -182,7 +188,10 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
        check=True: `git fetch origin`; the tip `git rev-parse --verify
        refs/remotes/origin/<branch>^{commit}`; the base `git merge-base
        refs/remotes/origin/main <tip>`; stat `git diff --stat <base> <tip>`; diff
-       `git diff <base> <tip>`. A failure raises fab.sh.Failed and starts nothing.
+       `git diff <base> <tip>`. For retire, get designer.changed_designs(checkout,
+       <subject before its last slash>, rev=tip, sh=sh) for the consistency brief.
+       A git failure raises fab.sh.Failed; a missing plan history raises ValueError.
+       Either starts nothing.
     2. The run id fab.run.next_run(chain.root, events): `<root>-<n>`.
     3. fab.run.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
        branch=chain.branch, base=<base>, brief=brief(...), effort=EFFORT,
@@ -200,10 +209,12 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     base = git("merge-base", "refs/remotes/origin/main", tip).strip()
     stat = git("diff", "--stat", base, tip)
     diff = git("diff", base, tip)
+    designs = (designer.changed_designs(checkout, chain.subject.rsplit("/", 1)[0], rev=tip, sh=sh)
+               if chain.role == "retire" else ())
     run_id = runs.next_run(chain.root, events)
     root = Path(runs.remote_home(host))
     text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
-                 report=str(root / "runs" / run_id / "report.md"))
+                 report=str(root / "runs" / run_id / "report.md"), designs=designs)
     return runs.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
                                 branch=chain.branch, base=base, brief=text, effort=EFFORT,
                                 call=chain.latest, tip=tip, sh=sh, log_path=log_path)

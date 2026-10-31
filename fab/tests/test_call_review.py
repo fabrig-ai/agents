@@ -3,7 +3,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import atomic, call_review as review, calls, log, run
+from fab import atomic, call_review as review, calls, designer, log, run
 from fab.hosts import Host
 from fab.sh import Failed, Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
@@ -73,6 +73,13 @@ class ChainsTest(unittest.TestCase):
 
     def test_done_root_needs_review(self):
         self.assertEqual(self.chain(), CHAIN)
+
+    def test_designer_roles_start_review_chains(self):
+        """Every designer call that ends done roots a chain for acceptance."""
+        for role in designer.ROLES:
+            with self.subTest(role=role):
+                self.assertEqual(review.chains(_root_events(role=role))[CHAIN.root],
+                                 replace(CHAIN, role=role))
 
     def test_started_review_is_reviewing(self):
         self.assertEqual(self.chain(*_review_events(outcome=None)).state, "reviewing")
@@ -225,10 +232,10 @@ class ChainsTest(unittest.TestCase):
 
 
 class BriefTest(unittest.TestCase):
-    def brief(self, chain=CHAIN, diff="+short\n"):
-        """Use distinctive review facts for exact assertions."""
+    def brief(self, chain=CHAIN, diff="+short\n", *, designs=()):
+        """Use distinctive facts and optional changed designs for exact assertions."""
         return review.brief(chain, run_id="run-1", base="base", tip="tip", stat="file | 1 +\n",
-                            diff=diff, report="/reports/run-1.md")
+                            diff=diff, report="/reports/run-1.md", designs=designs)
 
     def test_sections_facts_findings_and_original_brief_in_order(self):
         with tmp_home() as home:
@@ -251,6 +258,32 @@ class BriefTest(unittest.TestCase):
             self.assertIn("refusal-1 line 39", text)
             self.assertNotIn("refusal-1 line 40", text)
             self.assertTrue(text.endswith("What the call was asked, verbatim, to the end of this brief:\n\n" + original))
+
+    def test_retire_brief_uses_consistency_and_lists_designs_after_facts(self):
+        """Retirement replaces the reviewer role and inserts designs before findings."""
+        chain = replace(CHAIN, role="retire", subject="draft/retire", refusals=("refused",))
+        for designs in ((), ("docs/design/a.md", "docs/design/b.md")):
+            with self.subTest(designs=designs), tmp_home():
+                text = self.brief(chain, designs=designs)
+                role = review.CONSISTENCY.read_text().rstrip("\n")
+                self.assertTrue(text.startswith(role + "\n\n# Your review\n"))
+                expected = "\n".join(f"- `{path}`" for path in designs) or "(none)"
+                sections = ["# Your review", "# Designs changed since the plan started\n\n" + expected,
+                            "# Earlier findings", "# The diff", "# The call's brief"]
+                positions = [text.index(section) for section in sections]
+                self.assertEqual(positions, sorted(positions))
+                self.assertNotIn(review.ROLE.read_text().rstrip("\n"), text)
+
+    def test_other_roles_ignore_changed_designs(self):
+        """A designs argument leaves every non-retire review brief unchanged."""
+        with tmp_home():
+            for role in review.REVIEWED:
+                if role == "retire":
+                    continue
+                with self.subTest(role=role):
+                    chain = replace(CHAIN, role=role)
+                    self.assertEqual(self.brief(chain, designs=("docs/design/a.md",)), self.brief(chain))
+                    self.assertTrue(self.brief(chain).startswith(review.ROLE.read_text().rstrip("\n")))
 
     def test_missing_brief_and_report_have_markers(self):
         with tmp_home() as home:
@@ -363,6 +396,38 @@ class StartTest(unittest.TestCase):
             self.assertEqual(fake.calls[-2].input, text)
             self.assertIn("- Amended by: amend-1", text)
             self.assertIn("+change", text)
+
+    def test_retire_start_passes_changed_designs_at_the_reviewed_tip(self):
+        """Consistency reviews list designs from the plan history at this branch's tip."""
+        with tmp_home():
+            fake = _review_runner()
+            chain = replace(CHAIN, role="retire", subject="draft/nested/retire")
+            designs = ["docs/design/a.md", "docs/design/b.md"]
+            with patch.object(designer, "changed_designs", return_value=designs) as changed, \
+                 patch.object(review, "brief", wraps=review.brief) as brief, \
+                 patch.object(run, "launch_detached", return_value="review-id") as launch:
+                self.assertEqual(review.start(chain, "agents", Path("/checkout"), HOST, (), sh=fake),
+                                 "review-id")
+            changed.assert_called_once_with(Path("/checkout"), "draft/nested", rev="tip-sha", sh=fake)
+            self.assertEqual(brief.call_args.kwargs["designs"], designs)
+            text = launch.call_args.kwargs["brief"]
+            self.assertIn("# Designs changed since the plan started\n\n- `docs/design/a.md`\n"
+                          "- `docs/design/b.md`", text)
+            self.assertTrue(text.startswith(review.CONSISTENCY.read_text().rstrip("\n")))
+
+    def test_failed_changed_designs_starts_nothing(self):
+        """Missing history and git failures prevent any builder launch or run record."""
+        failures = (ValueError("no plan history"), Failed(["git", "log"], Result(1, err="git failed")))
+        for failure in failures:
+            with self.subTest(failure=failure), tmp_home():
+                fake = _review_runner()
+                chain = replace(CHAIN, role="retire", subject="draft/retire")
+                with patch.object(designer, "changed_designs", side_effect=failure), \
+                     patch.object(run, "launch_detached") as launch, self.assertRaises(type(failure)):
+                    review.start(chain, "agents", Path("/checkout"), HOST, (), sh=fake)
+                launch.assert_not_called()
+                self.assertTrue(all(argv[0] == "git" for argv in fake.argvs()))
+                self.assertEqual(log.read(), [])
 
     def test_failed_launch_removes_worktree_and_reraises(self):
         with tmp_home():
