@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
+from fab import call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -402,7 +402,10 @@ def _land(action: Action, tasks: Mapping[str, Task], *, sh: Runner,
 
 def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
            log_path: Path | None) -> None:
-    """Push a repository branch to ready, clearing a same-tip rejection on the gate first."""
+    """Clear a same-tip rejection, deliver the tip's receipt, then push the ready ref.
+
+    A tip without a receipt is readied all the same; the queue checks it in full.
+    """
     gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
     repo = log.home() / "repos" / task.repo
     if not (repo / ".git").exists():
@@ -425,6 +428,7 @@ def _ready(action: Action, task: Task, hosts: Mapping[str, Host], *, sh: Runner,
                ["fab", "queue", "untry", action.branch]), check=True)
         log.append("note", path=log_path,
                    text=f"retry {action.task}: same tip after repair")
+    receipts.deliver(action.task, tip, log.read(log_path), hosts, sh=sh, log_path=log_path)
     sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{action.branch}"],
        cwd=str(repo), check=True)
     log.append("branch.ready", path=log_path, task=action.task,

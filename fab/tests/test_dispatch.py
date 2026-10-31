@@ -1058,7 +1058,56 @@ parts = []
                     event("branch.rejected", branch=branch, tip=rejected_tip, step="default", log="red"),
                     dict(started(n=2, branch=branch), kind="repair"), ended(n=2))
         self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip\n"))
+        self.fake.on(ssh("fake@builder", ["cat", "/home/fake/src/fabrig/fab/precheck/tip.json"]),
+                     Result(1))
         return branch
+
+    def test_ready_delivers_builder_receipt_before_push_after_same_tip_untry(self):
+        tip = "a" * 40
+        branch = "draft/a-r1"
+        path = self.home / "custom/events.jsonl"
+        self.add_task("a", repo="fabrig")
+        self.append(dict(started(branch=branch), kind="implement"), ended(),
+                    event("branch.rejected", branch=branch, tip=tip, step="default", log="red"),
+                    dict(started(n=2, branch=branch), kind="repair"), ended(n=2), path=path)
+        receipt = json.dumps(dict(tip=tip, main="b" * 40, outcome="green",
+                                  selection="full", steps=["default:0:1"])) + "\n"
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, tip + "\n"))
+        read = ssh("fake@builder", ["cat", f"/home/fake/src/fabrig/fab/precheck/{tip}.json"])
+        self.fake.on(read, Result(0, receipt))
+        accept = ssh("fake@gate", ["fab", "queue", "receipt", tip])
+        self.fake.on(accept, Result(0))
+
+        self.assertEqual([action.kind for action in self.tick(log_path=path)], ["ready"])
+        commands = self.fake.argvs()
+        untry = ssh("fake@gate", ["fab", "queue", "untry", branch])
+        push = ["git", "push", "origin", f"{tip}:refs/heads/ready/{branch}"]
+        self.assertLess(commands.index(untry), commands.index(read))
+        self.assertLess(commands.index(read), commands.index(accept))
+        self.assertLess(commands.index(accept), commands.index(push))
+        self.assertEqual(next(call.input for call in self.fake.calls if call.argv == accept), receipt)
+        ready = log.read(path)[-1]
+        self.assertEqual((ready["ev"], ready["branch"], ready["tip"]),
+                         ("branch.ready", branch, tip))
+        self.assertEqual(log.read(), [])
+
+    def test_ready_with_missing_builder_receipt_still_pushes_and_logs_ready(self):
+        tip = "a" * 40
+        self.add_task("a", repo="fabrig")
+        self.append(dict(started(), kind="implement"), ended())
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, tip + "\n"))
+        read = ssh("fake@builder", ["cat", f"/home/fake/src/fabrig/fab/precheck/{tip}.json"])
+        self.fake.on(read, Result(1, err="no receipt"))
+
+        self.assertEqual([action.kind for action in self.tick()], ["ready"])
+        commands = self.fake.argvs()
+        push = ["git", "push", "origin", f"{tip}:refs/heads/ready/draft/a"]
+        self.assertLess(commands.index(read), commands.index(push))
+        self.assertNotIn(ssh("fake@gate", ["fab", "queue", "receipt", tip]), commands)
+        ready = log.read()[-1]
+        self.assertEqual((ready["ev"], ready["branch"], ready["tip"]),
+                         ("branch.ready", "draft/a", tip))
+        self.assertFalse(any(entry["ev"] == "note" for entry in log.read()))
 
     def test_same_tip_ready_untries_on_gate_before_push_and_notes_retry_once(self):
         branch = self.repaired_ready("tip")
