@@ -6,10 +6,9 @@ already on your branch at its base; never touch another slot. Your task is
 the spec below: read first what it tells you to read. Where your spec or
 its notes depart from this text, they say why, and they win.
 
-- Read fabrig's `AGENTS.md` and the tree's `AGENTS.md` for the code, but
-  not their pipeline lines, and none of `agents/`: they describe the
-  pipeline before fab. No precheck, ready-check, claim, `tools/slots/trim`
-  or `post`: those tools are gone. Your slot is claimed and set up for you.
+- Read fabrig's `AGENTS.md` and the tree's `AGENTS.md`; not `agents/`,
+  which describes the pipeline before fab. Your slot is claimed and set up
+  for you.
 - Commit on your branch and push it with `git push origin
   HEAD:refs/heads/<your branch>`. Never push the trunk, main or `ready/*`.
   fab merges your branch into the trunk when you are done.

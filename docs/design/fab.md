@@ -1015,11 +1015,13 @@ only as tweaks once a replay matches its run.
     tests, effort, skimming). `fabrig-run.md` does the same for
     `implementer.md`, and the cut's brief quotes it (`What each implementer
     is told`), as the run's lead read `implementer.md`; the brief names its
-    sources `Sources`. The run's lead was given nothing else: its prompt was
+    sources `Sources`. fab's texts assume a fabrig `AGENTS.md` written for
+    fab's pipeline (the user, 10-31): a replay's base is fabrig's commit
+    plus that `AGENTS.md` (the component kit's: `6de0cd271` +
+    `AGENTS.md for fab's pipeline`), until fabrig's main has it. The run's lead was given nothing else: its prompt was
     its brief, and it read these files itself.
-    fabrig's own files brought to fab's era are fabrig's change, through its
-    queue: until then fab's texts name the departures, as the manual run's
-    notes did.
+    fabrig's own `AGENTS.md` and `agents/` brought to fab's era are fabrig's
+    change, through its queue.
   - An implementer of an integration fabrig plan gets the spec and its
     facts, with `fab/roles/fabrig-run.md` in place of `implementer.md`,
     the taste file and `fabrig.md`: its slot is claimed and set up, it

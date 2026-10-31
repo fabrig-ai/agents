@@ -15,13 +15,7 @@ messages), fab does it instead; everything else in the brief holds.
 - fabrig's `agents/` files describe the pipeline before fab: do not read
   them, even where a source says to. What `agents/lead.md` says that still
   holds is the next section, in its words.
-- fabrig's `AGENTS.md` holds for the code, security, git hygiene and tests
-  (its sections 2, 3, 4 and 6), and so does each tree's `AGENTS.md`. Its
-  pipeline lines do not: the merge queue and ready refs (sections 1 and
-  4), the machines (section 5), `fab precheck` (section 6), and the roles
-  and `post` (section 8). Old-form baselines: each task lowers
-  `scripts/old-forms.txt` with `--write` for what it removes, and fab
-  recounts the file where merges meet.
+- fabrig's `AGENTS.md` and each tree's `AGENTS.md` hold.
 - Each implementer gets fab's implementer text, which this brief quotes
   (`What each implementer is told`), then its spec; it reads `AGENTS.md`
   and its tree's `AGENTS.md`, never `agents/`.
