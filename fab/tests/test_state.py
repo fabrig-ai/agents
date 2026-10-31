@@ -71,6 +71,18 @@ class FoldTest(unittest.TestCase):
                          ("landed", "tip2", "main2"))
         self.assertEqual(landed["draft/b"].status, "runnable")
 
+    def test_retry_settlement_restores_done_and_preserves_branch_and_tip(self):
+        events = [self.start, event("run.ended", outcome="done"),
+                  event("branch.ready", tip="tip1"), event("branch.rejected", step="test")]
+        before = state.fold(self.tasks, events)["draft/a"]
+        for verdict, status in (("retry", "done"), ("fix", "rejected"), ("none", "rejected")):
+            with self.subTest(verdict=verdict):
+                view = state.fold(self.tasks, events + [event("refusal.settled", verdict=verdict,
+                                                             branch="repairs/foreman")])["draft/a"]
+                self.assertEqual(view.status, status)
+                self.assertEqual((view.branch, view.tip, view.runs),
+                                 (before.branch, before.tip, before.runs))
+
     def test_every_need_must_land(self):
         tasks = {**self.tasks, "draft/c": task("draft/c", ("draft/a", "draft/b"))}
         first = [event("branch.landed", tip="a", main="a")]

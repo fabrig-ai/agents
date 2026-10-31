@@ -80,10 +80,15 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
     """The brief Codex gets: the role text, then a `# Your task` section listing run, branch,
     base, report path, the files it may change and the expected minutes, then the spec's body.
     A rejection adds the failed step and queue log between the facts and body; start supplies
-    its log text in `text`. Only the last matching step, at most 120 lines, is included."""
+    its log text in `text`. A non-empty rejection section is quoted verbatim after the
+    facts, followed by a blank line before the refusal. Only the last matching step, at
+    most 120 lines, is included."""
     files = ", ".join(task.files) or "(none)"
-    refusal = ""
+    refusal, section = "", ""
     if rejection is not None:
+        section = rejection.get("section", "")
+        if section:
+            section += "\n" if section.endswith("\n") else "\n\n"
         step = rejection.get("step", "unknown")
         text = rejection.get("text", "(log unreadable: no log text)")
         quoted = ("\n".join(text.splitlines()[:120]) if "findings" in rejection
@@ -103,7 +108,7 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
             f"- Report: write it to `{report}`\n"
             f"- Files you may change: {files}\n"
             f"- Expected: about {task.minutes} implementer-minutes\n\n"
-            f"{refusal}{task.body}")
+            f"{section}{refusal}{task.body}")
 
 
 def rejection_text(record: dict, gate_host: Host, *, sh: Runner = run) -> str:

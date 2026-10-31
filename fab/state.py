@@ -36,6 +36,7 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     - question.asked: parked, question = text. question.answered: a parked task becomes
       runnable; every task's question = None.
     - branch.ready: ready, tip. branch.landed: landed, tip, main. branch.rejected: rejected.
+    - refusal.settled: retry -> done, keeping branch and tip; fix and none change no status.
     A task never started is waiting while any need is not landed, otherwise runnable.
     """
     views = {identifier: TaskView(identifier) for identifier in tasks}
@@ -75,6 +76,9 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                 view.main = event["main"]
             case "branch.rejected":
                 view.status = "rejected"
+            case "refusal.settled":
+                if event.get("verdict") == "retry":
+                    view.status = "done"
     for identifier, view in views.items():
         if view.status == "waiting" and all(
             need in views and views[need].status == "landed" for need in tasks[identifier].needs

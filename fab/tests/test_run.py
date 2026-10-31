@@ -94,6 +94,20 @@ class RunPureTest(unittest.TestCase):
         self.assertTrue(text.endswith(TASK.body))
         self.assertNotIn("## The landing refused this branch", text)
 
+    def test_brief_quotes_section_verbatim_between_facts_and_refusal(self):
+        rejection = {"step": "test", "log": "red", "text": "failure"}
+        facts = dict(run_id="draft/task-2", branch=TASK.id, base="origin/main", report="/report.md")
+        plain = run.brief(TASK, "# Role", **facts, rejection=rejection)
+        for section in ("## Repair\n\n  Keep trailing spaces.  \n\nLast line.\n",
+                        "## Rebase\n\nNo final newline."):
+            with self.subTest(section=section):
+                text = run.brief(TASK, "# Role", **facts, rejection={**rejection, "section": section})
+                suffix = "\n" if section.endswith("\n") else "\n\n"
+                heading = "## The landing refused this branch"
+                self.assertEqual(text, plain.replace(heading, section + suffix + heading))
+                self.assertLess(text.index("- Expected:"), text.index(section))
+        self.assertEqual(run.brief(TASK, "# Role", **facts, rejection={**rejection, "section": ""}), plain)
+
     def refusal(self, text):
         return run.brief(TASK, "# Role", run_id="draft/task-2", branch=TASK.id,
                          base="origin/main", report="/report.md",
