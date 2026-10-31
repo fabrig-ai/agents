@@ -25,6 +25,7 @@ MODEL = "gpt-6.1-sol"  # every Codex run's model, explicit (the user, 10-30): So
 # reviewers medium; a task spec's effort applies only to kinds not named here.
 EFFORTS = {"implement": "high", "repair": "high", "rebase": "high", "review": "medium"}
 SLOTTED = ("fabrig",)  # repositories whose runs build in a builder's warm slot
+LANDED = ("agents",)  # repositories fab land lands: a refusal's log is its detail, not a path
 LAUNCHER = "fab"  # "fab" (fab codex start) or "codex-run" (fabrig's, retired); see fab/codex.py
 
 
@@ -126,6 +127,29 @@ def rejection_text(record: dict, gate_host: Host, *, sh: Runner = run) -> str:
     except (OSError, Failed) as error:
         return "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
     return result.out
+
+
+def excerpt(step: str, text: str) -> str:
+    """The lines of a queue log that a brief quotes for a refusal at step, joined by newlines:
+    from the last line starting `[<step>]` up to the next line starting `[` that holds
+    ` (cwd ` (not included), at most 120 lines. A text starting `(log unreadable:` is kept
+    as it is (cut at 120 lines); a text without the step's line gives the one line
+    `(log unreadable: step [<step>] not found)`. brief's cut, moved here unchanged: brief
+    calls it for a rejection without findings. Pure."""
+    raise NotImplementedError
+
+
+def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
+    """The lines a foreman's brief quotes for a refusal (a branch.rejected record) of a
+    branch of repo, at most 120 of them:
+    - its `findings` when it has them (the gates', fab.gates.screen), read from no machine;
+    - for repo in LANDED, its `log`, which is fab land's detail text, not a path ("(log
+      unreadable: rejection has no log)" when it has none);
+    - otherwise excerpt(step, rejection_text(record, <the first gate host by name in
+      fab.hosts.load()>, sh=sh)); no gate host, or hosts that cannot be loaded, gives `(log
+      unreadable: <why>)`.
+    Never raises for an unreadable log."""
+    raise NotImplementedError
 
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),

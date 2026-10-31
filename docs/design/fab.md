@@ -71,7 +71,8 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
-| `branch.rejected` | task, branch, tip, step, log | the landing refused it; a repair or rebase follows |
+| `branch.rejected` | task, branch, tip, step, log | the landing refused it; its foreman decides what follows (13.1) |
+| `refusal.settled` | task, run, verdict, reason, branch, section | the tick acted on a refusal's foreman run: fix (its section landed in the spec), retry (the tip goes back unchanged) or none (13.1) |
 | `question.asked` | task, run, text | the task parks until answered |
 | `question.answered` | task, by, answer | the task may run again; it names a task, never a call's subject |
 | `call.started` / `call.ended` | call, role, subject; outcome, tokens, cache_write, peak, turns, minutes | a Claude call; its usage (13.5) |
@@ -442,14 +443,39 @@ it, and the flow grows from a small start rather than to a fixed cap.
   once, before the branch lands or is readied. A critique with no findings
   lets it through at once.
 - **The foreman writes the rebase and repair tasks,** as the user's model
-  has it. When the landing refuses a branch, a foreman run reads the task,
-  the refusal and the failing step's log, and writes the repair: an
-  `## Repair` section appended to the task's spec, saying what failed, where
-  to look and what to change, or that the red is not the branch's (a fault
-  of the gate, a flake), in which case the tip is retried unchanged
-  (`fab queue untry`) and no repair run starts. A conflict gets a rebase
-  section the same way. The repair or rebase run then reads its spec, as
-  every run does.
+  has it. When the landing refuses a branch, no repair or rebase run starts
+  until a foreman run (`fab/roles/foreman-repair.md`) has read the task, the
+  refusal and the failing step's log. Either the red is the branch's: it
+  writes what failed, where to look and what to change, which code appends
+  to the spec as a `## Repair` section (`## Rebase` for a conflict) and
+  hands to the next run. Or the red is not the branch's (a fault of the
+  gate, a flake): the tip is retried unchanged and no run starts.
+  - `fab/repairs.py` folds where each open refusal stands: at the foreman,
+    deciding, decided, settled or fallback. A refusal is open from a task's
+    branch.rejected to its next run.started, branch.ready or branch.landed.
+    A refusal's foreman is a foreman run (`<task>/foreman-<n>`, numbered with
+    the question foremen) whose run.started carries `refused` (the tip) and
+    `step` instead of `asked`. It reads a worktree detached at
+    `origin/<branch>`, since `fab land`'s rebased tip is never pushed. Its
+    brief quotes the gates' findings, `fab land`'s detail or the queue log's
+    failing step (`fab.run.refusal_text`).
+  - Its report's first line is `Done: fix: <line>`, `Done: retry: <line>`
+    or `Failed: <why>`. On fix, the tick writes the section into the spec on
+    a branch `repairs/<run>` and lands it with `fab land`, as answers land.
+    On retry, the task folds as done again, so the next tick lands it again
+    (this repository) or readies it with `fab queue untry` (fabrig). Either
+    way it logs `refusal.settled`; a landing that fails is tried again next
+    tick.
+  - A retry is refused, and the repair run starts with the refusal alone
+    (verdict none), for a gate or paths step, whose red is the branch's by
+    construction, or when the branch already went back unchanged once since
+    its last run. A report not in the foreman's form is verdict none too.
+    A foreman ending in any other outcome, infra too, is a fallback: the
+    repair or rebase run starts as without a foreman. A foreman runs once
+    per refusal.
+  - The repair or rebase run's brief carries the section before the
+    refusal, since its checkout is the branch and not main. The run limit
+    counts it as before.
 - **The foreman settles what the options settle.** A run ending with a
   question first goes to a foreman run (Codex, medium, kind `foreman`,
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
@@ -709,7 +735,10 @@ things fab follows, whatever the clock says:
 - The flow's target and each builder's calm in the code report, beside runs
   in flight per hour; the target shared across plans (13.4).
 - The foreman for plans whose specs live in another repository: its answers
-  landing through that repository's landing, not `fab land`.
+  and repair sections landing through that repository's landing, not `fab land`.
+- A repair run of this repository that starts without a foreman's section
+  quoting `fab land`'s detail, as the foreman's brief does; it reads the
+  detail as a queue log path today and quotes nothing.
 - Retiring the session launcher, watch's session rules, mail, leases and the
   event collector once nothing resident remains.
 - The cut started by the tick when a draft lands that no plan serves, once

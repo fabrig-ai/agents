@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import call_review, calls, flow, foreman, gates, hosts as machines, land, log, plan as specs, run as runs, state
+from fab import call_review, calls, flow, foreman, gates, hosts as machines, land, log, plan as specs, repairs, run as runs, state
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -130,7 +130,7 @@ def _review_due(tasks: Mapping[str, Task], events: list[dict], now: str) -> bool
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # collect, land, ready, start, park, design, foreman, settle, call, vet, hold, finish
+    kind: str  # collect, land, ready, start, park, design, foreman, settle, examine, remedy, call, vet, hold, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -152,6 +152,19 @@ def foreman_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Actio
             actions.append(Action("settle", task=question.task, run=question.foreman,
                                   detail=question.foreman))
     return actions
+
+
+def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action]:
+    """Start a refusal's foreman or act on its verdict, one action per open refusal of
+    fab.repairs.refusals(tasks, events), in its order (docs/design/fab.md, 13.1):
+    - foreman: Action("examine", task=<task>, branch=<refused branch>, detail="<step>
+      <branch>");
+    - decided: Action("remedy", task=<task>, run=<foreman run>, detail=<foreman run>);
+    - deciding, settled and fallback: nothing (decide starts the run that follows a
+      settled fix or none, or a fallback; a settled retry folds as done, so decide lands
+      or readies it again).
+    Pure; only refusals of tasks in tasks are considered."""
+    raise NotImplementedError
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:

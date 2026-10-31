@@ -80,12 +80,20 @@
   `call-review-tick`. Until it lands, every question waits for the
   answerer. Answers land through `fab land`, so a plan whose specs live
   outside this repository cannot be settled by its foreman yet.
-- **The foreman only settles questions.** The user's execution model
-  (`docs/design/draft/execution-modes.md`, roles) also has it write rebase
-  and mechanical repair tasks; here the dispatcher starts rebase and repair
-  runs on the rejected task itself (sections 6 and 13.1), and no part gives
-  the foreman that duty. The model lists the foreman without read-only;
-  13.1 makes it read-only, and code writes its answer into the spec.
+- **The foreman's repairs are a skeleton:** `fab/repairs.py` (where each
+  open refusal stands, the refusal foreman's brief and start, its verdict,
+  the `## Repair` or `## Rebase` section written into the spec),
+  `fab/spec_edit.py` (a spec changed on a branch to land, which
+  `fab.foreman.commit` is to use), `fab.run.excerpt` and
+  `fab.run.refusal_text`, and `fab.dispatch.repair_actions` hold 13.1's
+  contracts; `fab/roles/foreman-repair.md` is written. The task `repairs`
+  fills the modules; `repairs-tick` makes the tick start refusal foremen,
+  act on their verdicts, hold a refused task's repair run until its foreman
+  has decided, and carry the section into that run's brief. Until it lands
+  the dispatcher starts rebase and repair runs on the refused task itself,
+  with the refusal alone. The model lists the foreman without read-only;
+  13.1 makes it read-only, and code writes its answers and sections into
+  the spec.
 - **Subjects can share a task's id:** a skeleton call's subject
   `<draft>/<part>` equals the id of a task named after its part (`gates`).
   A `question.answered` that unparks the subject also makes that task
@@ -137,9 +145,6 @@
   whole-workspace build from a swept slot. Repeated scoped builds within one
   task are not measured yet; heavy.jsonl and the sweep's freed bytes will
   show them.
-- **Repairs and rebases are started by the dispatcher** on the refused task
-  itself, until `foreman-repairs` lands; then the foreman writes them
-  (13.1), as the user's model has it.
 - **Design waits for implementation:** `fab.dispatch.decide` makes a part
   eligible only when every task of its needs has landed, and sizes the
   buffer against nominal places; section 4 now says otherwise, and the task
