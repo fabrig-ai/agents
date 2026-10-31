@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, gate, hosts as machines, log, receipts, reds, slots, wake as events
+from fab import atomic, gate, heavy, hosts as machines, log, receipts, reds, slots, wake as events
 from fab.sh import Runner, run
 
 UNIT = "fab-queue.service"  # the queue's user unit on the gate machine
@@ -168,12 +168,21 @@ class Queue:
         self._wake_notes.append(f"rejected {branch.name}")
 
     def _retire(self, branches: Sequence[Branch], main: str) -> str | None:
-        """Retire pinned refs, recording each landing and noting it for the cycle's wake."""
+        """Retire pinned refs, recording each landing and noting it for the cycle's wake.
+
+        Each ready/<name> is deleted with a lease on its tip, and <name> too when the fetched
+        refs/remotes/origin/<name> is that tip: a branch readied by hand may have no <name>,
+        or one that has moved on, and either is left alone."""
         if not branches:
             return
+        refs = []
+        for branch in branches:
+            refs.append(("refs/heads/ready/" + branch.name, branch.tip))
+            source = self._git("rev-parse", "--verify", "--quiet",
+                               f"refs/remotes/origin/{branch.name}^{{commit}}", check=False)
+            if source.ok and source.out.strip() == branch.tip:
+                refs.append(("refs/heads/" + branch.name, branch.tip))
         # Without --atomic, an updated head does not prevent retiring the other pinned refs.
-        refs = [("refs/heads/" + prefix + branch.name, branch.tip)
-                for branch in branches for prefix in ("ready/", "")]
         result = self._git("push", *(f"--force-with-lease={ref}:{tip}" for ref, tip in refs),
                            "origin", *(":" + ref for ref, _ in refs), check=False)
         for branch in branches:
@@ -192,8 +201,10 @@ class Queue:
         ratchet steps with --write and a commit of lowered baselines, the gate-lane checks, the
         detail log FAB_HOME/queue/<batch>.log. Green: push the candidate to main with
         --force-with-lease=refs/heads/main:<parent> (refused: an error, nothing marked), delete
-        each branch's ready/<name> and <name> refs with leases on their tips, record `landed` per
-        branch. Red: a single branch is rejected with its failing step and marked tried.
+        each branch's ready/<name>, and its <name> when that is still the tip, with leases on
+        their tips, record `landed` per branch. Red: a single branch is rejected with its failing
+        step and marked tried. A check step that exits heavy.EX_TEMPFAIL (short of disk) is an
+        error, not a red: nothing is rejected or marked tried, and the batch goes again.
         Records: `batch` (branches, parent, selection, steps as "name:code:seconds", outcome
         green, red, conflict or error, log), `landed` (branch, tip, main), `rejected` (branch,
         tip, step, log). The checkout is left clean and detached.
@@ -324,6 +335,9 @@ class Queue:
                 checks, reports = reds.with_junit(checks, self.repo, detail.parent, detail.stem)
             outcomes += gate.run_steps(checks, detail, sh=self.sh)
             green = all(step.green for step in outcomes)
+            if not green and outcomes[-1].code == heavy.EX_TEMPFAIL:
+                # Short of disk is the gate's fault, not the batch's: an error, tried again.
+                raise RuntimeError(f"Infra: disk at {outcomes[-1].name}")
         if not green:
             self._red(outcomes, reports, detail, record, merged)
         record["steps"] = gate.step_texts(outcomes)

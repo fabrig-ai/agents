@@ -79,6 +79,8 @@ class GitTest(unittest.TestCase):
             return Result(0)
         if argv[0] in ('true', 'false'):
             return Result(0 if argv[0] == 'true' else 1)
+        if argv[0] == 'short-of-disk':
+            return Result(75, err='heavy: Infra: disk\n')
         return run(argv, env={**os.environ, **GIT_ENV}, **kwargs)
 
     def load(self, repo):
@@ -91,8 +93,9 @@ class GitTest(unittest.TestCase):
         self.assertEqual(lane, 'gate')
         self.check_calls.append((selected, paths, meta))
         bad = repo / 'bad.txt'
+        command = 'short-of-disk' if (repo / 'disk.txt').exists() else 'false' if bad.exists() else 'true'
         return [gate.Step('fmt', ('true',), str(repo)),
-                gate.Step('check', ('false' if bad.exists() else 'true',), str(repo))]
+                gate.Step('check', (command,), str(repo))]
 
     def commit(self, files):
         for name, content in files.items():
@@ -402,7 +405,28 @@ class GitTest(unittest.TestCase):
         self.q.cycle()
         self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/' + branch.name), replacement)
         self.assertEqual(len(self.records('landed')), 1)
-        self.assertTrue(any(entry['outcome'] == 'error' for entry in self.records('batch')))
+        self.assertEqual([entry['outcome'] for entry in self.records('batch')], ['green'])
+        self.assertEqual(self.q.state['tried'], {branch.name: branch.tip})
+        self.assert_clean()
+
+    def test_a_branch_readied_by_hand_lands_cleanly_without_its_task_ref(self):
+        branch = self.branch('ops/hand', {'a.txt': 'a'})
+        git(self.origin, 'update-ref', '-d', 'refs/heads/' + branch.name)
+        self.q.cycle()
+        self.assertEqual([entry['outcome'] for entry in self.records('batch')], ['green'])
+        self.assertEqual(len(self.records('landed')), 1)
+        self.assertEqual(self.q.state['tried'], {branch.name: branch.tip})
+        self.assertEqual(git(self.origin, 'for-each-ref', 'refs/heads/ready/'), '')
+
+    def test_a_check_short_of_disk_is_an_error_and_goes_again(self):
+        branch = self.branch('draft/a', {'disk.txt': 'x'})
+        with self.assertRaisesRegex(RuntimeError, 'Infra: disk at check'):
+            self.q.cycle()
+        self.assertEqual(self.records('rejected'), [])
+        self.assertEqual(self.records('batch')[-1]['outcome'], 'error')
+        self.assertEqual(self.q.state['tried'], {})
+        self.assertEqual([found.tip for found in queue.candidates(self.repo, self.q.state['tried'], sh=self.runner)],
+                         [branch.tip])
         self.assert_clean()
 
     def test_build_batch_ratchet_conflict_recounts_or_rejects(self):
