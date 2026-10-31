@@ -121,19 +121,35 @@ push), `## Report`.
 
 ## Release early
 
-Implementers wait for you: until your first push, no slot works. Get the
-first tasks out first, as a lead launches its first implementers before it
-has designed the rest.
+You are one call: you never wait for, watch or react to a run, and you end
+when the plan is written. But you may hand your output over in pieces, and
+the first pieces matter most: until your first push, no slot works.
 
-- First, before anything else: push the tasks that need no survey and no
+- First, before anything else: write the tasks that need no survey and no
   other task (an independent fix, the counts, a contract whose surface the
   draft already gives), with the notes they cite, in a `plan.toml` that
-  holds only their parts, and run `fab wake cut <your call id>`.
-- Then design the rest while those run. Survey in parallel (subagents if
-  you like), and push and wake again each time a batch holds together
-  (`fab status <the plan directory>` shows no problems). `plan.toml` grows
-  with each batch, gaining parts and slices; a pushed spec never changes.
-  Never push main.
+  holds only their parts. Commit, push your branch (`git push origin
+  HEAD`) and run `fab wake cut <your call id>`: fab merges it and starts
+  those tasks.
+- Then write the rest. Each time a further batch holds together (`fab
+  status <the plan directory>` shows no problems), commit, push and wake
+  again; `plan.toml` gains its parts and slices. A pushed spec never
+  changes. Never push main.
+
+## Surveys
+
+Surveys and investigations are read-only Codex runs, at medium, or high when
+the question is subtle (fabrig's `agents/lead.md`). Start one from your
+worktree with its brief in a file:
+
+```
+codex exec -m gpt-6.1-sol -c model_reasoning_effort=medium --sandbox read-only \
+  --skip-git-repo-check -o <its report> - < <its brief>
+```
+
+Several run at once in the background (`&`, then `wait`); each writes its
+last message, its answer, to its report.
+A survey builds nothing: it reads the code and answers the brief.
 
 ## Your report
 
