@@ -146,25 +146,20 @@ freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))  # fab.
 
 ### A line from another machine may not parse
 
-Why: one torn or stray line must not stop a tick. `fab.log.iterate` skips
-such lines too.
+Why: one torn or stray line must not stop a tick. `fab.log.records` skips
+such lines, as `fab.log.iterate` does for the log.
 
 Bad:
 
 ```python
-for line in result.out.splitlines() if result.ok else ():
-    entry = json.loads(line)  # fab.dispatch.tick's queue import
+for line in listed.out.splitlines():
+    entry = json.loads(line) if line.strip() else {}  # fab.run._undo_start
 ```
 
 Good:
 
 ```python
-try:
-    record = json.loads(line)  # fab.report.gather
-except json.JSONDecodeError:
-    continue
-if isinstance(record, dict) and isinstance(record.get("ts"), str):
-    records.append(record)
+for entry in log.records(result.out) if result.ok else ():  # fab.dispatch._import_queue
 ```
 
 ### A local never takes an imported module's name
@@ -184,4 +179,47 @@ Good:
 ```python
 from fab import hosts as machines  # fab.dispatch: the parameter keeps `hosts`
 hosts = machines.load() if hosts is None else hosts
+```
+
+### A parameter holds what its name says
+
+Why: a reader takes `remote` for the ssh closure the module builds
+everywhere else, and finds the runner. Name the runner `sh`, as every
+function does.
+
+Bad:
+
+```python
+def _prepare_and_launch(task, host, kind, remote, *, run_id, ...):  # fab.run
+    sh = remote
+
+    def remote(argv, *, input=None):
+        return sh(ssh(host.ssh, argv), input=input, check=True)
+```
+
+Good:
+
+```python
+def start(task, host, *, kind="implement", events=(), sh: Runner = run, ...):  # fab.run
+    def remote(argv, *, input=None):
+        return sh(ssh(host.ssh, argv), input=input, check=True)
+```
+
+### A rule every caller must agree on has one home
+
+Why: when two modules spell the rule apart, one changes and the other
+does not. The tick then reads one machine's queue and untries on another.
+
+Bad:
+
+```python
+gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)  # fab.dispatch
+gate = next((host for host in ordered if "gate" in host.roles), None)  # fab.report.gather
+```
+
+Good:
+
+```python
+report = str(Path(runs.remote_home(host)) / "runs" / run_id / "report.md")  # fab.foreman
+result = sh(ssh(host.ssh, PROBE + [remote_home(host) + "/heavy.jsonl"]))  # fab.flow.measure
 ```
