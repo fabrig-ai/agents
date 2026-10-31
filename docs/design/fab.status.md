@@ -186,8 +186,9 @@
 - **Replaying a manual run (13.12) is being built:** the tasks
   `replay-options` (the plan's options, the cut's `--set`), `replay-trunk`
   (runs, gates, precheck and spec edits on a trunk), `integration-merge`
-  (the tick merges into the trunk; reviews off) and `integration-check` (the
-  end check, its repairs, the ready). Until they land, every plan lands
+  (the tick merges into the trunk; reviews off), `integration-check` (the
+  recount, the trunk's ratchet, the end check, its repairs, the ready,
+  answers at once) and `replay-roles` (the replay-mode role texts). Until they land, every plan lands
   through `fab land` or the queue, and every call is reviewed.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.

@@ -85,6 +85,8 @@ full checks (`replay-trunk`).
     `stop` prints its detail and logs one note per tip. Each prints one
     line, `integration <draft> <kind> <detail>`.
   - check runs are collected as any run (they are the draft's).
+- **Answers at once** (`call_actions`): for an integration plan, any queued
+  question starts the answer call, as ANSWER_AT does at 4. A test.
 - **`fab/designer.py`**: `retire_due` is false for an integration plan
   until a `branch.landed` without `into` names task `<draft>/integration`.
 - **`fab/cli.py`**: register `check`.

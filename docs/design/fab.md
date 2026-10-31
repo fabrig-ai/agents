@@ -971,6 +971,21 @@ is four plan options on today's mechanism, not a second engine.
   share in the plan's `notes/`, cited from each spec (the lead's
   `common.md`, `stage-common.md`, `lib-common.md`); implementers read them
   in their checkout.
+- **Replay-mode texts,** so the replay works as the manual lead did; the
+  default flow keeps its own:
+  - a direct plan's cut gets `fab/roles/cut-direct.md` after its role
+    text: the lead's way of cutting (parallel Explore surveys of the sites,
+    decisions recorded in `notes/decisions.md`, small contract tasks first,
+    one crate family per site task, shared notes per family, pre-approved
+    defaults for the questions a task will meet, about ten minutes);
+  - an integration plan's fabrig runs get `fab/roles/fabrig-integration.md`
+    in place of `fab/roles/fabrig.md`: codex-kit's checks (fmt, the
+    ratchets, clippy of the changed packages, tests of them and their direct
+    dependents, dependents' `cargo check --tests` after an API change) and
+    no precheck, since the end check runs the queue's;
+  - an integration plan answers a queued question at once (an answer call
+    as soon as the foreman cannot settle it), as the lead did in two
+    minutes, not at 4 queued or after 30 minutes.
 - **Retire waits for main.** An integration plan's parts are done when
   their tasks have merged, but its retire call starts only once the trunk
   has landed on main (`branch.landed` for task `<draft>/integration` from
