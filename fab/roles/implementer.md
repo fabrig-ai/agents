@@ -27,6 +27,9 @@ task names, and nothing unrelated.
   prints its time. A test slower than half a second needs a reason.
 - Run the narrowest tests while you work (`bin/fab test -k NAME`), the whole
   suite once at the end.
+- A test marked `@support.pending(...)` is the test-writer's acceptance test:
+  never edit it; one you believe wrong is a question. Run it with
+  `FAB_PENDING=<its subject> bin/fab test -k NAME`.
 
 ## Ending
 

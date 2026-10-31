@@ -45,7 +45,9 @@ def next_run(task_id: str, events: Iterable[dict]) -> str:
 
 def branch_for(task: Task, kind: str, events: Iterable[dict]) -> str:
     """implement and review: the task id; repair: the branch of the task's last run.started
-    (the task id if none); rebase: `<task>-r<n>`, n counting the task's earlier rebase runs from 1."""
+    (the task id if none); rebase: `<task>-r<n>`, n counting the task's earlier rebase runs from 1;
+    tests and accept (fab.acceptance.KINDS): the run's own id, next_run(task.id, events), so
+    each of their runs pushes a fresh branch from origin/main."""
     if kind not in KINDS:
         raise ValueError(f"unknown run kind {kind!r}")
     started = [event for event in events
@@ -64,8 +66,9 @@ def outcome(report: str) -> str:
     return next((value for prefix, value in OUTCOMES.items() if first.startswith(prefix)), "failed")
 
 
-def role_text(repo: str) -> str:
-    """The implementer's role text, then the taste file (TASTE), then the repository's notes
+def role_text(repo: str, kind: str = "implement") -> str:
+    """The role text of kind's runs (fab.acceptance.ROLES[kind] for its kinds, else ROLE, the
+    implementer's), then the taste file (TASTE), then the repository's notes
     (fab/roles/<repo>.md) when it has any, each separated by one blank line."""
     notes = ROLE.with_name(f"{repo}.md")
     texts = [ROLE.read_text(), TASTE.read_text()]
@@ -78,6 +81,8 @@ def brief(task: Task, role: str, *, run_id: str, branch: str, base: str, report:
           rejection: dict | None = None) -> str:
     """The brief Codex gets: the role text, then a `# Your task` section listing run, branch,
     base, report path, the files it may change and the expected minutes, then the spec's body.
+    The task line names the spec (`- Task: <id> (spec \\`<path>\\`)`) only when task.path is not
+    empty; fab.acceptance's tasks have no spec file and give `- Task: <id>`.
     A rejection adds the failed step and queue log between the facts and body; start supplies
     its log text in `text`. Only the last matching step, at most 120 lines, is included."""
     files = ", ".join(task.files) or "(none)"
@@ -138,6 +143,8 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     origin/<branch>); write the brief to FAB_HOME/runs/<run>/brief.md; then
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
+    The brief's role text is role_text(task.repo, kind); tests and accept runs (fab.acceptance)
+    add their worktree as implement does, on branch_for's fresh branch from origin/main.
     The brief is also kept on this machine at FAB_HOME/runs/<run>/brief.md. run.started carries
     run, task, kind, host, dir (the worktree), branch, base ("origin/main"), codex (the id),
     state (codex-run's state directory) and report (the builder's report path).

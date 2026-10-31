@@ -25,7 +25,9 @@ departure, the drafts' words, and the options.
 - **The part's test vocabulary and an exemplar test:** the builders,
   fixtures and assertion helpers its tests will speak in, written as code,
   and one test that uses them end to end on the skeleton. Implementers and
-  the test-writer write their tests in that vocabulary.
+  the test-writer write their tests in that vocabulary. The acceptance tests
+  (`fab/tests/test_accept_*.py`) are the test-writer's: no task's `files`
+  names them.
 - **Slices order the filling, not the shape:** a body no slice's story reaches
   yet stays `NotImplementedError`; never fill one with a placeholder to make a
   story pass, and never fake a contract that has not landed.

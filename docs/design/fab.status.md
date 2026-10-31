@@ -131,6 +131,19 @@
   A call's subject draws its calls into the report only when it is the draft
   or one of its parts; the task widens that to every subject under the
   draft (review, cut, retire, decision).
+- **Acceptance is a skeleton:** `fab/acceptance.py` holds 13.1's test-writer
+  and accept tasks (which units owe acceptance, their tasks and rounds, the
+  briefs' bodies, the slices done), `fab/tests/support.py` the `pending`
+  marker and the builders acceptance tests speak in, and `fab.run`,
+  `fab.dispatch` and `fab.state.main` the amended contracts that carry the
+  tasks. `fab/roles/test-writer.md` and `fab/roles/accepter.md` are
+  written. The task `acceptance-tasks` fills the module; `acceptance-tick`,
+  after `accounting`, makes the tick start, land and show them and log
+  `slice.done`. Until it lands, no test-writer or accept run starts and a
+  part is done when its tasks have landed. Parts designed before then owe
+  no acceptance once their tasks have all landed. The red accept run writes
+  the part's repair spec itself; the user's model gives repair tasks to the
+  foreman (`foreman-repairs` may take it over).
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

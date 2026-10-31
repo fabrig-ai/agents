@@ -67,7 +67,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review, foreman, tests or accept |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main | on main |
@@ -78,6 +78,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
+| `slice.done` | draft, slice, task | a slice's story test passed on main: its accept task landed green (13.1) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -407,23 +408,44 @@ it, and the flow grows from a small start rather than to a fixed cap.
     answer call starts while an answer chain is open, and no review call
     while a review chain is open.
 - **Acceptance is the test-writer's, at the level of the design.** When a
-  part's skeleton lands, one test-writer run (Codex, high, kind `tests`)
-  writes the part's acceptance tests from its design section and its
-  skeleton's test vocabulary alone, never from bodies: the behaviours the
-  design promises, through the part's public items. It runs beside the
-  part's implementers, not before each one. Its tests land at once, marked
-  pending (skipped with the reason `pending: <draft>/<part>`), so main stays
-  green. Implementers write their own unit tests, as today, and never edit a
-  pending test; one they believe wrong is a question.
+  feature part's skeleton lands, one test-writer run (Codex, high, kind
+  `tests`, `fab/roles/test-writer.md`) writes the part's acceptance tests
+  from its design section and its skeleton's test vocabulary alone, never
+  from bodies: the behaviours the design promises, through the part's public
+  items. It runs beside the part's implementers, not before each one. Its
+  one module, `fab/tests/test_accept_<draft>_<part>.py`, lands at once with
+  every class marked `@support.pending("<draft>/<part>")` (skipped with the
+  reason `pending: <draft>/<part>`), so main stays green;
+  `FAB_PENDING=<subject>` runs them. Implementers write their own unit
+  tests, as today, and never edit a pending test (no task's `files` names
+  one); one they believe wrong is a question.
 - **A part is accepted when its acceptance tests pass.** When all a part's
-  tasks have landed, an accept run (Codex, medium, kind `accept`) removes
-  the part's pending markers and runs the suite. Green, the part is done and
-  the branch lands; red, its findings become repair tasks of the part, and
-  the part is not done.
-- **A slice's story test** is the test-writer's too: written when the last
-  part of the slice is designed, pending on the slice (`pending: slice <n>`),
-  un-pended by the accept run of its last part. A slice is complete when its
-  story test passes on main (`slice.done` in the log).
+  tasks and its tests have landed, an accept run (Codex, medium, kind
+  `accept`, `fab/roles/accepter.md`) removes the part's pending markers and
+  runs the suite. Green, its branch lands and the part is done. Red, it
+  keeps the markers and writes the findings as a repair task spec of the
+  part, `<part>-fix-<k>`, its `files` those of the part's tasks less the
+  acceptance tests; that branch lands, and the next round's accept run waits
+  for the new task. A round is red by its report (only `Done: accepted` is
+  green), and also when something the part waits for landed after its accept
+  run started (a consolidation task), so a part is accepted on its latest
+  code.
+- **A slice's story test** is the test-writer's too: written once every part
+  of the slice is designed and one of them owes acceptance, pending on
+  `<draft>/slice-<n>`, and accepted by its own accept run once each of its
+  parts is accepted (or done without acceptance). Its red is a repair task of
+  the part its first failing test reaches. A slice is complete when its story
+  test passes on main: the tick logs `slice.done` (draft, slice, task).
+- **These are tasks no spec holds** (`fab/acceptance.py`): the tick derives
+  them from the plan, its specs and the log, `<draft>/<unit>/tests` and
+  `<draft>/<unit>/accept-<k>`, and adds them to the specs' tasks, so the
+  fold, runs, gates, `fab land` and `fab status` treat them as any task.
+  Each of their runs pushes a fresh branch, its run id. They never ask: a
+  `Question:` parks the task for judgement by hand, since the answerer has
+  no spec to answer in. Readers wait for a part's tasks, not its acceptance;
+  the part's status is done only once it is accepted. Parts not in feature
+  mode, plans of other repositories (fabrig's tests are Rust) and parts
+  whose tasks had all landed before acceptance began owe none.
 - **Every branch gets a self-critique before ready.** After the gates pass,
   a read-only Codex run (kind `critique`, effort high, `fab/roles/critic.md`)
   reviews the branch against its skeleton, the taste file and the gates'
@@ -711,6 +733,11 @@ things fab follows, whatever the clock says:
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
+- Acceptance for fabrig's plans (Rust tests, `#[ignore]` as the marker) and
+  for migration parts; a cap on red accept rounds; questions from test-writer
+  and accept runs reaching the answerer; a gate that refuses a change to a
+  pending test; acceptance in the code report and the skeleton brief's parts
+  table.
 - A cap on a call's context or turns, once the user sets one from the
   measurements (13.5); Claude and Codex usage against their plans' limits,
   once the limits are recorded somewhere fab can read.

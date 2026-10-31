@@ -58,7 +58,9 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     also reserve their role. Skeleton parts whose calls ended done stay designed.
     Answer calls use ANSWER_AT or ANSWER_AFTER; structure reviews use REVIEW_AT or
     REVIEW_AFTER since the last review started. Question outcomes park a subject until
-    question.answered names it. Pure; see docs/design/fab.md, 12 and 13.1."""
+    question.answered names it. The answerer never takes a question of a task that
+    fab.acceptance.owned names: it has no spec to answer in, and waits for judgement by
+    hand. Pure; see docs/design/fab.md, 12 and 13.1."""
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
     flight = {key: event for key, event in started.items() if key not in ended}
@@ -178,11 +180,15 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        free place by places(hosts, flight, calm) (the builder with most free places first;
        ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
-       last run ended infra. A task that already has MAX_RUNS runs gets park instead of start,
-       whatever the target and the places.
+       last run ended infra. A task whose kind is in fab.acceptance.KINDS (tests, accept)
+       always starts with that run_kind, whatever its history, its rejection still passed.
+       A task that already has MAX_RUNS runs gets park instead of start, whatever the target
+       and the places.
     4. design: when fewer tasks are runnable or rejected than plan.low times the builders'
        total places, one design action whose detail lists, in plan order, the parts that
-       have no task spec yet and whose needs all have every task landed.
+       have no task spec yet and whose needs all have every spec task landed: tasks that
+       fab.acceptance.owned names are not counted, so readers never wait for a part's
+       acceptance.
     Statuses come from fab.state.fold.
     """
     flight = in_flight(events)
@@ -415,7 +421,13 @@ def tick(plan_dir: Path, *, sh: Runner = run, hosts: Mapping[str, Host] | None =
     """Fetch the plan checkout and take its task actions, then its call review chain steps.
 
     Hold a nonblocking FAB_HOME/tick.lock, validate the plan, import queue events and measure
-    builders through fab.flow.measure before deciding. Collect runs, gate and land tasks,
+    builders through fab.flow.measure before deciding. The tasks decide and its actions see
+    are the specs, then fab.acceptance.tasks(plan, specs, events) over the events after the
+    import; call_actions and its actions see the same merge made again over the events it
+    reads, so an accept task landed red this tick is already a red round there. Validation
+    reads the specs alone. Then, before deciding, one
+    slice.done (draft, slice, task: the slice's accept task id) is logged per slice of
+    fab.acceptance.slices_done(plan, specs, events), and the line `slice <n> done` printed. Collect runs, gate and land tasks,
     publish ready branches and start runs through
     the runner. Re-read events for call decisions: vet on the freest builder, amend in a user
     unit, park refusals once, or land approved branches and record answers and call.finished.

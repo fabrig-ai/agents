@@ -92,7 +92,11 @@ def part_statuses(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, 
     """Each part's status (PART_STATUSES), keyed by id in the plan's order (docs/design/fab.md, 4):
     done when the plan marks the part done or it has task specs that all have status landed;
     designed when it has task specs; else not designed. statuses maps task ids to fold's
-    statuses; a task missing from it is not landed. fab.calls' parts table, fab.dispatch.decide's
+    statuses; a task missing from it is not landed. tasks may hold fab.acceptance's tasks
+    beside the specs: a part's test-writer and accept tasks are its own, so a part that owes
+    acceptance is done only once its accept task has landed green; a task whose part is no
+    part of the plan (a slice's) counts for none, and a part's status never rests on them
+    alone (they exist only for a part with task specs). fab.calls' parts table, fab.dispatch.decide's
     design step and fab.designer.retire_due read it."""
     raise NotImplementedError
 
@@ -100,7 +104,9 @@ def part_statuses(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, 
 def main(argv: list[str]) -> int:
     """`fab status PLAN_DIR`: one line per task, `<id> <status> <runs> <branch>`; exit 1 on plan problems.
 
-    PLAN_DIR holds plan.toml and tasks/; the log is FAB_HOME's.
+    PLAN_DIR holds plan.toml and tasks/; the log is FAB_HOME's. The tasks are the specs, then
+    fab.acceptance.tasks(plan, specs, events), as the tick folds them (fab.acceptance is
+    imported inside main: it reads this module).
     """
     parser = argparse.ArgumentParser(prog="fab status", description=__doc__)
     parser.add_argument("plan_dir", type=Path, metavar="PLAN_DIR")
