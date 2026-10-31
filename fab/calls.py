@@ -225,14 +225,15 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
     the call's facts; "Plan parts and slices", the same table skeleton_brief writes (shared,
     not copied), statuses from fab.state.fold(tasks, events), and a line `Specs:
     docs/plan/<draft>/tasks/`; "Landed since the last review": per record of
-    landed_after(events, tasks, last_review(events, done=True)), in log order, a heading
+    landed_after(events, tasks, last_review(events, done=True, draft=plan.draft)), so only
+    this draft's done reviews set the cutoff; in log order, a heading
     `## <task> (`<branch>`, main `<main[:12]>`)` and the text of FAB_HOME/digests/<run>.md for
     the task's last run.started before that record, or `(no digest)` when it has none or
     the file is missing; `(none)` when nothing landed; "Taste", the text of fab.run.TASTE;
     "Designs", per distinct path cited by the landed tasks' parts (the citation before its
     comma), in first-landed order, `## <path>` and design_text(root, citation); "Inventory".
     Raises ValueError past BRIEF_LIMIT, naming the largest section."""
-    landed = landed_after(events, tasks, last_review(events, done=True))
+    landed = landed_after(events, tasks, last_review(events, done=True, draft=plan.draft))
     records = []
     designs = {}
     for record in landed:
@@ -266,14 +267,17 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
     ])
 
 
-def last_review(events: Iterable[dict], *, done: bool = False) -> str | None:
+def last_review(events: Iterable[dict], *, done: bool = False,
+                draft: str | None = None) -> str | None:
     """The ts of the latest call.started with role review; with done, only of one whose
-    call.ended (same call) has outcome done. None when there is none."""
+    call.ended (same call) has outcome done. With draft, only subject <draft>/review
+    counts. None when there is none."""
     events = list(events)
     completed = {event["call"] for event in events
                  if event.get("ev") == "call.ended" and event.get("outcome") == "done"}
     return next((event["ts"] for event in reversed(events)
                  if event.get("ev") == "call.started" and event.get("role") == "review"
+                 and (draft is None or event.get("subject") == f"{draft}/review")
                  and (not done or event["call"] in completed)), None)
 
 

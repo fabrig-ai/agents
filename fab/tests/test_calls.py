@@ -14,7 +14,7 @@ from unittest.mock import Mock, patch
 from fab import call_review, calls, channel, cli, log
 from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
-from fab.tests.support import FakeRunner, tmp_home
+from fab.tests.support import FakeRunner, call_started, call_ended, tmp_home
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -138,6 +138,23 @@ class ReviewHistoryTest(unittest.TestCase):
         events.append({"ev": "call.started", "role": "review", "call": "running", "ts": "007"})
         self.assertEqual(calls.last_review(events), "007")
         self.assertEqual(calls.last_review(events, done=True), "001")
+
+    def test_last_review_filters_draft_and_done_independently(self):
+        events = [call_started("one-done", "review", "one/review", ts="001"),
+                  call_ended("one-done", ts="002"),
+                  call_started("two-done", "review", "two/review", ts="003"),
+                  call_ended("two-done", ts="004"),
+                  call_started("one-failed", "review", "one/review", ts="005"),
+                  call_ended("one-failed", outcome="failed", ts="006"),
+                  call_started("prefix", "review", "one/reviewing", ts="007"),
+                  call_started("answer", "answer", "one/review", ts="008")]
+        self.assertEqual(calls.last_review(iter(events)), "007")
+        self.assertEqual(calls.last_review(iter(events), done=True), "003")
+        self.assertEqual(calls.last_review(iter(events), draft="one"), "005")
+        self.assertEqual(calls.last_review(iter(events), draft="one", done=True), "001")
+        self.assertEqual(calls.last_review(events, draft="two", done=True), "003")
+        self.assertIsNone(calls.last_review(events, draft="missing"))
+        self.assertIsNone(calls.last_review([], draft="one", done=True))
 
     def test_landed_after_filters_tasks_and_timestamp_in_log_order(self):
         tasks = {"demo/one": object(), "demo/two": object()}
@@ -272,11 +289,11 @@ class BriefTest(unittest.TestCase):
             plan, tasks = fixture(root)
             first = {"ev": "branch.landed", "task": "demo/one", "branch": "demo/one",
                      "main": "m1", "tip": "tip-one", "ts": "001"}
-            events = [first, {"ev": "call.started", "role": "review", "call": "done", "ts": "002"},
+            events = [first, {"ev": "call.started", "role": "review", "subject": "demo/review", "call": "done", "ts": "002"},
                       {"ev": "branch.landed", "task": "demo/three", "branch": "demo/three",
                        "main": "m2", "tip": "tip-three", "ts": "003"},
                       {"ev": "call.ended", "call": "done", "outcome": "done", "ts": "004"},
-                      {"ev": "call.started", "role": "review", "call": "failed", "ts": "005"},
+                      {"ev": "call.started", "role": "review", "subject": "demo/review", "call": "failed", "ts": "005"},
                       {"ev": "call.ended", "call": "failed", "outcome": "failed", "ts": "006"}]
             text = calls.review_brief(plan, tasks, events, root, call_id="c", branch="b", report="r")
             self.assertNotIn("## demo/one", text)
@@ -284,6 +301,24 @@ class BriefTest(unittest.TestCase):
             empty = calls.review_brief(plan, tasks, [], root, call_id="c", branch="b", report="r")
             self.assertIn("# Landed since the last review\n\n(none)", empty)
             self.assertNotIn("# Full design", empty)
+
+    def test_review_brief_uses_own_drafts_last_done_review(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            events = [dict(ev="branch.landed", task="demo/one", branch="demo/one", main="m0", tip="t0", ts="001"),
+                      call_started("own-done", "review", "demo/review", ts="002"),
+                      call_ended("own-done", ts="003"),
+                      dict(ev="branch.landed", task="demo/two", branch="demo/two", main="m1", tip="t1", ts="004"),
+                      call_started("other-done", "review", "other/review", ts="005"),
+                      call_ended("other-done", ts="006"),
+                      call_started("own-failed", "review", "demo/review", ts="007"),
+                      call_ended("own-failed", outcome="failed", ts="008"),
+                      dict(ev="branch.landed", task="demo/three", branch="demo/three", main="m2", tip="t2", ts="009")]
+            text = calls.review_brief(plan, tasks, events, root, call_id="c", branch="b", report="r")
+            self.assertNotIn("## demo/one", text)
+            self.assertIn("## demo/two", text)
+            self.assertIn("## demo/three", text)
+            self.assertLess(text.index("## demo/two"), text.index("## demo/three"))
 
     def test_review_limit_names_largest_section(self):
         with tmp_home() as root:
