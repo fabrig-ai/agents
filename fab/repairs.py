@@ -94,11 +94,11 @@ def refusals(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Refusal]
 
 
 def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
-          text: str) -> str:
+          text: str, role: str) -> str:
     """The foreman run's brief for a refusal, its sections in this order, joined by blank
     lines and ending with a newline:
 
-    1. The role text, ROLE's.
+    1. role, the role text (ROLE's), its trailing newlines removed.
     2. `# The refusal`: one line each, `- Run: <run_id>`, `- Task: <task.id> (spec
        \\`<task.path>\\`)`, `- Branch: \\`<refusal.branch>\\` at \\`<refusal.tip or "-">\\``,
        `- Step: \\`<refusal.step>\\``, `- Next run: <refusal.kind>`, `- Retried unchanged
@@ -118,8 +118,8 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
 
     1. The run id fab.run.next_run(fab.foreman.task_field(task.id), events): the question
        foremen's numbering, `<task>/foreman-<n>`.
-    2. On this machine: spec, the text of the file at task.path (an OSError propagates and
-       starts nothing); text, fab.run.refusal_text(<the record>, task.repo, sh=sh), the
+    2. On this machine: spec, the text of the file at task.path, and role, ROLE's text (an
+       OSError from either propagates and starts nothing); text, fab.run.refusal_text(<the record>, task.repo, sh=sh), the
        record holding step, log and tip, and findings when refusal.findings is not empty.
     3. fab.run.launch_detached(host, run_id, task.repo, "origin/<refusal.branch>", sh=sh,
        log_path=log_path, task=fab.foreman.task_field(task.id), kind=KIND,

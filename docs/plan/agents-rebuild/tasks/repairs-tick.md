@@ -2,7 +2,7 @@
 id = "repairs-tick"
 part = "foreman-repairs"
 kind = "feature"
-needs = ["repairs", "foreman-tick"]
+needs = ["repairs", "foreman-tick", "design-eligibility"]
 files = ["fab/dispatch.py", "fab/state.py", "fab/run.py", "fab/tests/test_dispatch.py", "fab/tests/test_state.py", "fab/tests/test_run.py"]
 effort = "high"
 minutes = 45

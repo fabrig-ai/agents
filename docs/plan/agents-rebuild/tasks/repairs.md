@@ -2,7 +2,7 @@
 id = "repairs"
 part = "foreman-repairs"
 kind = "feature"
-needs = ["foreman"]
+needs = ["foreman", "accounting"]
 files = ["fab/repairs.py", "fab/spec_edit.py", "fab/foreman.py", "fab/run.py", "fab/tests/test_repairs.py", "fab/tests/test_spec_edit.py", "fab/tests/test_foreman.py", "fab/tests/test_run.py"]
 effort = "high"
 minutes = 50
@@ -49,8 +49,9 @@ Two moves, so the package keeps one copy of each:
     run, not after one before it; findings and log carried, "" when
     missing; two refusals keep their log order, also with equal
     timestamps; each record missing a field is skipped;
-  - `brief`: every section in order, the log fenced, the spec verbatim, `-`
-    for an empty tip, yes and no for retried;
+  - `brief`: every section in order, the role text it is given first, the
+    log fenced, the spec verbatim, `-` for an empty tip, yes and no for
+    retried;
   - `start` with `support.FakeRunner` and a temporary FAB_HOME: the
     worktree added `--detach` at `origin/<branch>` over ssh, `fab codex
     start --effort medium --read-only`, run.started with task
