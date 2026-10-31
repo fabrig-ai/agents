@@ -1008,10 +1008,15 @@ only as tweaks once a replay matches its run.
     `implementer.md`, `operations.md` and `ledger.md` describe the pipeline
     before fab (resident leads, `post`, `claim`, `precheck`, ready refs, the
     old machines). The cut's sources carry fabrig's `AGENTS.md` only;
-    `cut-run.md` names its pipeline lines that do not hold and keeps, in a
-    few lines, what `lead.md` said of writing tasks that still holds (scope
-    settled in the task, readers named, options pre-approved). Implementers
-    are told to read neither `agents/` nor those lines (`fabrig-run.md`).
+    `cut-run.md` names its pipeline lines that do not hold and quotes, in
+    `lead.md`'s own words, every line of it that still holds (the code's
+    shape, fanning out, one writer per crate, the task's contents and size,
+    scope settled in the task after a reverse-dependency survey, readers'
+    tests, effort, skimming). `fabrig-run.md` does the same for
+    `implementer.md`, and the cut's brief quotes it (`What each implementer
+    is told`), as the run's lead read `implementer.md`; the brief names its
+    sources `Sources`. The run's lead was given nothing else: its prompt was
+    its brief, and it read these files itself.
     fabrig's own files brought to fab's era are fabrig's change, through its
     queue: until then fab's texts name the departures, as the manual run's
     notes did.
