@@ -5,7 +5,7 @@ kind = "feature"
 needs = ["integration-merge"]
 files = ["fab/integration.py", "fab/dispatch.py", "fab/run.py", "fab/designer.py", "fab/cli.py", "fab/tests/test_integration.py", "fab/tests/test_dispatch.py", "fab/tests/test_designer.py", "fab/tests/test_run.py"]
 effort = "high"
-minutes = 50
+minutes = 60
 +++
 # The end check of an integration plan, its repairs, and its ready
 
@@ -45,6 +45,19 @@ full checks (`replay-trunk`).
     REPORT (`Done: green <tip>`, or `Failed: <first red step> red`, then one
     line per step and the receipt's log path), `result.json` (exit, ended)
     and touches `ended` last.
+- **The recount** (13.12, "Merging, not landing"), in `fab/integration.py`
+  and `fab.dispatch._merge_branch`: `baselines(paths) -> list[str]` (pure)
+  returns the trees whose `<tree>/scripts/old-forms.txt` are all of the
+  unmerged paths (tree in `fab.gate.TREES`; empty when any other path is
+  unmerged); `recount(checkout, trees, *, sh)`: for each tree, `git checkout
+  --ours -- <tree>/scripts/old-forms.txt`, then `python3 -I -B
+  scripts/old_forms.py --write` with cwd the tree (check=True: a non-zero
+  exit, a raise, is a Failed), then `git add` the file. `_merge_branch`,
+  on a failed merge, lists the unmerged paths (`git diff --name-only
+  --diff-filter=U`); when `baselines` names trees, it recounts and commits
+  the merge (`git -c user.name=fab -c user.email=fab@localhost commit
+  --no-edit`) and goes on as a clean merge; a recount that fails, or any
+  other conflict, aborts and rejects as before (the findings say which).
 - **`fab/run.py`**: `launch(..., command: Sequence[str] | None = None)`:
   when given, it is run with BRIEF, WORKDIR and REPORT appended instead of
   the Codex launcher; the rest (brief written, `<id> <state>` read,
@@ -79,6 +92,10 @@ full checks (`replay-trunk`).
   `<draft>/repair-1`, which starts from the trunk and is merged, after
   which the new tip is checked; a green check with `ready = false` starts
   nothing more; with `ready = true` it readies the trunk once.
+- test_dispatch, real git: two branches lowering different counts on the same
+  old-forms.txt line merge after a recount (a fake old_forms.py that writes
+  the counts); a recount that exits 1, or a conflict in any other file,
+  rejects with step `merge`.
 - test_run: `launch` with `command`.
 - test_designer: retire waits for the trunk to land.
 - `bin/fab test` passes within its budget.

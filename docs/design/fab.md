@@ -921,7 +921,13 @@ is four plan options on today's mechanism, not a second engine.
   tick, in the plan's checkout and under the tick's lock: reset to
   `origin/<trunk>`, `git merge --no-ff origin/<branch>`, push the trunk
   fast-forward only. It logs `branch.landed` with `main` the new trunk tip
-  and `into` the trunk. A conflict aborts the merge and logs
+  and `into` the trunk. A conflict confined to old-form baselines
+  (`<tree>/scripts/old-forms.txt`, which every task lowers with `--write`)
+  is resolved by recounting, as the manual lead did: the trunk's side of
+  the file, then `python3 -I -B scripts/old_forms.py --write` in that tree,
+  which must exit 0 (it refuses a raise). Replaying codex-kit's 24 branches
+  in fab's order, 17 merges conflict, every one on that file alone. Any
+  other conflict, or a recount that exits non-zero, aborts the merge and logs
   `branch.rejected` with step `merge` and the conflict as `findings`, so a
   rebase run follows (13.1's refusal foreman first). Calls' branches
   (`calls/<id>`), answers (`answers/<run>`) and repair sections
