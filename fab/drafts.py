@@ -22,7 +22,7 @@ DESIGN_ROLES = ("skeleton", "contract")  # the calls that design a part, sharing
 def under(draft: str, name: object) -> bool:
     """Whether name is the draft's: equal to draft, or starting with `<draft>/`. A name that
     is not a string (a record missing the field) is no draft's: False."""
-    raise NotImplementedError
+    return isinstance(name, str) and (name == draft or name.startswith(draft + "/"))
 
 
 def owned(draft: str, flight: Iterable[dict], events: Iterable[dict]) -> list[dict]:
@@ -33,7 +33,13 @@ def owned(draft: str, flight: Iterable[dict], events: Iterable[dict]) -> list[di
     or when its kind is review and its task, the root call's id, names a call.started of
     events whose subject is under(draft, ...). A record whose task is not a string is no
     draft's. Never raises on a record missing a field."""
-    raise NotImplementedError
+    calls = {event["call"] for event in events
+             if event.get("ev") == "call.started" and isinstance(event.get("call"), str)
+             and under(draft, event.get("subject"))}
+    return [record for record in flight
+            if isinstance(record.get("task"), str)
+            and (under(draft, record["task"])
+                 or (record.get("kind") == "review" and record["task"] in calls))]
 
 
 def strays(drafts: Iterable[str], flight: Iterable[dict], events: Iterable[dict]) -> list[dict]:
@@ -41,7 +47,10 @@ def strays(drafts: Iterable[str], flight: Iterable[dict], events: Iterable[dict]
     order: runs of retired or unlisted plans and of calls with no draft. The tick collects
     them after every plan has ticked, so a run is never left uncollected. events is read
     once whatever the number of drafts."""
-    raise NotImplementedError
+    events = list(events)
+    flight = list(flight)
+    claimed = {id(record) for draft in drafts for record in owned(draft, flight, events)}
+    return [record for record in flight if id(record) not in claimed]
 
 
 def design_calls(plan: Plan, fresh: Sequence[str], events: Iterable[dict]) -> list[tuple[str, str]]:
@@ -56,7 +65,22 @@ def design_calls(plan: Plan, fresh: Sequence[str], events: Iterable[dict]) -> li
     subject `<draft>/<part>` has a design call in flight; its role is contract when
     plan.parts[part].contract, else skeleton. Empty when the calls in flight already reach
     the limit. Pure."""
-    raise NotImplementedError
+    events = list(events)
+    ended = {event.get("call") for event in events if event.get("ev") == "call.ended"}
+    flight = [event for event in events
+              if event.get("ev") == "call.started" and event.get("role") in DESIGN_ROLES
+              and under(plan.draft, event.get("subject")) and event.get("call") not in ended]
+    subjects = {event["subject"] for event in flight}
+    room = flow.target(plan.draft, events) - len(flight)
+    chosen = []
+    for part in fresh:
+        if len(chosen) >= room:
+            break
+        if part not in plan.parts or f"{plan.draft}/{part}" in subjects:
+            continue
+        role = "contract" if plan.parts[part].contract else "skeleton"
+        chosen.append((part, role))
+    return chosen
 
 
 def spend(calm: Mapping[str, bool] | None, hosts: Iterable[str]) -> dict[str, bool]:
@@ -65,7 +89,12 @@ def spend(calm: Mapping[str, bool] | None, hosts: Iterable[str]) -> dict[str, bo
     takes its calm extra place once per tick whichever plan uses it: in one decide a
     builder uses either its free places or its one extra (fab.dispatch.places), never both,
     so a builder a plan started on gives the later plans its free places only."""
-    raise NotImplementedError
+    if calm is None:
+        return {}
+    remaining = dict(calm)
+    for host in hosts:
+        remaining[host] = False
+    return remaining
 
 
 def unit(role: str, key: str) -> str:
@@ -76,4 +105,8 @@ def unit(role: str, key: str) -> str:
     a second unit of a name while the first runs, so one subject never has two calls
     running, even when the log does not show the first yet; two keys written alike only
     wait for each other. ValueError when role or key is empty."""
-    raise NotImplementedError
+    if not role or not key:
+        raise ValueError("role and key must not be empty")
+    key = "".join(character if character.isascii() and (character.isalnum() or character == "-")
+                  else "_" for character in key)
+    return f"fab-call-{role}-{key}"
