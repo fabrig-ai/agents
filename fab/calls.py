@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, log
+from fab import atomic, foreman, log
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -179,8 +179,8 @@ def _parts_table(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, s
 def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, call_id: str,
                  branch: str, report: str, plan: Plan | None = None) -> str:
     """The answerer's brief: its role text; the call's facts; the user's drafts when the plan
-    is given; each open question (task, run, text) with its task spec and the run's report
-    path; the inventory."""
+    is given; each queued question (task, run, text, foreman) with its task spec, the
+    asking run's report path and, when present, its foreman report path; the inventory."""
     sections = [
         ("Role", ROLES["answer"].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
@@ -193,8 +193,9 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
         label = path.relative_to(root) if path.is_absolute() else path
         run_id = question["run"]
         report_path = log.home() / "runs" / run_id / "report.md"
+        foreman_line = f"- Foreman: `{question['foreman']}`\n" if question.get("foreman") else ""
         sections.append((f"Question: {task.id} ({run_id})",
-                         f"- Task: {task.id}\n- Run: {run_id}\n- Report: `{report_path}`\n\n"
+                         f"- Task: {task.id}\n- Run: {run_id}\n- Report: `{report_path}`\n{foreman_line}\n"
                          f"{question['text']}\n\n## Task spec ({label})\n\n"
                          f"{(root / path).read_text(encoding='utf-8')}"))
     sections.append(("Inventory", render_inventory(inventory(root))))
@@ -400,6 +401,7 @@ def _call_result(text: str, report_path: Path) -> tuple[str, str]:
 def main(argv: list[str]) -> int:
     """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
 
+    Answer briefs contain only queued questions and include any foreman report.
     Amend requires a known chain in state amend and reuses its subject and branch.
     --brief-only prints the brief; otherwise print outcome and branch, exiting 0 for Done
     and 1 for a failed call, invalid chain or compilation error."""
@@ -440,7 +442,8 @@ def main(argv: list[str]) -> int:
             text = review_brief(plan, tasks, events, root, **facts)
             subject = f"{plan.draft}/review"
         else:
-            questions = [item for item in open_questions(events) if item["task"] in tasks]
+            questions = [dict(task=item.task, run=item.run, text=item.text, foreman=item.report)
+                         for item in foreman.questions(tasks, events) if item.state == "queued"]
             text = answer_brief(questions, tasks, root, plan=plan, **facts)
             subject = plan.draft
         if args.brief_only:

@@ -485,6 +485,46 @@ class MainTest(unittest.TestCase):
                 self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
                 self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
 
+    def test_answer_brief_only_lists_queued_questions_with_foreman_reports(self):
+        with tmp_home() as root:
+            fixture(root)
+            for name in ("four", "five"):
+                write(root / f"docs/plan/demo/tasks/{name}.md",
+                      f'+++\nid = "{name}"\npart = "base"\nkind = "feature"\n+++\nSpec {name}.\n')
+            for name, status in (("one", "queued"), ("two", "foreman"), ("three", "deciding"),
+                                 ("four", "settled"), ("five", "parked")):
+                task_id, run_id = f"demo/{name}", f"demo/{name}-1"
+                if status != "parked":
+                    log.append("run.started", task=task_id, run=run_id, kind="implement")
+                    log.append("run.ended", task=task_id, run=run_id, outcome="question")
+                log.append("question.asked", task=task_id, run=run_id, text=f"Choose for {name}?")
+                if status in ("queued", "deciding", "settled"):
+                    foreman = f"{task_id}/foreman-1"
+                    log.append("run.started", task=f"{task_id}/foreman", run=foreman,
+                               kind="foreman", asked=run_id)
+                    if status != "deciding":
+                        log.append("run.ended", task=f"{task_id}/foreman", run=foreman,
+                                   outcome="done" if status == "settled" else "failed",
+                                   report=str(log.home() / "runs" / foreman / "report.md"))
+            log.append("question.asked", task="other/task", run="other/task-1", text="Other plan")
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                self.assertEqual(calls.main(["answer", "--plan", str(root / "docs/plan/demo"),
+                                             "--brief-only"]), 0)
+            start.assert_not_called()
+            text = output.getvalue()
+            self.assertIn("Choose for one?", text)
+            self.assertIn("Choose for five?", text)
+            for name in ("two", "three", "four"):
+                self.assertNotIn(f"Choose for {name}?", text)
+            self.assertNotIn("Other plan", text)
+            self.assertIn(f"- Report: `{log.home()}/runs/demo/one-1/report.md`\n"
+                          f"- Foreman: `{log.home()}/runs/demo/one/foreman-1/report.md`\n", text)
+            self.assertEqual(text.count("- Foreman:"), 1)
+            self.assertIn(f"- Report: `{log.home()}/runs/demo/five-1/report.md`\n\nChoose for five?", text)
+            self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
     def test_main_runs_compiled_brief_and_returns_report_status(self):
         for role, outcome, code in (("skeleton", "done", 0), ("answer", "question", 1), ("review", "done", 0)):
             with self.subTest(role=role), tmp_home() as root:
