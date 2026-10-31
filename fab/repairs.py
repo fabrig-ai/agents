@@ -16,11 +16,12 @@ run.started carries `refused` instead of `asked`, so fab.foreman.questions leave
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import foreman
+from fab import foreman, log, run as runs, spec_edit
 from fab.hosts import Host
 from fab.plan import Task
 from fab.sh import Runner, run
@@ -90,7 +91,31 @@ def refusals(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Refusal]
     their order. Pure. Records missing a field the rule reads (a branch.rejected without
     task, branch, step or ts; a run.started without run, task, kind or ts; a run.ended
     without run, outcome or ts; a SETTLED without task, run, verdict or ts) are skipped."""
-    raise NotImplementedError
+    opened, last_runs, retries, foremen, ends, settlements = {}, {}, {}, {}, {}, {}
+    for position, event in enumerate(events):
+        kind = event.get("ev")
+        if kind == "branch.rejected" and all(k in event for k in ("task", "branch", "step", "ts")):
+            task = event["task"]
+            if task in tasks:
+                opened[task] = position, event, retries.get(task, -1) > last_runs.get(task, -1)
+        elif kind == "run.started" and all(k in event for k in ("run", "task", "kind", "ts")):
+            task = event["task"]
+            last_runs[task] = position
+            opened.pop(task, None)
+            if event["kind"] == KIND and "refused" in event:
+                foremen[task] = position, event
+        elif kind in ("branch.ready", "branch.landed") and "task" in event:
+            opened.pop(event["task"], None)
+        elif kind == "run.ended" and all(k in event for k in ("run", "outcome", "ts")):
+            ends.setdefault(event["run"], (position, event))
+        elif kind == SETTLED and all(k in event for k in ("task", "run", "verdict", "ts")):
+            if event["verdict"] == "retry":
+                retries[event["task"]] = position
+            ended = ends.get(event["run"])
+            if ended is not None and ended[0] < position:
+                settlements.setdefault((event["task"], event["run"]), (position, event))
+    return [_refusal(event, position, retried, foremen, ends, settlements)
+            for position, event, retried in sorted(opened.values(), key=lambda entry: entry[0])]
 
 
 def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
@@ -109,7 +134,16 @@ def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
     4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim.
 
     Pure: the caller reads the files and the log."""
-    raise NotImplementedError
+    facts = [f"- Run: {run_id}", f"- Task: {task.id} (spec `{task.path}`)",
+             f"- Branch: `{refusal.branch}` at `{refusal.tip or '-'}`",
+             f"- Step: `{refusal.step}`", f"- Next run: {refusal.kind}",
+             "- Retried unchanged since its last run: " + ("yes" if refusal.retried else "no"),
+             f"- Report: write it to `{report}`",
+             f"Your checkout is the task's repository at origin/{refusal.branch}, read-only."]
+    sections = [role.rstrip("\n"), "# The refusal\n\n" + "\n".join(facts),
+                "# The failing step's log\n\n```text\n" + text.rstrip("\n") + "\n```",
+                "# The task spec\n\n" + spec]
+    return "\n\n".join(sections) + ("" if spec.endswith("\n") else "\n")
 
 
 def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
@@ -129,7 +163,18 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
        The branch, not the tip: fab land's tip after its rebase was never pushed.
     fab.run.collect ends the run as any other: its run.ended carries the outcome refusals
     reads, and frees the worktree."""
-    raise NotImplementedError
+    run_id = runs.next_run(foreman.task_field(task.id), events)
+    spec, role = Path(task.path).read_text(), ROLE.read_text()
+    record = {"step": refusal.step, "log": refusal.log, "tip": refusal.tip}
+    if refusal.findings:
+        record["findings"] = refusal.findings
+    text = runs.refusal_text(record, task.repo, sh=sh)
+    report = str(Path(runs.remote_home(host)) / "runs" / run_id / "report.md")
+    compiled = brief(refusal, task, run_id=run_id, report=report, spec=spec, text=text, role=role)
+    return runs.launch_detached(host, run_id, task.repo, f"origin/{refusal.branch}", sh=sh,
+                                log_path=log_path, task=foreman.task_field(task.id), kind=KIND,
+                                branch=refusal.branch, base="origin/main", brief=compiled,
+                                effort=EFFORT, refused=refusal.tip, step=refusal.step)
 
 
 def remedy(refusal: Refusal, report: str) -> tuple[str, str, str]:
@@ -148,14 +193,32 @@ def remedy(refusal: Refusal, report: str) -> tuple[str, str, str]:
     - anything else: ("none", "no verdict: <the first line, at most 120 characters>", "").
     A report that is not the foreman's form never raises: the repair run starts as without
     a foreman."""
-    raise NotImplementedError
+    lines = report.splitlines()
+    first = next((i for i, line in enumerate(lines) if line.strip()), None)
+    text = lines[first].strip() if first is not None else ""
+    match = re.fullmatch(r"Done\s*:\s*(fix|retry)\s*:\s*(.+)", text)
+    if match is None or not match[2].strip():
+        return "none", "no verdict: " + text[:120], ""
+    verdict, reason = match[1], match[2].strip()
+    if verdict == "fix":
+        kept = [reason, *(line.rstrip() for line in lines[first + 1:first + 1 + SECTION_LINES])]
+        while not kept[-1]:
+            kept.pop()
+        return "fix", reason, "\n".join(kept)
+    if refusal.retried:
+        return "none", "retry refused: the branch was retried unchanged once since its last run", ""
+    if refusal.step.startswith(NEVER_RETRIED):
+        return "none", f"retry refused: step {refusal.step} is the branch's", ""
+    return "retry", reason, ""
 
 
 def section(refusal: Refusal, *, day: str, run_id: str, body: str) -> str:
     """The section the spec gains and the next run's brief quotes, ending with a newline:
     `## Repair (<day>, step <refusal.step>, foreman <run_id>)` (`## Rebase` when
     refusal.kind is rebase), a blank line, then body. Pure."""
-    raise NotImplementedError
+    title = "Rebase" if refusal.kind == "rebase" else "Repair"
+    heading = f"## {title} ({day}, step {refusal.step}, foreman {run_id})"
+    return heading + "\n\n" + body.rstrip("\n") + "\n"
 
 
 def with_section(spec: str, text: str, *, run_id: str) -> str:
@@ -164,7 +227,10 @@ def with_section(spec: str, text: str, *, run_id: str) -> str:
     A spec that already holds a line starting `## Repair (` or `## Rebase (` and ending
     ` foreman <run_id>)` is returned unchanged: the section was recorded before. Otherwise
     the spec's trailing newlines are stripped and one blank line and text follow. Pure."""
-    raise NotImplementedError
+    if any(line.startswith(("## Repair (", "## Rebase ("))
+           and line.endswith(f" foreman {run_id})") for line in spec.splitlines()):
+        return spec
+    return spec.rstrip("\n") + "\n\n" + text.rstrip("\n") + "\n"
 
 
 def commit(refusal: Refusal, task: Task, text: str, checkout: Path, *, run_id: str,
@@ -175,4 +241,31 @@ def commit(refusal: Refusal, task: Task, text: str, checkout: Path, *, run_id: s
     fab.spec_edit.commit(task, checkout, <with_section of the spec, text, run_id>,
     branch="repairs/<run_id>", message="Write <task.id>'s <refusal.kind> from its refusal
     at <refusal.step>", worktree=FAB_HOME/runs/<run_id>/wt, sh=sh)."""
-    raise NotImplementedError
+    return spec_edit.commit(
+        task, checkout, lambda spec: with_section(spec, text, run_id=run_id),
+        branch=f"repairs/{run_id}",
+        message=f"Write {task.id}'s {refusal.kind} from its refusal at {refusal.step}",
+        worktree=log.home() / "runs" / run_id / "wt", sh=sh)
+
+
+def _refusal(event: dict, position: int, retried: bool, foremen: dict, ends: dict,
+             settlements: dict) -> Refusal:
+    """Resolve one open refusal from indexes in log order."""
+    task, stamp = event["task"], event["ts"]
+    state, since, foreman_id, report, verdict, text = "foreman", stamp, None, "", "", ""
+    started = foremen.get(foreman.task_field(task))
+    if started is not None and started[0] > position:
+        foreman_id, state, since = started[1]["run"], "deciding", started[1]["ts"]
+        ended = ends.get(foreman_id)
+        if ended is not None and ended[0] > started[0]:
+            last = ended[1]
+            state = "decided" if last["outcome"] == "done" else "fallback"
+            since, report = last["ts"], last.get("report", "")
+            settled = settlements.get((task, foreman_id))
+            if state == "decided" and settled is not None and settled[0] > ended[0]:
+                state, since = "settled", settled[1]["ts"]
+                verdict, text = settled[1]["verdict"], settled[1].get("section", "")
+    return Refusal(task, event["branch"], event.get("tip", ""), event["step"],
+                   event.get("log", ""), event.get("findings", ""), stamp,
+                   "rebase" if event["step"] in REBASE_STEPS else "repair", state, since,
+                   retried, foreman_id, report, verdict, text)
