@@ -926,7 +926,11 @@ is four plan options on today's mechanism, not a second engine.
   is resolved by recounting, as the manual lead did: the trunk's side of
   the file, then `python3 -I -B scripts/old_forms.py --write` in that tree,
   which must exit 0 (it refuses a raise). Replaying codex-kit's 24 branches
-  in fab's order, 17 merges conflict, every one on that file alone. Any
+  in fab's order, 17 merges conflict, every one on that file alone. Every merge, clean or recounted, then runs `old_forms.py` (no
+  `--write`) in each tree it touches, on the merged tree: a raise over the
+  trunk's baseline is refused as `gate:ratchet`, since a branch based before
+  a form was counted (codex-kit's abort, before the ratchets) escapes the
+  branch's own ratchet gate. Any
   other conflict, or a recount that exits non-zero, aborts the merge and logs
   `branch.rejected` with step `merge` and the conflict as `findings`, so a
   rebase run follows (13.1's refusal foreman first). Calls' branches

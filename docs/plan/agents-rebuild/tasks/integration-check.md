@@ -58,6 +58,13 @@ full checks (`replay-trunk`).
   the merge (`git -c user.name=fab -c user.email=fab@localhost commit
   --no-edit`) and goes on as a clean merge; a recount that fails, or any
   other conflict, aborts and rejects as before (the findings say which).
+- **The trunk's ratchet** in `_merge_branch`: after every merge, clean or
+  recounted, and before the push, run `python3 -I -B scripts/old_forms.py`
+  (no `--write`; cwd the tree) for each tree in `fab.gate.TREES` that the
+  merge changes and that has the script; a non-zero exit resets the checkout
+  to `origin/<trunk>` and logs `branch.rejected` with step `gate:ratchet`
+  and its output as `findings` (the repair path takes it). A test: a clean
+  merge that raises a count is refused and the trunk does not move.
 - **`fab/run.py`**: `launch(..., command: Sequence[str] | None = None)`:
   when given, it is run with BRIEF, WORKDIR and REPORT appended instead of
   the Codex launcher; the rest (brief written, `<id> <state>` read,
