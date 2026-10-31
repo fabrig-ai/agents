@@ -18,7 +18,7 @@ from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import log
+from fab import atomic, log
 from fab.sh import Failed, Runner, run
 
 CAPACITY = "Selected model is at capacity. Please try a different model."
@@ -87,9 +87,7 @@ def start(brief: Path, workdir: Path, report: Path, *, effort: str = "high", rea
             continue
     meta = {"brief": str(brief), "dir": str(workdir), "report": str(report),
             "effort": effort, "read_only": read_only, "model": model, "started": log.now()}
-    sibling = state / "meta.json.tmp"
-    sibling.write_text(json.dumps(meta) + "\n", encoding="utf-8")
-    sibling.replace(state / "meta.json")
+    atomic.write(state / "meta.json", json.dumps(meta) + "\n")
     launcher = Path(__file__).resolve().parent.parent / "bin/fab"
     sh(["systemd-run", "--user", "--collect", "--quiet", "--unit", f"fab-codex-{run_id}",
         "--property=UMask=0077", "--", sys.executable, "-I", "-B", str(launcher),
@@ -154,12 +152,6 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
     all_events = []
     tries = 0
 
-    def write(path: Path, text: str) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        sibling = path.with_name(path.name + ".tmp")
-        sibling.write_text(text, encoding="utf-8")
-        sibling.replace(path)
-
     with (state / "events.jsonl").open("a+b") as stdout, (state / "stderr.log").open("a+b") as stderr:
         while True:
             tries += 1
@@ -193,7 +185,7 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
                                if event.get("type") == "thread.started"
                                and isinstance(event.get("thread_id"), str) and event["thread_id"]), None)
                 if thread:
-                    write(thread_path, thread + "\n")
+                    atomic.write(thread_path, thread + "\n")
             if code == 0 or tries > len(DELAYS) or not thread or not at_capacity(events, errors):
                 break
             (sleep or time.sleep)(DELAYS[tries - 1])
@@ -206,10 +198,10 @@ def execute(run_id: str, *, sh: Runner = run, sleep: Callable[[float], None] | N
             message = "Failed: the run wrote no report.\n"
             if last.exists():
                 message += last.read_text(encoding="utf-8", errors="replace")
-        write(report, message)
+        atomic.write(report, message)
     result = {"exit": code, "tries": tries, "tokens": tokens(all_events), "ended": log.now()}
-    write(state / "result.json", json.dumps(result) + "\n")
-    write(state / "ended", "")
+    atomic.write(state / "result.json", json.dumps(result) + "\n")
+    atomic.write(state / "ended", "")
     return code
 
 

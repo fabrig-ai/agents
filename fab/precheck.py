@@ -4,11 +4,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import tempfile
 from collections.abc import Callable
 from pathlib import Path
 
-from fab import gate, log
+from fab import atomic, gate, log
 from fab.sh import Runner, run
 
 
@@ -29,12 +28,6 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
     def git(*args: str, check: bool = True):
         return sh(["git", *args], cwd=str(slot), check=check)
 
-    def write(path: Path, content: str):
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
-                                         prefix=path.name + ".", delete=False) as sibling:
-            sibling.write(content)
-        Path(sibling.name).replace(path)
-
     original = git("rev-parse", "HEAD").out.strip()
     branch = git("symbolic-ref", "--quiet", "HEAD", check=False).out.strip()
     git("fetch", "origin")
@@ -43,7 +36,7 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
     directory = (home if home is not None else log.home()) / "precheck"
     directory.mkdir(parents=True, exist_ok=True)
     log_path = directory / f"{tip}.log"
-    write(log_path, "")
+    atomic.write(log_path, "")
     receipt = {"tip": tip, "main": main_tip, "selection": "docs", "steps": [],
                "outcome": "conflict", "log": str(log_path)}
     meta = None
@@ -58,7 +51,7 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
         git("checkout", "--detach", "--force", main_tip)
         merged = git("-c", "user.name=fab", "-c", "user.email=fab@localhost",
                      "merge", "--no-ff", "--no-edit", tip, check=False)
-        write(log_path, merged.out + merged.err)
+        atomic.write(log_path, merged.out + merged.err)
         if not merged.ok:
             git("merge", "--abort")
         else:
@@ -79,7 +72,7 @@ def precheck(slot: Path, tip: str, *, home: Path | None = None, sh: Runner = run
             git("checkout", "--detach", "--force", original)
         git("clean", "-fd")
     receipt["at"] = log.now()
-    write(directory / f"{tip}.json", json.dumps(receipt, indent=2) + "\n")
+    atomic.write(directory / f"{tip}.json", json.dumps(receipt, indent=2) + "\n")
     return receipt
 
 
