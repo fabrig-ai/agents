@@ -811,3 +811,100 @@ class LaunchTest(unittest.TestCase):
             self.assertEqual(len(fake.calls), 1)
             self.assertFalse((home / "fab/runs/call-2/brief.md").exists())
             self.assertEqual(log.read(), [])
+
+
+class LaunchDetachedTest(unittest.TestCase):
+    def launch(self, fake):
+        """Use the shared launch path with foreman-specific event fields."""
+        return run.launch_detached(HOST, "draft/task/foreman-1", "agents", "origin/main",
+                                   task="draft/task/foreman", kind="foreman", branch=TASK.id,
+                                   base="origin/main", brief="Decide this.\n", effort="medium",
+                                   asked="draft/task-1", sh=fake)
+
+    def test_worktree_is_detached_after_fetch_and_launch_is_read_only(self):
+        with tmp_home() as home:
+            fake = starter()
+            run_id = self.launch(fake)
+            clone, worktree = str(ROOT / "repos/agents"), str(ROOT / "wt" / run_id)
+            self.assertEqual(command(fake.calls[2]), ["git", "-C", clone, "fetch", "origin"])
+            self.assertEqual(command(fake.calls[3]),
+                             ["git", "-C", clone, "worktree", "add", "--detach", worktree, "origin/main"])
+            self.assertEqual(command(fake.calls[-1]),
+                             ["fab", "codex", "start", "--effort", "medium", "--model", run.MODEL,
+                              "--read-only", str(ROOT / "runs" / run_id / "brief.md"), worktree,
+                              str(ROOT / "runs" / run_id / "report.md")])
+            self.assertEqual((home / "fab/runs" / run_id / "brief.md").read_text(), "Decide this.\n")
+            record, = log.read()
+            self.assertEqual(record["run"], run_id)
+            self.assertEqual(record["kind"], "foreman")
+            self.assertEqual(record["task"], "draft/task/foreman")
+            self.assertEqual(record["asked"], "draft/task-1")
+            self.assertEqual(record["dir"], worktree)
+
+    def test_failed_launch_removes_added_worktree_and_reraises(self):
+        with tmp_home():
+            fake = FakeRunner()
+            def answer(call):
+                argv = command(call)
+                if argv[:3] == ["fab", "codex", "start"]:
+                    return Result(2, err="launch refused")
+                if "remove" in argv:
+                    return Result(1, err="cleanup refused")
+                return Result(0)
+            fake.on(["ssh"], answer)
+            with self.assertRaisesRegex(Failed, "launch refused"):
+                self.launch(fake)
+            self.assertEqual(command(fake.calls[-1]),
+                             ["git", "-C", str(ROOT / "repos/agents"), "worktree", "remove", "--force",
+                              str(ROOT / "wt/draft/task/foreman-1")])
+            self.assertEqual(log.read(), [])
+
+    def test_cleanup_exception_does_not_mask_launch_error(self):
+        with tmp_home():
+            def answer(call):
+                argv = command(call)
+                if "remove" in argv:
+                    raise OSError("cleanup unavailable")
+                if argv[:3] == ["fab", "codex", "start"]:
+                    return Result(2, err="launch refused")
+                return Result(0)
+            fake = FakeRunner().on(["ssh"], answer)
+            with self.assertRaisesRegex(Failed, "launch refused"):
+                self.launch(fake)
+            self.assertEqual(log.read(), [])
+
+    def test_failed_worktree_add_does_not_remove_or_launch(self):
+        with tmp_home():
+            add = ssh(HOST.ssh, ["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
+                                "--detach", str(ROOT / "wt/draft/task/foreman-1"), "origin/main"])
+            fake = FakeRunner().on(add, Result(1, err="add refused"))
+            with self.assertRaisesRegex(Failed, "add refused"):
+                self.launch(fake)
+            self.assertEqual(fake.calls[-1].argv, add)
+            self.assertEqual(len(fake.calls), 4)
+            self.assertEqual(log.read(), [])
+
+    def test_failed_brief_write_removes_added_worktree(self):
+        with tmp_home():
+            fake = FakeRunner()
+            def answer(call):
+                argv = command(call)
+                if argv[:2] == ["bash", "-c"] and "cat >" in argv[2]:
+                    return Result(1, err="write refused")
+                return Result(0)
+            fake.on(["ssh"], answer)
+            with self.assertRaisesRegex(Failed, "write refused"):
+                self.launch(fake)
+            self.assertIn("remove", command(fake.calls[-1]))
+            self.assertEqual(log.read(), [])
+
+    def test_custom_log_path_is_forwarded(self):
+        with tmp_home() as home:
+            path = home / "custom/log.jsonl"
+            run.launch_detached(HOST, "review-1", "agents", "tip-sha", task="call", kind="review",
+                                branch="calls/call", base="base-sha", brief="Review.\n", effort="medium",
+                                call="call", tip="tip-sha", sh=starter(), log_path=path)
+            record, = log.read(path)
+            self.assertEqual(record["call"], "call")
+            self.assertEqual(record["tip"], "tip-sha")
+            self.assertEqual(log.read(), [])

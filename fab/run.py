@@ -326,7 +326,19 @@ def launch_detached(host: Host, run_id: str, repo: str, rev: str, *, sh: Runner 
     effort and run.started's extra fields). A failure after the worktree is added removes it
     (`git -C <clone> worktree remove --force <worktree>` over ssh, errors ignored) and
     re-raises. collect frees the worktree when the run ends, as for any worktree run."""
-    raise NotImplementedError
+    clone = fetch_clone(host, repo, sh=sh)
+    worktree = str(Path(remote_home(host)) / "wt" / run_id)
+    sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "add", "--detach", worktree, rev]),
+       check=True)
+    try:
+        return launch(host, run_id, workdir=worktree, read_only=True, sh=sh,
+                      log_path=log_path, **launched)
+    except BaseException:
+        try:
+            sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "remove", "--force", worktree]))
+        except Exception:
+            pass
+        raise
 
 
 def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: Runner = run,

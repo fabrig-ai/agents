@@ -15,7 +15,7 @@ from pathlib import Path
 
 from fab import calls, log, run as runs
 from fab.hosts import Host
-from fab.sh import Runner, run, ssh
+from fab.sh import Runner, run
 
 REVIEWED = ("skeleton", "answer", "review")  # call roles whose branch is reviewed before it lands
 AMEND = "amend"  # the role of the call that answers a refusal on the same branch
@@ -184,16 +184,14 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
        refs/remotes/origin/main <tip>`; stat `git diff --stat <base> <tip>`; diff
        `git diff <base> <tip>`. A failure raises fab.sh.Failed and starts nothing.
     2. The run id fab.run.next_run(chain.root, events): `<root>-<n>`.
-    3. On host: clone = fab.run.fetch_clone(host, repo); the worktree
-       `<fab.run.remote_home(host)>/wt/<run>`, added with `git -C <clone> worktree add
-       --detach <worktree> <tip>` over ssh (check=True).
-    4. fab.run.launch(host, run_id, task=chain.root, kind=KIND, workdir=<worktree>,
-       branch=chain.branch, base=<base>, brief=brief(...), effort=EFFORT, read_only=True,
-       call=chain.latest, tip=<tip>), the brief's report being
-       `<remote_home>/runs/<run>/report.md`, where launch puts it.
-    A failure after the worktree is added removes it (`git -C <clone> worktree remove --force
-    <worktree>`, errors ignored) and re-raises. fab.run.collect ends the run as any other:
-    its run.ended carries the outcome the chain reads, and frees the worktree."""
+    3. fab.run.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
+       branch=chain.branch, base=<base>, brief=brief(...), effort=EFFORT,
+       call=chain.latest, tip=<tip>, sh=sh, log_path=log_path), the brief's report being
+       `<fab.run.remote_home(host)>/runs/<run>/report.md`, where launch puts it.
+       launch_detached fetches the builder's clone and adds the detached worktree before
+       launching read-only; on a launch failure it removes the worktree and re-raises.
+    fab.run.collect ends the run as any other: its run.ended carries the outcome the chain
+    reads, and frees the worktree."""
     def git(*argv):
         return sh(["git", *argv], cwd=str(checkout), check=True).out
 
@@ -204,22 +202,11 @@ def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[
     diff = git("diff", base, tip)
     run_id = runs.next_run(chain.root, events)
     root = Path(runs.remote_home(host))
-    clone = runs.fetch_clone(host, repo, sh=sh)
-    worktree = str(root / "wt" / run_id)
-    sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "add", "--detach", worktree, tip]),
-       check=True)
-    try:
-        text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
-                     report=str(root / "runs" / run_id / "report.md"))
-        return runs.launch(host, run_id, task=chain.root, kind=KIND, workdir=worktree,
-                           branch=chain.branch, base=base, brief=text, effort=EFFORT,
-                           read_only=True, call=chain.latest, tip=tip, sh=sh, log_path=log_path)
-    except BaseException:
-        try:
-            sh(ssh(host.ssh, ["git", "-C", str(clone), "worktree", "remove", "--force", worktree]))
-        except Exception:
-            pass
-        raise
+    text = brief(chain, run_id=run_id, base=base, tip=tip, stat=stat, diff=diff,
+                 report=str(root / "runs" / run_id / "report.md"))
+    return runs.launch_detached(host, run_id, repo, tip, task=chain.root, kind=KIND,
+                                branch=chain.branch, base=base, brief=text, effort=EFFORT,
+                                call=chain.latest, tip=tip, sh=sh, log_path=log_path)
 
 
 def _fold_call(event: dict, position: int, started: dict, owners: dict, folded: dict) -> None:
