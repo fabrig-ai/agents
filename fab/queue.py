@@ -199,69 +199,7 @@ class Queue:
             if self._git("status", "--porcelain").out:
                 raise RuntimeError("queue checkout has uncommitted or untracked files")
             prepared = True
-            parent = self._git("rev-parse", "origin/main").out.strip()
-            record["parent"] = parent
-            merged, conflicts = build_batch(self.repo, branches, parent, sh=self.sh)
-            self.last_merged = merged
-            if conflicts:
-                atomic.extend(detail, "\n".join(output for _, output in conflicts) + "\n")
-            conflicted = {branch for branch, _ in conflicts}
-            reachable = [branch for branch in branches if branch not in conflicted and branch not in merged]
-            green = True
-            outcomes = []
-            if merged:
-                paths = gate.changed_paths(self.repo, base=parent, sh=self.sh)
-                meta = None
-
-                def load(repo):
-                    nonlocal meta
-                    if meta is None:
-                        meta = gate.metadata(repo, sh=self.sh) if self.load is None else self.load(repo)
-                    return meta
-
-                selected = "full" if self._force_full or self.state["batches_since_full"] + 1 >= self.full_every else \
-                    gate.select(self.repo, paths, base=parent, sh=self.sh, load=load)
-                record["selection"] = sorted(selected) if isinstance(selected, set) else selected
-                outcomes = gate.run_steps(gate.ratchet_steps(self.repo, paths, write=True), detail, sh=self.sh)
-                green = all(step.green for step in outcomes)
-                if green:
-                    baselines = [f"{tree}/scripts/old-forms.txt" for tree in gate.TREES]
-                    changed = self._git("diff", "--name-only", "-z", "--", *baselines).out.split("\0")[:-1]
-                    if changed:
-                        self._git("add", "--", *changed)
-                        self._git("commit", "-m", "Lower old-form baselines")
-                    if self._git("status", "--porcelain").out:
-                        raise RuntimeError("ratchet left changes outside its baselines")
-                    if isinstance(selected, set) and any(path.endswith(".rs") for path in paths):
-                        load(self.repo)
-                    outcomes += gate.run_steps(gate.check_steps(self.repo, selected, paths, meta, lane="gate"),
-                                               detail, sh=self.sh)
-                    green = all(step.green for step in outcomes)
-                record["steps"] = [f"{step.name}:{step.code}:{step.seconds:.3f}" for step in outcomes]
-                self.state["batches_since_full"] = 0 if selected == "full" else self.state["batches_since_full"] + 1
-                if not green and selected == "full":
-                    self._force_full = True
-                if green:
-                    if self._git("status", "--porcelain").out:
-                        raise RuntimeError("checks left uncommitted or untracked files")
-                    candidate = self._git("rev-parse", "HEAD").out.strip()
-                    self._git("push", f"--force-with-lease=refs/heads/main:{parent}",
-                              "origin", f"{candidate}:refs/heads/main")
-                    # Advance the local base before checking the next bisection half.
-                    self._git("update-ref", "refs/remotes/origin/main", candidate)
-            cleanup_error = None
-            if green:
-                main = self._git("rev-parse", "origin/main").out.strip()
-                cleanup_error = self._retire([*merged, *reachable], main)
-            elif len(merged) == 1:
-                failed = next(step.name for step in outcomes if not step.green)
-                self._reject(merged[0], failed, detail)
-            for branch, _ in conflicts:
-                self._reject(branch, "merge", detail)
-            record["outcome"] = ("conflict" if conflicts else "green") if green else "red"
-            if cleanup_error:
-                record.update(outcome="error", error=cleanup_error)
-                atomic.extend(detail, f"\n{cleanup_error}\n")
+            green = self._batch(branches, detail, record)
             self._save()
             clean = green
             return green
@@ -272,16 +210,89 @@ class Queue:
             self._error_recorded = True
             raise
         finally:
+            self._finish(started_ns, started, record, prepared, clean)
+
+    def _batch(self, branches: Sequence[Branch], detail: Path, record: dict) -> bool:
+        """Merge, check and publish one batch, recording rejections and retirement errors."""
+        parent = self._git("rev-parse", "origin/main").out.strip()
+        record["parent"] = parent
+        merged, conflicts = build_batch(self.repo, branches, parent, sh=self.sh)
+        self.last_merged = merged
+        if conflicts:
+            atomic.extend(detail, "\n".join(output for _, output in conflicts) + "\n")
+        conflicted = {branch for branch, _ in conflicts}
+        reachable = [branch for branch in branches if branch not in conflicted and branch not in merged]
+        green = True
+        outcomes = []
+        if merged:
+            paths = gate.changed_paths(self.repo, base=parent, sh=self.sh)
+            green, outcomes, _ = self._checks(parent, paths, detail, record)
+            if green:
+                self._publish(parent)
+        cleanup_error = None
+        if green:
+            main = self._git("rev-parse", "origin/main").out.strip()
+            cleanup_error = self._retire([*merged, *reachable], main)
+        elif len(merged) == 1:
+            failed = next(step.name for step in outcomes if not step.green)
+            self._reject(merged[0], failed, detail)
+        for branch, _ in conflicts:
+            self._reject(branch, "merge", detail)
+        record["outcome"] = ("conflict" if conflicts else "green") if green else "red"
+        if cleanup_error:
+            record.update(outcome="error", error=cleanup_error)
+            atomic.extend(detail, f"\n{cleanup_error}\n")
+        return green
+
+    def _checks(self, parent: str, paths: Sequence[str], detail: Path,
+                record: dict) -> tuple[bool, list[gate.StepResult], str | set[str]]:
+        """Select and check the candidate, committing lowered baselines and counting full checks."""
+        load = gate.loader(self.load, sh=self.sh)
+        selected = "full" if self._force_full or self.state["batches_since_full"] + 1 >= self.full_every else \
+            gate.select(self.repo, paths, base=parent, sh=self.sh, load=load)
+        record["selection"] = gate.shown(selected)
+        outcomes = gate.run_steps(gate.ratchet_steps(self.repo, paths, write=True), detail, sh=self.sh)
+        green = all(step.green for step in outcomes)
+        if green:
+            baselines = [f"{tree}/scripts/old-forms.txt" for tree in gate.TREES]
+            changed = self._git("diff", "--name-only", "-z", "--", *baselines).out.split("\0")[:-1]
+            if changed:
+                self._git("add", "--", *changed)
+                self._git("commit", "-m", "Lower old-form baselines")
+            if self._git("status", "--porcelain").out:
+                raise RuntimeError("ratchet left changes outside its baselines")
+            meta = load(self.repo) if isinstance(selected, set) else None
+            outcomes += gate.run_steps(gate.check_steps(self.repo, selected, paths, meta, lane="gate"),
+                                       detail, sh=self.sh)
+            green = all(step.green for step in outcomes)
+        record["steps"] = gate.step_texts(outcomes)
+        self.state["batches_since_full"] = 0 if selected == "full" else self.state["batches_since_full"] + 1
+        if not green and selected == "full":
+            self._force_full = True
+        return green, outcomes, selected
+
+    def _publish(self, parent: str) -> None:
+        """Push a clean candidate with a lease on main's parent and advance the local base."""
+        if self._git("status", "--porcelain").out:
+            raise RuntimeError("checks left uncommitted or untracked files")
+        candidate = self._git("rev-parse", "HEAD").out.strip()
+        self._git("push", f"--force-with-lease=refs/heads/main:{parent}",
+                  "origin", f"{candidate}:refs/heads/main")
+        # Advance the local base before checking the next bisection half.
+        self._git("update-ref", "refs/remotes/origin/main", candidate)
+
+    def _finish(self, started_ns: int, started: str, record: dict, prepared: bool, clean: bool) -> None:
+        """Reset unsuccessful attempts, sweep old build output and always record the batch."""
+        try:
+            if prepared and not clean:
+                self._git("reset", "--hard", "origin/main")
+                self._git("clean", "-fd")
+        finally:
             try:
-                if prepared and not clean:
-                    self._git("reset", "--hard", "origin/main")
-                    self._git("clean", "-fd")
-            finally:
-                try:
-                    record["freed"] = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
-                except Exception as error:
-                    record["sweep_error"] = str(error)
-                log.append("batch", path=self.log_path, ts=started, **record)
+                record["freed"] = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
+            except Exception as error:
+                record["sweep_error"] = str(error)
+            log.append("batch", path=self.log_path, ts=started, **record)
 
     def cycle(self) -> bool:
         """Consume queue-untry requests (forget, save, remove, record), then fetch --prune.
