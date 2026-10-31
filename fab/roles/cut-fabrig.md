@@ -16,7 +16,8 @@ Specs for direct parts belong in that plan's `tasks/`.
   contract calls write full Rust signatures with `///` contracts and
   `todo!()` bodies; test vocabulary is Rust builders, fixtures and assertion
   functions.
-- Validate the plan and specs in their tree's plan directory. Where Rust
+- Validate with `fab status <the plan directory>` (`fab` is on PATH;
+  fabrig has no `bin/fab`, and `bin/fab test` does not apply here). Where Rust
   code must compile, run `heavy cargo check -p <crate> --tests` and fix your
   own compile errors. Every build and test runs through `heavy`, one at a
   time; `cargo fmt` runs directly. Only `cargo check -p` of the crates you touch runs here; tests and the workspace build on the builders. Heavy exit 75
