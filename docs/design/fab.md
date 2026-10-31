@@ -1065,6 +1065,11 @@ only as tweaks once a replay matches its run.
   trunk after each merge, the codex-kit run's lesson (two parallel branches
   meeting at clippy found only at the end check); once the replay matches
   the manual run.
+- A plan `[[question]]` naming a direct part holds that part's tasks, not
+  only its design: today a direct part's specs run while its question is
+  open (the first dry cut of the component kit asked the user 6.1 and its
+  task would have run anyway). cut-direct.md now tells the cut to decide
+  what its sources settle and to make no task wait for a question.
 - Claude implementer runs (`claude -p` in a slot, measured from its
   stream) for a replay of the Claude-only manual run (`coord/manual-kit/`).
 - A cap on a call's context or turns, once the user sets one from the
