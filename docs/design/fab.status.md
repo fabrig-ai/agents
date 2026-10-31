@@ -163,6 +163,14 @@
   red rejects or bisects. The bound of two collateral reds per tip and five
   retried tests per red are first guesses, to be set from the queue's
   records.
+- **The buffer's order is a skeleton:** `fab/buffer.py` holds 13.10's
+  groups and the sort, `fab.plan.Task` its `consolidation` field, and
+  `fab/roles/reviewer.md` asks the review call to mark its specs with it.
+  The task `buffer-order` fills the sort, reads the header and makes
+  `decide` start runs in the sort's order, after `receipts-ready` and
+  `plans-tick`. Until then `decide` starts rejected tasks first, then
+  runnable ones in their specs' order, and a spec's `consolidation` key is
+  ignored.
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a

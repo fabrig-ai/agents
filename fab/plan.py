@@ -73,6 +73,7 @@ class Task:
     minutes: int
     body: str
     path: str
+    consolidation: bool = False  # written by a structure review; heads the buffer (13.10)
 
     @property
     def draft(self) -> str:

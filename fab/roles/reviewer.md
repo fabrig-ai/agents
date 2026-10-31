@@ -21,10 +21,11 @@ your report.
 - **Consolidation task specs**, one file per task under the plan's specs
   directory, in the format of the plan's existing specs: merges of
   near-duplicates, renames to what a thing does, splits of what is too long
-  or does two things. Each names the part whose code it changes most. Its
-  kind is `interface` when it changes or removes a public signature (the
-  shape gate allows that only to interface and migration tasks), `feature`
-  otherwise. It lists the files it may change, says what changes and why,
+  or does two things. Each names the part whose code it changes most and has
+  `consolidation = true` in its header, which starts it before any other
+  runnable task. Its kind is `interface` when it changes or removes a public
+  signature (the shape gate allows that only to interface and migration
+  tasks), `feature` otherwise. It lists the files it may change, says what changes and why,
   and how it is accepted: the suite passes unchanged in behaviour.
 - **New pairs in the taste file** (`fab/taste.md`), under its Pairs heading:
   a bad and a good snippet from this repository and one line on why. Add a

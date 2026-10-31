@@ -106,8 +106,10 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `effort` (medium or high) and `minutes` (the expected implementer time,
   as 13.2 sizes them: one module or concept, about 400-500 production lines,
   30-60 minutes; in this repository, with its fast tests, tasks may come out
-  smaller, which does not carry over to fabrig). The body says what to fill, how it is accepted,
-  and the pre-approved options with their defaults.
+  smaller, which does not carry over to fabrig) and `consolidation` (true
+  for a structure review's task, 13.10; default false). The body says what
+  to fill, how it is accepted, and the pre-approved options with their
+  defaults.
 - **A task's status is computed:** `waiting` (a need has not landed),
   `runnable`, `running`, `parked` (a question is open, or the run failed and
   needs judgement), `done` (its run ended checked), `ready`, `landed`,
@@ -376,8 +378,8 @@ and Claude reads the code's structure in batches, never on the landing path.
   since the last review that ended done, the taste file, the inventory and
   the designs those branches cite; it reads full code only for what the
   digests flag and a sample. It writes consolidation task specs (merges,
-  renames, splits; kind `interface` when a signature changes) into the plan
-  and new pairs into the taste file, on its branch, which lands as a
+  renames, splits; kind `interface` when a signature changes; each marked
+  `consolidation = true`) into the plan and new pairs into the taste file, on its branch, which lands as a
   skeleton call's does. It never holds up a landing.
 - **A question from a call parks its subject:** a skeleton, answer or
   review call that ends with a question starts no further call for that
@@ -766,7 +768,15 @@ things fab follows, whatever the clock says:
 - **The buffer's order:** among runnable tasks, consolidation tasks from a
   structure review come first ("at the head of the buffer"), then repairs and
   rebases, then tasks of contract parts, then tasks by their part's slice, in
-  plan order.
+  plan order (`fab/buffer.py`, a pure sort the dispatcher applies before it
+  starts runs):
+  - a consolidation is a spec marked `consolidation = true` (section 4), a
+    group of its own whatever else holds of it;
+  - a repair or rebase is a task whose next run carries a refusal (a
+    `branch.rejected` since its last run); a rerun after an `Infra:`
+    outcome is not, and keeps its part's place;
+  - within each group, tasks go by the first slice that holds their part,
+    then their part's place in the plan, then their specs' order.
 - **Then, as written:** contracts land alone and their readers are pulled;
   probes run beside and their decisions land before their readers' skeletons;
   answers come in batches, at once when they hold up work; slices complete
@@ -798,6 +808,9 @@ things fab follows, whatever the clock says:
 - Elastic builders from `fab hosts check`'s numbers.
 - The flow's target and each builder's calm in the code report, beside runs
   in flight per hour; the target shared across plans (13.4).
+- The buffer's order across plans: each plan orders its own runnable tasks
+  and plans start runs in their listed order (13.4), so one plan's
+  consolidation can wait behind another plan's slice tasks.
 - The foreman for plans whose specs live in another repository: its answers
   and repair sections landing through that repository's landing, not `fab land`.
 - A repair run of this repository that starts without a foreman's section
