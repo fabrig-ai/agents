@@ -201,10 +201,20 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
                   for identifier, view in views.items() if view.status == status]
     actions.extend(_starts(candidates, views, events, free, limit - occupied))
 
+    design = _design_action(plan, tasks, views, hosts, len(candidates))
+    if design is not None:
+        actions.append(design)
+    return actions
+
+
+def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
+                   hosts: Mapping[str, Host], ready: int) -> Action | None:
+    """When the ready buffer is low, list undesigned parts whose dependencies have landed."""
     capacity = sum(host.places for host in hosts.values() if "builder" in host.roles)
-    if len(candidates) < plan.low * capacity:
+    if ready < plan.low * capacity:
         by_part = {part: [identifier for identifier, task in tasks.items() if task.part == part]
                    for part in plan.parts}
+
         def landed(part_id):
             part = plan.parts.get(part_id)
             return part is not None and (part.done or bool(by_part[part_id]) and all(
@@ -213,8 +223,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
         eligible = [part.id for part in plan.parts.values() if not part.done and not by_part[part.id]
                     and all(landed(need) for need in part.needs)]
         if eligible:
-            actions.append(Action("design", detail=", ".join(eligible)))
-    return actions
+            return Action("design", detail=", ".join(eligible))
+    return None
 
 
 def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
@@ -236,25 +246,31 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         if not available:
             continue
         host = min(available, key=lambda name: (-free[name], name))
-        history = [event for event in reversed(events) if event.get("task") == identifier]
-        kind = "implement"
-        rejection = None
-        # history is newest first: a refusal since the last run still decides the kind, even
-        # when the task was parked and answered in between.
-        last = next((event for event in history if event.get("ev") in ("branch.rejected", "run.started")), {})
-        if view.status == "rejected" or last.get("ev") == "branch.rejected":
-            rejection = next(event for event in history if event.get("ev") == "branch.rejected")
-            kind = "rebase" if rejection.get("step") in ("rebase", "merge") else "repair"
-        else:
-            ended = next((event for event in history if event.get("ev") == "run.ended"), {})
-            if ended.get("outcome") == "infra":
-                kind = "repair"
+        kind, rejection = _start_kind(view, events)
         actions.append(Action("start", task=identifier, host=host, run_kind=kind,
                               detail=f"{kind} {host}", rejection=rejection))
         free[host] -= 1
         budget -= 1
 
     return actions
+
+
+def _start_kind(view: state.TaskView, events: list[dict]) -> tuple[str, dict | None]:
+    """Choose implement, repair or rebase, preserving a refusal since the last run as context."""
+    history = [event for event in reversed(events) if event.get("task") == view.id]
+    kind = "implement"
+    rejection = None
+    # history is newest first: a refusal since the last run still decides the kind, even
+    # when the task was parked and answered in between.
+    last = next((event for event in history if event.get("ev") in ("branch.rejected", "run.started")), {})
+    if view.status == "rejected" or last.get("ev") == "branch.rejected":
+        rejection = next(event for event in history if event.get("ev") == "branch.rejected")
+        kind = "rebase" if rejection.get("step") in ("rebase", "merge") else "repair"
+    else:
+        ended = next((event for event in history if event.get("ev") == "run.ended"), {})
+        if ended.get("outcome") == "infra":
+            kind = "repair"
+    return kind, rejection
 
 
 def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host], *,
@@ -291,17 +307,17 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             imported.add(key)
 
 
-def _land_branch(branch: str, task: str | None = None) -> None:
+def _land_branch(argv: list[str]) -> None:
     """Land with captured output so a refusal becomes one action failure line."""
     output = io.StringIO()
     with redirect_stdout(output):
-        refused = land.main([branch] + (["--task", task] if task is not None else []))
+        refused = land.main(argv)
     if refused:
         raise RuntimeError(output.getvalue().strip() or "landing refused")
 
 
-def _land_task(action: Action, tasks: Mapping[str, Task], *, sh: Runner,
-               log_path: Path | None) -> str:
+def _land(action: Action, tasks: Mapping[str, Task], *, sh: Runner,
+          log_path: Path | None) -> str:
     """Screen a task branch before landing, returning the action's printed detail."""
     findings = (gates.screen(tasks[action.task], log.read(log_path),
                             sh=sh, log_path=log_path)
@@ -309,7 +325,7 @@ def _land_task(action: Action, tasks: Mapping[str, Task], *, sh: Runner,
     if findings:
         return "rejected gate:" + ",".join(dict.fromkeys(
             finding.gate for finding in findings))
-    _land_branch(action.branch, action.task)
+    _land_branch([action.branch, "--task", action.task])
     return action.detail
 
 
@@ -359,7 +375,7 @@ def _call(action: Action, plan_dir: Path, *, sh: Runner, log_path: Path | None) 
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
     """Land an approved branch and record answers from the latest call's report or its root's."""
-    _land_branch(action.branch)
+    _land_branch([action.branch])
     chain = call_review.chains(log.read(log_path))[action.task]
     if chain.role == "answer":
         for identifier in dict.fromkeys(_answered(chain)):
@@ -376,7 +392,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "collect":
                 _collect(action, hosts, sh=sh, log_path=log_path)
             case "land":
-                detail = _land_task(action, tasks, sh=sh, log_path=log_path)
+                detail = _land(action, tasks, sh=sh, log_path=log_path)
             case "ready":
                 _ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
             case "start":
