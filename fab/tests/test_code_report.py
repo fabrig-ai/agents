@@ -542,3 +542,106 @@ class PartMeasuresTest(unittest.TestCase):
         self.assertEqual(code._part_numstat(self.plan, self.tasks, records, sh=self.sh),
                          {"core": (None, 100)})
         self.assertEqual(len(self.sh.calls), 2)
+
+
+class PartTimesTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(tmp_home())
+        self.plan, tasks, self.hosts = fixture()
+        self.tasks = {"demo/a": tasks["demo/a"]}
+        self.records = [
+            event("00:00", "call.started", None, call="unrelated", subject="demo2/cut", role="cut"),
+            event("00:01", "call.started", None, call="cut", subject="demo/cut", role="cut"),
+            event("00:04", "call.started", None, call="root", subject="demo/core", role="skeleton"),
+            event("00:05", "call.ended", None, call="root", subject="demo/core", role="skeleton"),
+            event("00:11", "call.finished", None, call="root", outcome="failed"),
+            event("00:12", "call.finished", None, call="root", outcome="done"),
+            event("00:15", "run.started", run="a-1", kind="implement"),
+            event("00:20", "run.ended", run="a-1", outcome="infra", minutes=999),
+            event("00:25", "run.started", run="a-2", kind="repair"),
+            event("00:40", "run.ended", run="a-2", outcome="done", minutes=999),
+            event("00:42", "branch.rejected", step="gate:files"),
+            event("00:47", "branch.ready", tip="tip"), landed("00:55"),
+        ]
+
+    def test_part_times_six_intervals_from_events_not_reported_minutes(self):
+        self.assertEqual(code.part_times(self.plan, self.tasks, self.records),
+                         [("core", 11.0, 3.0, 20.0, 2.0, 5.0, 8.0)])
+        rendered = code.render(self.plan, self.tasks, report.Sources(self.records, [], {}),
+                               self.hosts, report.Window(ts("00:45"), ts("01:00")))
+        self.assertIn("| Draft to skeleton | Spec to first run | Runs summed | Run end to checks | Checks to ready | Ready to landed |", rendered)
+        row = next(line for line in rendered.splitlines() if line.startswith("| core |"))
+        self.assertTrue(row.endswith("| 11.0 | 3.0 | 20.0 | 2.0 | 5.0 | 8.0 |"))
+        self.assertIn("| empty | 0 | 0 | 0 | 0.0 | 0 | unfinished |", rendered)
+
+    def test_part_times_queued_tasks_use_ready_as_the_checks_boundary(self):
+        records = [record for record in self.records if record["ev"] != "branch.rejected"]
+        tasks = {name: replace(task, repo="fabrig") for name, task in self.tasks.items()}
+        self.assertEqual(code.part_times(replace(self.plan, repo="fabrig"), tasks, records),
+                         [("core", 11.0, 3.0, 20.0, 7.0, 0.0, 8.0)])
+
+    def test_part_times_no_ready_agents_use_run_end_to_landing(self):
+        records = [record for record in self.records if record["ev"] != "branch.ready"]
+        self.assertEqual(code.part_times(self.plan, self.tasks, records),
+                         [("core", 11.0, 3.0, 20.0, 2.0, None, 15.0)])
+        tasks = {name: replace(task, repo="fabrig") for name, task in self.tasks.items()}
+        self.assertIsNone(code.part_times(replace(self.plan, repo="fabrig"), tasks, records)[0][-1])
+        records = [record for record in records if record["ev"] != "branch.rejected"]
+        rendered = code.render(self.plan, self.tasks, report.Sources(records, [], {}),
+                               self.hosts, report.Window(ts("00:00"), ts("01:00")))
+        row = next(line for line in rendered.splitlines() if line.startswith("| core |"))
+        self.assertTrue(row.endswith("| 11.0 | 3.0 | 20.0 | - | - | 15.0 |"))
+
+    def test_part_times_missing_boundaries_leave_other_intervals(self):
+        for missing, expected in (
+                ("call.started", (None, 3.0, 20.0, 2.0, 5.0, 8.0)),
+                ("call.finished", (None, None, 20.0, 2.0, 5.0, 8.0)),
+                ("run.started", (11.0, None, None, 2.0, 5.0, 8.0)),
+                ("run.ended", (11.0, 3.0, None, None, 5.0, 8.0))):
+            with self.subTest(missing=missing):
+                records = [record for record in self.records if record["ev"] != missing]
+                self.assertEqual(code.part_times(self.plan, self.tasks, records), [("core", *expected)])
+
+    def test_part_times_parallel_runs_and_final_waits_sum_per_task(self):
+        tasks = fixture()[1]
+        tasks = {name: task for name, task in tasks.items() if task.part == "core"}
+        records = [*self.records,
+                   event("00:18", "run.started", "demo/b", run="b-1", kind="implement"),
+                   event("00:30", "run.ended", "demo/b", run="b-1", outcome="done"),
+                   event("00:34", "branch.rejected", "demo/b", step="gate:files"),
+                   event("00:39", "branch.ready", "demo/b", tip="tip"), landed("00:50", "demo/b"),
+                   event("00:21", "branch.ready", tip="tip"),
+                   event("00:22", "branch.rejected", step="gate:files")]
+        records.sort(key=lambda record: record["ts"])
+        self.assertEqual(code.part_times(self.plan, tasks, records),
+                         [("core", 11.0, 3.0, 32.0, 6.0, 10.0, 19.0)])
+        records = [record for record in records if record.get("run") != "b-1" or record["ev"] != "run.ended"]
+        self.assertIsNone(code.part_times(self.plan, tasks, records)[0][3])
+        self.assertIsNone(code.part_times(self.plan, tasks, records)[0][4])
+
+    def test_part_times_chain_landing_includes_amendments_and_optimistic_start(self):
+        records = [record for record in self.records if record["ev"] != "call.finished"]
+        records += [event("00:10", "call.started", None, call="amend", role="amend", amends="root"),
+                    event("00:18", "branch.landed", "calls/amend", branch="calls/amend"),
+                    event("00:19", "call.finished", None, call="root", outcome="done")]
+        records.sort(key=lambda record: record["ts"])
+        self.assertEqual(code.part_times(self.plan, self.tasks, records)[0][1:3], (17.0, -3.0))
+
+    def test_part_times_unpaired_end_makes_run_sum_unknown_but_keeps_end_boundary(self):
+        records = [record for record in self.records
+                   if not (record["ev"] == "run.started" and record.get("run") == "a-2")]
+        self.assertEqual(code.part_times(self.plan, self.tasks, records),
+                         [("core", 11.0, 3.0, None, 2.0, 5.0, 8.0)])
+
+    def test_part_times_direct_spec_lands_with_cut_without_skeleton(self):
+        plan = replace(self.plan, parts={"core": replace(self.plan.parts["core"], mode="direct")})
+        records = [record for record in self.records if record.get("call") != "root"]
+        records.append(event("00:12", "call.finished", None, call="cut", outcome="done"))
+        records.sort(key=lambda record: record["ts"])
+        self.assertEqual(code.part_times(plan, self.tasks, records),
+                         [("core", None, 3.0, 20.0, 2.0, 5.0, 8.0)])
+
+    def test_part_times_unfinished_parts_have_no_measures(self):
+        records = [record for record in self.records if record["ev"] != "branch.landed"]
+        self.assertEqual(code.part_times(self.plan, self.tasks, records), [])
+        self.assertEqual(code.part_times(self.plan, {}, self.records), [])

@@ -338,6 +338,89 @@ def part_rows(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
     return rows
 
 
+def part_times(plan: Plan, tasks: Mapping[str, Task], events: list[dict]) -> list[tuple]:
+    """Finished parts' six minute intervals over the whole log (13.11), in plan order.
+
+    Draft start to skeleton landed and spec landed to first run are part boundaries.
+    Run durations and the final run's landing waits per task are summed; a missing
+    boundary in any task makes that interval None. Readying is also a checks boundary.
+    Agents tasks without ready use run end to landed in the last interval. Direct parts
+    have no skeleton interval; their specs land with the cut. Earlier optimistic starts
+    give a negative spec-to-run interval. Pure.
+    """
+    views = fold(tasks, events)
+    runs = spans(plan.draft, events)
+    draft_start = min((event["ts"] for event in events if event.get("ev") == "call.started"
+                       and isinstance(event.get("subject"), str)
+                       and (event["subject"] == plan.draft or event["subject"].startswith(plan.draft + "/"))),
+                      default=None)
+    rows = []
+    for part, definition in plan.parts.items():
+        members = {task.id: task for task in tasks.values() if task.part == part}
+        if not members or any(views[identifier].status != "landed" for identifier in members):
+            continue
+        direct = definition.mode == "direct"
+        subject = f"{plan.draft}/cut" if direct else f"{plan.draft}/{part}"
+        spec = _spec_landing(subject, events)
+        history = [span for span in runs if span.task in members]
+        first_run = min((span.start for span in history), default=None)
+        paired = {span.run for span in history if span.end is not None}
+        complete = history and all(span.end is not None for span in history) and not any(
+            event.get("ev") == "run.ended" and event.get("task") in members
+            and event.get("run") not in paired for event in events)
+        duration = sum((report.minutes(span.start, span.end) for span in history), 0.0) if complete else None
+        waits = [_task_waits(task, events) for task in members.values()]
+        totals = [sum(values, 0.0) if all(value is not None for value in values) else None
+                  for values in zip(*waits)]
+        rows.append((part, _interval(draft_start, spec) if not direct else None,
+                     _interval(spec, first_run), duration, *totals))
+    return rows
+
+
+def _interval(start: str | None, end: str | None) -> float | None:
+    """Minutes between present boundaries, None when either is absent."""
+    return report.minutes(start, end) if start is not None and end is not None else None
+
+
+def _spec_landing(subject: str, events: list[dict]) -> str | None:
+    """The part's landed spec, including amendments; branch records precede finish records."""
+    calls = {event["call"] for event in events if event.get("ev") in ("call.started", "call.ended")
+             and event.get("subject") == subject and event.get("role") in ("skeleton", "contract", "cut")
+             and event.get("call")}
+    while True:
+        amended = calls | {event["call"] for event in events if event.get("ev") == "call.started"
+                           and event.get("amends") in calls and event.get("call")}
+        if amended == calls:
+            break
+        calls = amended
+    branches = {f"calls/{call}" for call in calls}
+    branches.update(event["branch"] for event in events if event.get("ev") == "call.started"
+                    and event.get("call") in calls and event.get("branch"))
+    landings = [event["ts"] for event in events if event.get("ev") == "branch.landed"
+                and (event.get("branch") in branches or event.get("task") in branches)]
+    finished = [event["ts"] for event in events if event.get("ev") == "call.finished"
+                and event.get("call") in calls and event.get("outcome") == "done"]
+    return max(landings or finished, default=None)
+
+
+def _task_waits(task: Task, events: list[dict]) -> tuple:
+    """Final-run to checks, checks to ready and ready to landed for one task."""
+    history = [event for event in events if event.get("task") == task.id]
+    landed = max((event["ts"] for event in history if event.get("ev") == "branch.landed"), default=None)
+    runs = [event for event in history if event.get("ev") in ("run.started", "run.ended")
+            and landed is not None and event["ts"] <= landed]
+    final = max(runs, key=lambda event: (event["ts"], event["ev"] == "run.ended"), default=None)
+    ended = final["ts"] if final is not None and final["ev"] == "run.ended" else None
+    after = final["ts"] if final is not None else ""
+    boundaries = [event for event in history if landed is not None
+                  and after <= event["ts"] <= landed]
+    checks = min((event["ts"] for event in boundaries
+                  if event.get("ev") in ("branch.rejected", "branch.ready")), default=None)
+    ready = min((event["ts"] for event in boundaries if event.get("ev") == "branch.ready"), default=None)
+    return (_interval(ended, checks), _interval(checks, ready),
+            _interval(ready if ready is not None else ended if task.repo == "agents" else None, landed))
+
+
 def _part_calls(subject: str, events: list[dict]) -> tuple[list[dict], set[str]]:
     """The part's design calls, amendments and root ids, including historical ended-only calls."""
     records = [event for event in events if event.get("ev") in ("call.started", "call.ended")]
@@ -422,13 +505,18 @@ def _production_lines(numstat: str) -> int | None:
 def _part_section(plan: Plan, tasks: Mapping[str, Task], events: list[dict], window: Window,
                   measured: list[tuple]) -> list[str]:
     activity = {row[0]: row for row in parts(plan, tasks, events, window)}
-    measures = {row[0]: row[1:] for row in measured}
+    times = {row[0]: row[1:] for row in part_times(plan, tasks, events)}
+    measures = {row[0]: (*row[1:], *times[row[0]]) for row in measured}
     return ["## Parts", "Measures cover the whole log; activity covers the report window.",
             "Skeleton share target: 10-20%. Skeleton weight includes Claude design calls and Codex reviews.",
             "Weights per line are in token units; unfinished parts have no measures.",
+            "Timing is in minutes; run durations and each task's final landing waits are summed.",
+            "Agents tasks without ready show run end to landed in the last column.",
             *report.table(("Part", "Tasks", "Landed", "Runs", "Codex minutes", "Questions", "Status",
                            "Skeleton weight (M)", "Task Codex weight (M)", "Skeleton/Codex",
-                           "Skeleton share", "Claude weight/line", "Codex weight/line"),
+                           "Skeleton share", "Claude weight/line", "Codex weight/line",
+                           "Draft to skeleton", "Spec to first run", "Runs summed",
+                           "Run end to checks", "Checks to ready", "Ready to landed"),
                           _part_cells(plan, activity, measures))]
 
 
@@ -436,12 +524,12 @@ def _part_cells(plan: Plan, activity: Mapping[str, tuple], measures: Mapping[str
     rows = []
     for part in plan.parts:
         counts = activity.get(part, (part, 0, 0, 0, 0.0, 0))
-        weights = measures.get(part, (None,) * 6)
+        values = measures.get(part, (None,) * 12)
         rows.append((*counts[:4], report.show(counts[4]), counts[5],
                      "finished" if part in measures else "unfinished",
-                     *(report.show(value) for value in weights[:3]),
-                     f"{weights[3]:.1%}" if weights[3] is not None else "-",
-                     *(report.show(value) for value in weights[4:])))
+                     *(report.show(value) for value in values[:3]),
+                     f"{values[3]:.1%}" if values[3] is not None else "-",
+                     *(report.show(value) for value in values[4:])))
     return rows
 
 
@@ -510,15 +598,7 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     previous = figures(plan, tasks, events, sources.heavy, hosts, window.previous())
     hand, unread = accounting.hand_usage(plan.draft)
     history = [event for event in events if _belongs(plan.draft, event)]
-    first_run = next((event["ts"] for event in history if event["ev"] == "run.started"), None)
-    first_landing = next((event["ts"] for event in history if event["ev"] == "branch.landed"), None)
-    if first_run is None:
-        first = "No run yet."
-    elif first_landing is None:
-        first = f"First run {first_run}; No landing yet."
-    else:
-        first = (f"First run {first_run}; first landing {first_landing}, "
-                 f"{report.show(report.minutes(first_run, first_landing))} minutes later.")
+    first = _first_progress(history)
     sections = [
         [f"# Code report: {plan.draft}, {window.start[:10]}",
          f"{window.start} to {window.end}; each figure beside the previous window's.", first],
@@ -547,6 +627,20 @@ def render(plan: Plan, tasks: Mapping[str, Task], sources: Sources, hosts: Mappi
     sections.append(["## Rejections by step", *report.table(("Step", "Count"),
                      sorted(rejections.items(), key=lambda item: (-item[1], item[0])))])
     return "\n\n".join("\n".join(section) for section in sections) + "\n"
+
+
+def _first_progress(history: list[dict]) -> str:
+    """The first run and landing, or which boundary has not happened yet."""
+    first_run = next((event["ts"] for event in history if event["ev"] == "run.started"), None)
+    first_landing = next((event["ts"] for event in history if event["ev"] == "branch.landed"), None)
+    if first_run is None:
+        first = "No run yet."
+    elif first_landing is None:
+        first = f"First run {first_run}; No landing yet."
+    else:
+        first = (f"First run {first_run}; first landing {first_landing}, "
+                 f"{report.show(report.minutes(first_run, first_landing))} minutes later.")
+    return first
 
 
 def _figure_lines(current: Mapping[str, Figure], previous: Mapping[str, Figure],
