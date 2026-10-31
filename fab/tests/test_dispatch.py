@@ -1704,7 +1704,7 @@ parts = []
         self.append(event("question.asked", text="Which?"), event("question.asked", "b", text="Why?"))
         report = self.completed_call()
         self.approve()
-        write(report, "Done: answered\nOther: draft/ignored\nAnswered: draft/a  draft/b draft/a\nDetails.\n")
+        write(report, "Done: answered\nOther: draft/ignored\nAnswered: draft/a  b draft/a\nDetails.\n")
 
         def landing(argv):
             self.assertEqual(argv, ["calls/answer-1"])

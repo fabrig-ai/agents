@@ -572,7 +572,9 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
     events = log.read(log_path)
     chain = call_review.chains(events)[action.task]
     if chain.role == "answer":
-        for identifier in dict.fromkeys(_answered(chain)):
+        # An answer call's subject is its draft; a bare task name is read under it.
+        names = (name if "/" in name else f"{chain.subject}/{name}" for name in _answered(chain))
+        for identifier in dict.fromkeys(names):
             log.append("question.answered", path=log_path, task=identifier, call=chain.latest)
 
 
