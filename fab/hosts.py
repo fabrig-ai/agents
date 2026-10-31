@@ -55,13 +55,18 @@ def this_name(hostnames: Mapping[str, str], name: str | None = None) -> str:
     when set, else the first key of hostnames (entry name to its hostname) whose value equals
     socket.gethostname(), else "". A given or FAB_HOST name is returned as it is, even ""
     or a name hostnames lacks. fab.heavy.settings and this use it."""
-    raise NotImplementedError
+    if name is not None:
+        return name
+    if "FAB_HOST" in os.environ:
+        return os.environ["FAB_HOST"]
+    hostname = socket.gethostname()
+    return next((entry for entry, value in hostnames.items() if value == hostname), "")
 
 
 def this(hosts: Mapping[str, Host], name: str | None = None) -> Host | None:
     """This machine's Host: hosts[this_name({entry: host.hostname}, name)], None when hosts
     has no such entry."""
-    raise NotImplementedError
+    return hosts.get(this_name({entry: host.hostname for entry, host in hosts.items()}, name))
 
 
 def problems(host: Host) -> list[str]:

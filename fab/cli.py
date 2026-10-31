@@ -9,6 +9,7 @@ import sys
 COMMANDS = {
     "call": ("fab.calls", "run a Claude call on a compiled brief"),
     "tick": ("fab.dispatch", "collect, land and start every plan's tasks"),
+    "wake": ("fab.wake", "wake the tick from any machine; install the tick's units"),
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),
     "report": ("fab.report", "the standing reports of a plan and of the landing"),

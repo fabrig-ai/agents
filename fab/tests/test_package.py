@@ -1,10 +1,12 @@
 import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
+from unittest.mock import patch
 
 from fab import cli, hosts
 from fab.sh import Failed, Result, run, ssh
 from fab.tests.support import FakeRunner
+from fab.tests.wakes import BUILDER, DISPATCHER, HOSTS, here
 
 
 class CliTest(unittest.TestCase):
@@ -65,3 +67,31 @@ builds = 1
         self.assertIn("exceeds", hosts.problems(host)[0])
         with self.assertRaises(ValueError):
             hosts.parse('[b]\nssh = "x"\nroles = ["chef"]\n')
+
+
+class ThisHostTest(unittest.TestCase):
+    def test_given_name_wins_even_empty_or_unknown(self):
+        for name in (DISPATCHER, "unknown", ""):
+            with self.subTest(name=name), here(BUILDER):
+                self.assertEqual(hosts.this_name({DISPATCHER: "hub-machine"}, name), name)
+
+    def test_fab_host_wins_even_empty_or_unknown(self):
+        for name in (BUILDER, "unknown", ""):
+            with self.subTest(name=name), here(name), patch.object(hosts.socket, "gethostname") as hostname:
+                self.assertEqual(hosts.this_name({DISPATCHER: "hub-machine"}), name)
+                hostname.assert_not_called()
+
+    def test_hostname_selects_first_matching_entry_or_empty_when_none(self):
+        with here(None), patch.object(hosts.socket, "gethostname", return_value="hub-machine"):
+            self.assertEqual(hosts.this_name({"first": "hub-machine", "second": "hub-machine"}), "first")
+            self.assertEqual(hosts.this_name({"other": "elsewhere"}), "")
+            self.assertEqual(hosts.this_name({}), "")
+
+    def test_this_returns_the_host_or_none(self):
+        self.assertIs(hosts.this(HOSTS, DISPATCHER), HOSTS[DISPATCHER])
+        self.assertIsNone(hosts.this(HOSTS, "unknown"))
+        self.assertIsNone(hosts.this(HOSTS, ""))
+        with here(BUILDER):
+            self.assertIs(hosts.this(HOSTS), HOSTS[BUILDER])
+        with here(None), patch.object(hosts.socket, "gethostname", return_value="hub-machine"):
+            self.assertIs(hosts.this(HOSTS), HOSTS[DISPATCHER])

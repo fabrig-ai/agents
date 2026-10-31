@@ -9,7 +9,6 @@ from __future__ import annotations
 import fcntl
 import os
 import shutil
-import socket
 import subprocess
 import sys
 import time
@@ -19,7 +18,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import log, slots
+from fab import hosts, log, slots
 
 EX_TEMPFAIL = 75  # disk did not come free within the cap; the run reports `Infra: disk`
 WEIGHTS = {"build": 1000, "gate": 10000}
@@ -41,11 +40,7 @@ def settings(host: str | None = None, *, path: Path | None = None) -> Settings:
     headroom_gb override the defaults; an unknown or missing host keeps the defaults."""
     with (path or Path(__file__).with_name("hosts.toml")).open("rb") as source:
         entries = tomllib.load(source)
-    if host is None:
-        host = os.environ.get("FAB_HOST")
-    if host is None:
-        this = socket.gethostname()
-        host = next((name for name, entry in entries.items() if entry.get("hostname") == this), "")
+    host = hosts.this_name({name: entry.get("hostname", "") for name, entry in entries.items()}, host)
     if not host:
         return Settings()
     entry = entries.get(host, {})

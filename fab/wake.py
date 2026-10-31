@@ -12,13 +12,15 @@ note: a lost event.
 from __future__ import annotations
 
 import argparse
+import os
+import re
 import sys
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
 
 from fab import hosts as machines, log
 from fab.hosts import Host
-from fab.sh import Runner, run, ssh
+from fab.sh import Failed, Runner, run, ssh
 
 WANT = "tick.want"  # beside the log: one reason per line; its existence is the wake
 TAKEN = ".tick.want.taken"  # the want a tick has taken, beside it, until read
@@ -37,7 +39,7 @@ OLD_TIMER = "fab-tick.timer"  # the transient 2-minute tick the units replace
 
 def want_path(log_path: Path | None = None) -> Path:
     """The want file: WANT beside the log, log_path (default fab.log.default_path()). Pure."""
-    raise NotImplementedError
+    return (log_path if log_path is not None else log.default_path()).with_name(WANT)
 
 
 def want(reason: str, *, path: Path | None = None) -> Path:
@@ -50,7 +52,15 @@ def want(reason: str, *, path: Path | None = None) -> Path:
     one file fab appends to without a sibling and a rename, as the log is. The caller is on
     the dispatcher's machine (calls, fab land, fab page answer, the tick); any other machine
     calls wake."""
-    raise NotImplementedError
+    path = path if path is not None else want_path()
+    line = " ".join(reason.splitlines()).strip() or "-"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        os.write(descriptor, (line + "\n").encode("utf-8"))
+    finally:
+        os.close(descriptor)
+    return path
 
 
 def take(path: Path | None = None) -> list[str] | None:
@@ -61,7 +71,17 @@ def take(path: Path | None = None) -> list[str] | None:
     The rename comes first, so a wake that arrives while the taken file is read makes a new
     want, and the path unit starts another round for it. The tick calls this first under
     its lock, before it reads the log or any machine."""
-    raise NotImplementedError
+    path = path if path is not None else want_path()
+    taken = path.with_name(TAKEN)
+    try:
+        path.replace(taken)
+    except FileNotFoundError:
+        return None
+    try:
+        return [line.strip() for line in taken.read_text(encoding="utf-8").splitlines()
+                if line.strip()]
+    finally:
+        taken.unlink()
 
 
 def wake(reason: str, *, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
@@ -74,7 +94,19 @@ def wake(reason: str, *, sh: Runner = run, hosts: Mapping[str, Host] | None = No
     sh(ssh(<its ssh>, ["fab", "wake", reason])), True when it exits 0. Never raises for a
     failed ssh: a lost wake waits for the backstop. A machine not in hosts counts as not the
     dispatcher."""
-    raise NotImplementedError
+    hosts = machines.load() if hosts is None else hosts
+    local = machines.this(hosts, here)
+    if local is not None and "dispatcher" in local.roles:
+        want(reason)
+        return True
+    dispatcher = next((hosts[name] for name in sorted(hosts)
+                       if "dispatcher" in hosts[name].roles), None)
+    if dispatcher is None:
+        return False
+    try:
+        return sh(ssh(dispatcher.ssh, ["fab", "wake", reason])).ok
+    except (OSError, Failed):
+        return False
 
 
 def wanted(records: Iterable[dict]) -> list[str]:
@@ -83,7 +115,7 @@ def wanted(records: Iterable[dict]) -> list[str]:
     records are those the log gained during a round: one of these means the round ended
     work the next decision depends on (a run ended, a branch landed or was refused, a
     question asked or answered, a call's chain finished or parked)."""
-    raise NotImplementedError
+    return list(dict.fromkeys(record.get("ev") for record in records if record.get("ev") in AGAIN))
 
 
 def again(kinds: Sequence[str], taken: Sequence[str]) -> str | None:
@@ -94,7 +126,9 @@ def again(kinds: Sequence[str], taken: Sequence[str]) -> str | None:
     reasons when taken is not empty and every one of them is a tick's own (`tick <n>: ...`,
     n a positive integer); otherwise 1 (an outside wake, a hand round, a backstop round).
     None when n would exceed AGAIN_LIMIT: a chain that long is a fault, not work."""
-    raise NotImplementedError
+    matches = [re.fullmatch(r"tick ([1-9][0-9]*): .*", reason) for reason in taken]
+    number = 1 + max(int(match[1]) for match in matches) if matches and all(matches) else 1
+    return f"tick {number}: {', '.join(kinds)}" if number <= AGAIN_LIMIT else None
 
 
 def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
@@ -104,7 +138,13 @@ def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
     per record carrying queue_ts (a record imported from the queue's, whose wake did not
     arrive). records are those the log gained during the round. A run that ends just as the
     backstop collects it reads the same; that race is rare. Pure."""
-    raise NotImplementedError
+    found = [f"wake {reason}" for reason in taken or ()]
+    for record in records:
+        if record.get("ev") == "run.ended":
+            found.append(f"run.ended {record['run']}")
+        if "queue_ts" in record:
+            found.append(f"{record['ev']} {record['task']}")
+    return found
 
 
 def settle(trigger: str, taken: Sequence[str] | None, records: Sequence[dict], *,
@@ -120,7 +160,27 @@ def settle(trigger: str, taken: Sequence[str] | None, records: Sequence[dict], *
        text `tick: <AGAIN_LIMIT> rounds in a row wanted another; the next waits for an event
        or the backstop` and the line `again - stopped`.
     The note of step 1 is not in records and wants nothing."""
-    raise NotImplementedError
+    if trigger not in TRIGGERS:
+        raise ValueError(f"unknown tick trigger {trigger!r}")
+    lines = []
+    if trigger == "backstop":
+        missing = lost(taken, records)
+        if missing:
+            text = "lost event: " + "; ".join(missing)
+            log.append("note", path=log_path, text=text)
+            lines.append("lost - " + text)
+    kinds = wanted(records)
+    if kinds:
+        reason = again(kinds, taken or [])
+        if reason is not None:
+            want(reason, path=path)
+            lines.append("again - " + reason)
+        else:
+            text = (f"tick: {AGAIN_LIMIT} rounds in a row wanted another; "
+                    "the next waits for an event or the backstop")
+            log.append("note", path=log_path, text=text)
+            lines.append("again - stopped")
+    return lines
 
 
 def units(plan_dirs: Sequence[Path], *, checkout: Path | None = None,
@@ -170,4 +230,25 @@ def main(argv: list[str]) -> int:
     on stderr, exit 2. With --install, the positionals are plan dirs: install(those), print
     each path written, then `enabled <EVENT_PATH> <BACKSTOP_TIMER>`; exit 0. An OSError,
     ValueError or fab.sh.Failed prints `fab wake: <error on one line>` on stderr, exit 1."""
-    raise NotImplementedError
+    parser = argparse.ArgumentParser(prog="fab wake", description=__doc__)
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("words", nargs="*")
+    try:
+        args = parser.parse_args(argv)
+        if not args.install and not args.words:
+            parser.error("a reason is required without --install")
+        if args.install:
+            for path in install([Path(word) for word in args.words]):
+                print(path)
+            print(f"enabled {EVENT_PATH} {BACKSTOP_TIMER}")
+            return 0
+        reason = " ".join(args.words)
+        if wake(reason):
+            return 0
+        print(f"fab wake: not delivered: {reason}", file=sys.stderr)
+        return 1
+    except SystemExit as error:
+        return error.code
+    except (OSError, ValueError, Failed) as error:
+        print("fab wake: " + " ".join(str(error).splitlines()), file=sys.stderr)
+        return 1
