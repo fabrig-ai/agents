@@ -600,3 +600,57 @@ class StartTest(unittest.TestCase):
                 review.start(CHAIN, "agents", Path("/checkout"), HOST, (), sh=fake)
             self.assertEqual(fake.calls[-1].argv, add)
             self.assertEqual(log.read(), [])
+
+
+class TaskSourceTest(unittest.TestCase):
+    def setUp(self):
+        from fab.plan import Task
+        self.task = Task("draft/task", "part", "feature", "agents", (), (), "high", 25, "", "task.md")
+        self.checked = _event("call.checked", call=CHAIN.root, root=CHAIN.root,
+                              subject=CHAIN.subject, tip="skeleton-tip", outcome="green", tasks=[self.task.id])
+        self.events = [*_root_events(), self.checked]
+        self.started = _event("run.started", task=self.task.id, run="task-1", kind="implement",
+                              branch=self.task.id, base="skeleton-tip")
+
+    def test_fresh_tasks_use_only_green_checks_for_their_part_and_id(self):
+        source = review.task_source(self.task, iter(self.events))
+        self.assertEqual((source[0], source[1].root), (self.checked, CHAIN.root))
+        for changes in ({"outcome": "red"}, {"subject": "draft/elsewhere"}, {"tasks": ["draft/other"]}):
+            with self.subTest(changes=changes):
+                self.assertIsNone(review.task_source(self.task, [*_root_events(), {**self.checked, **changes}]))
+
+    def test_first_run_base_preserves_origin_across_later_checks_and_runs(self):
+        events = [*self.events, self.started,
+                  {**self.checked, "call": "amend-1", "tip": "amended-tip"},
+                  _event("run.started", task=self.task.id, run="task-2", kind="rebase", base="origin/main")]
+        self.assertEqual(review.task_source(self.task, events)[0]["tip"], "skeleton-tip")
+        self.assertIsNone(review.task_source(self.task, [*self.events, {**self.started, "base": "origin/main"}]))
+
+    def test_new_tasks_after_landing_use_main(self):
+        events = [*self.events, _event("call.finished", call=CHAIN.root, outcome="done", tip="skeleton-tip")]
+        self.assertIsNone(review.task_source(self.task, events))
+        events[-1] = {**events[-1], "outcome": "failed"}
+        self.assertEqual(review.task_source(self.task, events)[0]["tip"], "skeleton-tip")
+
+    def test_same_tip_and_failed_finishes_need_no_amendment_rebase(self):
+        for outcome, tip in (("done", "skeleton-tip"), ("failed", "amended-tip")):
+            with self.subTest(outcome=outcome):
+                events = [*self.events, self.started, _event("call.finished", call=CHAIN.root, outcome=outcome, tip=tip)]
+                self.assertIsNone(review.task_rebase(self.task, events))
+
+    def test_amendment_rebase_consumed_only_by_a_rebase_after_landing(self):
+        events = [*self.events, self.started, *_amend_events(),
+                  _event("run.started", task=self.task.id, run="early-rebase", kind="rebase", base="origin/main"),
+                  _event("call.finished", call="amend-1", outcome="done", tip="amended-tip")]
+        context = review.task_rebase(self.task, events)
+        self.assertEqual((context["old_tip"], context["tip"], context["step"]),
+                         ("skeleton-tip", "amended-tip", "rebase"))
+        events.append(_event("run.started", task=self.task.id, run="repair", kind="repair", base="skeleton-tip"))
+        self.assertIsNotNone(review.task_rebase(self.task, events))
+        events.append(_event("run.started", task=self.task.id, run="rebase", kind="rebase", base="origin/main"))
+        self.assertIsNotNone(review.task_rebase(self.task, events))
+        events.append(_event("run.ended", run="rebase", outcome="infra"))
+        self.assertIsNotNone(review.task_rebase(self.task, events))
+        events.append(_event("run.started", task=self.task.id, run="rebase-2", kind="rebase", base="origin/main"))
+        events.append(_event("run.ended", run="rebase-2", outcome="done"))
+        self.assertIsNone(review.task_rebase(self.task, events))

@@ -199,6 +199,10 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     directory = root / "runs" / run_id
     brief_path, report_path = directory / "brief.md", directory / "report.md"
     base = "origin/main"
+    from fab import call_review
+    source = call_review.task_source(task, events)
+    if source is not None and kind != "rebase":
+        base = source[0]["tip"]
     rejection = _rejection(rejection, sh=sh)
     text = brief(task, role_text(task.repo), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection)
@@ -207,6 +211,9 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
         return sh(ssh(host.ssh, argv), input=input, check=True)
 
     repo = fetch_clone(host, task.repo, sh=sh)
+    if rejection is not None and "skeleton" in rejection:
+        text = _rebase_brief(task, host, repo, events, rejection, run_id=run_id,
+                             branch=branch, report=str(report_path), sh=sh)
     try:
         return _prepare_and_launch(task, host, kind, sh, run_id=run_id, branch=branch,
                                    base=base, root=root, repo=repo, worktree=worktree,
@@ -507,3 +514,19 @@ def _gate_log(record: dict, *, sh: Runner) -> str:
         return rejection_text(record, gates[0], sh=sh)
     except (OSError, ValueError) as error:
         return "(log unreadable: " + " ".join(str(error).splitlines()) + ")"
+
+
+def _rebase_brief(task: Task, host: Host, repo: Path, events: Iterable[dict], rejection: dict, *,
+                  run_id: str, branch: str, report: str, sh: Runner) -> str:
+    """Keep the task's commits while moving its checked skeleton base onto amended main."""
+    previous = next(event["branch"] for event in reversed(list(events))
+                    if event.get("ev") == "run.started" and event.get("task") == task.id)
+    diff = sh(ssh(host.ssh, ["git", "-C", str(repo), "diff", rejection["old_tip"], rejection["tip"]]),
+              check=True).out
+    instructions = ("## Rebase after the skeleton amendment\n\n"
+                    f"On your branch `{branch}`, run `git reset --hard origin/{previous}`, "
+                    f"then `git rebase --onto origin/main {rejection['old_tip']}`. "
+                    "Resolve conflicts, check the result, and push your branch.\n\n"
+                    "The skeleton's amendment:\n\n```diff\n" + diff + "\n```\n\n")
+    return brief(task, role_text(task.repo), run_id=run_id, branch=branch, base="origin/main",
+                 report=report, rejection={**rejection, "section": instructions})

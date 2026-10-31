@@ -17,6 +17,7 @@ from pathlib import Path
 
 from fab import calls, channel, designer, log, run as runs
 from fab.hosts import Host
+from fab.plan import Task
 from fab.sh import Runner, run
 
 REVIEWED = ("skeleton", "answer", "review") + designer.ROLES  # call roles whose branch is reviewed before it lands
@@ -355,3 +356,61 @@ def _fold_review(event: dict, position: int, folded: dict, reviews: dict) -> Non
                 review["outcome"] = event["outcome"]
                 if event["outcome"] not in ("done", "infra"):
                     chain["refusals"].append(event["run"])
+
+
+def task_source(task: Task, events: Iterable[dict]) -> tuple[dict, Chain] | None:
+    """The green skeleton tip a task started from, or may start from before landing.
+
+    The first run's base fixes provenance across amendments and later rebase runs.
+    Fresh tasks use the newest green check until the chain finishes successfully.
+    """
+    events = list(events)
+    first = next((event for event in events if event.get("ev") == "run.started"
+                  and event.get("task") == task.id), None)
+    own = chains(events)
+    for event in reversed(events):
+        if (event.get("ev") != "call.checked" or event.get("outcome") != "green"
+                or event.get("subject") != f"{task.draft}/{task.part}"
+                or task.id not in event.get("tasks", ())):
+            continue
+        chain = own.get(event.get("root", event.get("call")))
+        if chain is None or chain.role not in ("skeleton", "contract"):
+            continue
+        if first is not None:
+            if first.get("base") == event.get("tip"):
+                return event, chain
+        elif not any(record.get("ev") == "call.finished" and record.get("call") in chain.calls
+                     and record.get("outcome") == "done" for record in events):
+            return event, chain
+    return None
+
+
+def task_rebase(task: Task, events: Iterable[dict]) -> dict | None:
+    """Rebase context when a task's checked skeleton landed with an amended tip.
+
+    A successful rebase run after the finish consumes the amendment once.
+    The shell adds the amendment's diff to these facts before launching the run.
+    """
+    events = list(events)
+    source = task_source(task, events)
+    if source is None:
+        return None
+    checked, chain = source
+    finish = next((index for index in range(len(events) - 1, -1, -1)
+                   if events[index].get("ev") == "call.finished"
+                   and events[index].get("call") in chain.calls
+                   and events[index].get("outcome") == "done"), None)
+    if finish is None:
+        return None
+    tip = events[finish].get("tip")
+    if not tip or tip == checked["tip"]:
+        return None
+    later = [event for event in events[finish + 1:] if event.get("ev") == "run.started"
+             and event.get("task") == task.id]
+    completed = {event.get("run") for event in events if event.get("ev") == "run.ended"
+                 and event.get("outcome") == "done"}
+    if any(event.get("kind") == "rebase" and event.get("base") == "origin/main"
+           and event.get("run") in completed for event in later):
+        return None
+    return {"step": "rebase", "old_tip": checked["tip"], "tip": tip,
+            "findings": "The skeleton was amended before landing.", "skeleton": chain.root}

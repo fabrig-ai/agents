@@ -8,8 +8,8 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fab import log
-from fab.plan import Plan, PlanError, Task, load_plan, load_tasks, problems
+from fab import call_review, log
+from fab.plan import Plan, PlanError, Task, load_plan, load_tasks, problems, checked_tasks
 
 STATUSES = ("waiting", "runnable", "running", "parked", "done", "ready", "landed", "rejected")
 PART_STATUSES = ("not designed", "designed", "done")
@@ -39,6 +39,7 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     - refusal.settled: retry -> done, keeping branch and tip; fix and none change no status.
     A task never started is waiting while any need is not landed, otherwise runnable.
     """
+    events = list(events)
     views = {identifier: TaskView(identifier) for identifier in tasks}
     for event in events:
         view = views.get(event.get("task"))
@@ -81,9 +82,9 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                     view.status = "done"
     for identifier, view in views.items():
         if view.status == "waiting" and all(
-            need in views and views[need].status == "landed" for need in tasks[identifier].needs
-        ):
+            need in views and views[need].status == "landed" for need in tasks[identifier].needs):
             view.status = "runnable"
+    _parked_chains(tasks, views, events)
     return views
 
 
@@ -123,6 +124,8 @@ def main(argv: list[str]) -> int:
     try:
         plan = load_plan(args.plan_dir / "plan.toml")
         tasks = load_tasks(args.plan_dir / "tasks", plan.draft, plan.repo)
+        events = log.read()
+        tasks = checked_tasks(plan, tasks, events)
     except PlanError as error:
         print(error, file=sys.stderr)
         return 1
@@ -130,7 +133,7 @@ def main(argv: list[str]) -> int:
     if issues:
         print("\n".join(issues), file=sys.stderr)
         return 1
-    views = fold(tasks, log.iterate())
+    views = fold(tasks, events)
     rows = [(view.id, view.status, str(len(view.runs)), view.branch or "-")
             for view in views.values()]
     if rows:
@@ -138,3 +141,12 @@ def main(argv: list[str]) -> int:
         for row in rows:
             print(" ".join(f"{cell:<{width}}" for cell, width in zip(row[:3], widths)) + " " + row[3])
     return 0
+
+
+def _parked_chains(tasks: Mapping[str, Task], views: Mapping[str, TaskView], events: list[dict]) -> None:
+    """Park the tasks of held skeleton chains, retaining runs and branch provenance."""
+    for identifier, view in views.items():
+        source = call_review.task_source(tasks[identifier], events)
+        if source is not None and source[1].state in ("hold", "parked") and view.status != "landed":
+            view.status = "parked"
+            view.question = source[1].reason or "The skeleton chain is parked."

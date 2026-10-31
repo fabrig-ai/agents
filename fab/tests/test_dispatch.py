@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, state, wake
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, log, plan, repairs, run as runs, rust_gates, state, wake
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, ssh
@@ -923,6 +923,7 @@ walk = false
         self.collect = self.enterContext(patch("fab.run.collect", side_effect=self.record_collect))
         self.land = self.enterContext(patch("fab.land.main", side_effect=self.record_land))
         self.screen = self.enterContext(patch("fab.gates.screen", return_value=[]))
+        self.rust_screen = self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
         self.out = io.StringIO()
         self.enterContext(redirect_stdout(self.out))
 
@@ -1648,9 +1649,8 @@ parts = []
                     dict(ev="call.started", call="old-amend", role="amend", amends="other"),
                     dict(ev="call.ended", call="old-amend", outcome="failed"))
         self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
-        self.assertEqual(self.fake.argvs()[-1],
-                         ["systemd-run", "--user", "--collect", "--unit", drafts.unit("amend", "root"),
-                          "fab", "call", "amend", "root", "--plan", str(self.directory)])
+        self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("amend", "root"),
+                           "fab", "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
         self.land.assert_not_called()
 
     def test_finish_answer_uses_latest_call_line_then_root_fallback(self):
@@ -1805,12 +1805,13 @@ parts = []
         self.assertIn("land draft/a failed: screen unavailable\n", self.out.getvalue())
         self.start.assert_called_once()
 
-    def test_other_repository_ready_is_not_screened(self):
+    def test_fabrig_ready_uses_rust_gates(self):
         self.add_task("a", repo="fabrig")
         self.append(started(), ended())
         self.fake.on(["git", "rev-parse", "--verify"], Result(0, "tip\n"))
         self.tick()
         self.screen.assert_not_called()
+        self.rust_screen.assert_called_once()
         self.assertEqual(log.read()[-1]["ev"], "branch.ready")
 
     def test_land_output_is_captured_to_keep_one_line_per_action(self):
@@ -2724,6 +2725,7 @@ class RepairTickTest(unittest.TestCase):
         self.land = self.enterContext(patch.object(dispatch.land, "main", return_value=0))
         self.collect = self.enterContext(patch.object(runs, "collect"))
         self.screen = self.enterContext(patch.object(gates, "screen", return_value=[]))
+        self.rust_screen = self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
         self.examine = self.enterContext(patch.object(repairs, "start", side_effect=self.start_foreman))
         self.commit = self.enterContext(patch.object(repairs, "commit", return_value="repairs/foreman"))
         self.out = io.StringIO()
@@ -3009,3 +3011,224 @@ class RepairTickTest(unittest.TestCase):
         self.assertEqual(order, ["foreman", "remedy", "calls"])
         self.assertIs(questions.call_args.args[1], refusals.call_args.args[1])
         self.assertNotIn("foreman started", [entry.get("text") for entry in refusals.call_args.args[1]])
+
+
+class OptimisticStartTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.checkout = self.home / "checkout"
+        self.directory = write_plan(self.checkout / "docs/plan/draft", "draft")
+        self.path = self.home / "events.jsonl"
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=4)}
+        self.spec = '+++\nid = "a"\npart = "core"\nkind = "feature"\nfiles = ["fab/x.py"]\n+++\nBuild it.\n'
+        self.green = True
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.checkout)))
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "skeleton-tip\n"))
+        self.fake.on(["git", "ls-tree"], Result(0, "docs/plan/draft/tasks/a.md\n"))
+        self.fake.on(["git", "show"], Result(0, self.spec))
+        self.fake.on(["ssh"], self.remote)
+        self.fake.on([], lambda call: Result(0 if self.green or not call.argv[0].endswith("/bin/fab") else 1))
+        self.screen = self.enterContext(patch.object(gates, "screen", return_value=[]))
+        self.rust_screen = self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
+        self.land = self.enterContext(patch.object(dispatch.land, "main", return_value=0))
+        self.enterContext(patch.object(runs, "collect"))
+        self.vet = self.enterContext(patch.object(call_review, "start", side_effect=self.review))
+        self.enterContext(redirect_stdout(io.StringIO()))
+
+    def remote(self, call):
+        argv = shlex.split(shlex.split(call.argv[-1])[2])
+        if argv[:3] == ["fab", "slot", "list"]:
+            return Result(0, 'torn\n[]\n{"slot": 1, "claim": null, "idle": 0}\n')
+        if argv[:3] == ["fab", "codex", "start"]:
+            return Result(0, "codex-1 /state/codex-1\n")
+        if "diff" in argv:
+            return Result(0, "+amended skeleton\n")
+        return Result(0)
+
+    def review(self, chain, repo, checkout, host, events, **kwargs):
+        log.append("run.started", path=self.path, task=chain.root, run=chain.root + "-1",
+                   kind="review", host=host.name, call=chain.latest, tip="skeleton-tip")
+
+    def append(self, *events):
+        for entry in events:
+            log.append(path=self.path, **entry)
+
+    def tick(self):
+        return [action for action in dispatch.tick(self.directory, hosts=self.hosts,
+                                                   sh=self.fake, log_path=self.path) if action.kind != "flow"]
+
+    def checked(self, *, repo="agents", role="skeleton"):
+        write_plan(self.directory, "draft", repo=repo)
+        self.append(*chain_history("review", role=role))
+        self.tick()
+        return next(event for event in log.read(self.path) if event["ev"] == "call.checked")
+
+    def task_done(self):
+        self.tick()
+        self.append(ended())
+
+    def test_green_tip_starts_before_review_ends_and_specs_count_for_status_needs_and_buffer(self):
+        checked = self.checked()
+        self.assertEqual((checked["tip"], checked["outcome"], checked["tasks"]),
+                         ("skeleton-tip", "green", ["draft/a"]))
+        self.assertFalse((self.directory / "tasks/a.md").exists())
+        self.assertEqual(wake.want_path(self.path).read_text(), "call.checked root\n")
+        self.assertFalse(wake.want_path().exists())
+        self.assertEqual([action.kind for action in self.tick()], ["collect", "start"])
+        first = next(event for event in log.read(self.path) if event.get("task") == "draft/a")
+        self.assertEqual((first["ev"], first["base"]), ("run.started", "skeleton-tip"))
+        launch = [call.argv[-1] for call in self.fake.calls if call.argv[0] == "ssh"]
+        self.assertTrue(any("worktree add -b draft/a" in command and command.endswith("skeleton-tip'")
+                            for command in launch))
+        spec, tasks = dispatch._load_plan(self.directory, log.read(self.path), checkout=self.checkout, sh=self.fake)
+        self.assertEqual(state.part_statuses(spec, tasks, {}), {"core": "designed"})
+        self.assertEqual(state.fold(tasks, log.read(self.path))["draft/a"].status, "running")
+        self.assertFalse(any(event["ev"] == "run.ended" for event in log.read(self.path)))
+        self.tick()
+        self.assertEqual(sum(event["ev"] == "call.checked" for event in log.read(self.path)), 1)
+        self.assertEqual(sum(call.argv[0].endswith("/bin/fab") for call in self.fake.calls), 1)
+        commands = self.fake.argvs()
+        add = next(command for command in commands if command[:3] == ["git", "worktree", "add"])
+        self.assertEqual(add[3], "--detach")
+        self.assertIn(["git", "worktree", "remove", "--force", add[4]], commands)
+        self.assertEqual(log.read(), [])
+
+    def test_red_tests_or_gates_start_nothing_and_still_review(self):
+        for failure in ("tests", "gates"):
+            with self.subTest(failure=failure):
+                self.path = self.home / (failure + ".jsonl")
+                self.green = failure != "tests"
+                self.screen.return_value = [gates.Finding("names", "banned")] if failure == "gates" else []
+                checked = self.checked()
+                self.assertEqual((checked["outcome"], checked["tasks"]), ("red", []))
+                self.assertFalse(any(action.kind == "start" for action in self.tick()))
+                self.assertEqual(call_review.chains(log.read(self.path))["root"].state, "reviewing")
+                self.land.assert_not_called()
+
+    def test_done_task_holds_landing_until_same_tip_skeleton_lands(self):
+        self.checked()
+        self.task_done()
+        self.assertFalse(any(action.kind == "land" for action in self.tick()))
+        self.land.assert_not_called()
+        self.append(dict(ev="call.finished", call="root", outcome="done", tip="skeleton-tip"))
+        self.assertIn("land", [action.kind for action in self.tick()])
+        self.land.assert_called_once_with(["draft/a", "--task", "draft/a"])
+
+    def test_amended_skeleton_requires_rebase_with_its_diff_then_lands(self):
+        self.checked()
+        self.task_done()
+        self.append(dict(ev="call.started", call="amend", role="amend", amends="root"),
+                    dict(ev="call.ended", call="amend", outcome="done"),
+                    dict(ev="call.finished", call="amend", outcome="done", tip="amended-tip"))
+        actions = self.tick()
+        start = next(action for action in actions if action.kind == "start")
+        self.assertEqual(start.run_kind, "rebase")
+        self.land.assert_not_called()
+        entry = log.read(self.path)[-1]
+        self.assertEqual((entry["kind"], entry["base"], entry["branch"]),
+                         ("rebase", "origin/main", "draft/a-r1"))
+        brief = (log.home() / "runs/draft/a-2/brief.md").read_text()
+        self.assertIn("+amended skeleton", brief)
+        self.assertIn("git reset --hard origin/draft/a", brief)
+        self.assertIn("git rebase --onto origin/main skeleton-tip", brief)
+        self.append(ended(n=2))
+        self.assertIn("land", [action.kind for action in self.tick()])
+        self.land.assert_called_once_with(["draft/a-r1", "--task", "draft/a"])
+
+    def test_parked_chain_holds_started_tasks_and_resets_after_answer(self):
+        self.checked()
+        self.task_done()
+        self.append(dict(ev="call.parked", call="root", subject="draft/core"))
+        self.assertFalse(any(action.kind in ("start", "land", "ready") for action in self.tick()))
+        spec, tasks = dispatch._load_plan(self.directory, log.read(self.path), sh=self.fake)
+        self.assertEqual(state.fold(tasks, log.read(self.path))["draft/a"].status, "parked")
+        self.append(dict(ev=channel.ANSWERED, subject="draft/core"),
+                    dict(ev="call.finished", call="root", outcome="done", tip="skeleton-tip"))
+        self.assertIn("land", [action.kind for action in self.tick()])
+
+    def test_fabrig_contract_uses_slot_precheck_holds_ready_then_gates_task(self):
+        checked = self.checked(repo="fabrig", role="contract")
+        self.assertEqual(checked["outcome"], "green")
+        self.task_done()
+        self.assertFalse(any(action.kind == "ready" for action in self.tick()))
+        commands = [shlex.split(shlex.split(call.argv[-1])[2]) for call in self.fake.calls
+                    if call.argv[0] == "ssh"]
+        self.assertIn(["fab", "precheck", "/home/fake/src/fabrig/slots/1", "skeleton-tip"], commands)
+        self.assertIn(["fab", "slot", "release", "1", "checks/root"], commands)
+        self.append(dict(ev="call.finished", call="root", outcome="done", tip="skeleton-tip"))
+        self.assertIn("ready", [action.kind for action in self.tick()])
+        self.assertEqual(log.read(self.path)[-1]["ev"], "branch.ready")
+        self.assertEqual(self.rust_screen.call_args.args[0].id, "draft/a")
+        self.land.assert_not_called()
+
+    def test_fabrig_ratchet_refusal_is_logged_and_never_readied(self):
+        self.checked(repo="fabrig")
+        self.task_done()
+        self.append(dict(ev="call.finished", call="root", outcome="done", tip="skeleton-tip"))
+
+        def refuse(task, events, **kwargs):
+            log.append("branch.rejected", path=kwargs["log_path"], task=task.id,
+                       branch="draft/a", tip="task-tip", step="gate:ratchet", findings="count rose", log="digest")
+            return [gates.Finding("ratchet", "count rose")]
+
+        self.rust_screen.side_effect = refuse
+        self.tick()
+        events = log.read(self.path)
+        self.assertTrue(any(event["ev"] == "branch.rejected" and event["step"] == "gate:ratchet" for event in events))
+        self.assertFalse(any(event["ev"] == "branch.ready" for event in events))
+        self.assertFalse(any("refs/heads/ready/" in arg for call in self.fake.calls for arg in call.argv))
+        self.land.assert_not_called()
+
+
+    def test_checks_pin_the_tip_after_review_starts(self):
+        def screen(task, events, **kwargs):
+            self.assertEqual(call_review.chains(log.read(self.path))["root"].state, "reviewing")
+            kwargs["sh"](["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"],
+                         cwd=str(self.checkout), check=True)
+            return []
+
+        self.screen.side_effect = screen
+        self.checked()
+        self.assertIn(["git", "rev-parse", "--verify", "skeleton-tip^{commit}"], self.fake.argvs())
+
+    def test_test_command_failure_frees_worktree_and_retries_without_starting_a_task(self):
+        attempts = []
+
+        def test(call):
+            if call.argv[0].endswith("/bin/fab"):
+                attempts.append(call)
+                if len(attempts) == 1:
+                    raise OSError("test process unavailable")
+            return Result(0)
+
+        self.fake.rules[-1] = ([], test)
+        self.append(*chain_history("review"))
+        self.tick()
+        self.assertFalse(any(event["ev"] == "call.checked" for event in log.read(self.path)))
+        self.assertFalse(any(event.get("task") == "draft/a" for event in log.read(self.path)))
+        self.tick()
+        self.assertEqual(len(attempts), 2)
+        self.assertEqual(sum(call.argv[:3] == ["git", "worktree", "remove"] for call in self.fake.calls), 2)
+        self.assertEqual(sum(event["ev"] == "call.checked" for event in log.read(self.path)), 1)
+
+    def test_red_precheck_releases_its_slot_and_starts_no_task(self):
+        command = ssh("fake@builder", ["fab", "precheck", "/home/fake/src/fabrig/slots/1", "skeleton-tip"])
+        self.fake.rules.insert(0, (command, Result(1, "red")))
+        self.assertEqual(self.checked(repo="fabrig")["outcome"], "red")
+        self.tick()
+        self.assertFalse(any(event.get("task") == "draft/a" for event in log.read(self.path)))
+        self.assertIn(ssh("fake@builder", ["fab", "slot", "release", "1", "checks/root"]), self.fake.argvs())
+
+
+    def test_approved_skeleton_finish_records_its_checked_tip_before_task_landing(self):
+        self.checked()
+        self.task_done()
+        self.append(dict(ev="run.ended", run="root-1", outcome="done"))
+        actions = self.tick()
+        self.assertIn("finish", [action.kind for action in actions])
+        self.assertNotIn("land", [action.kind for action in actions])
+        self.land.assert_called_once_with(["calls/root"])
+        finished = next(event for event in log.read(self.path) if event["ev"] == "call.finished")
+        self.assertEqual((finished["call"], finished["outcome"], finished["tip"]),
+                         ("root", "done", "skeleton-tip"))
+        self.assertIn("land", [action.kind for action in self.tick()])

@@ -12,6 +12,7 @@ import fcntl
 import io
 import json
 import sys
+import tempfile
 from collections import Counter
 from collections.abc import Sequence, Iterable, Mapping
 from contextlib import redirect_stdout
@@ -19,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, state, wake
+from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
@@ -246,21 +247,21 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     limit = flow.target(plan.draft, events,
                         start=sum(host.places for host in hosts.values() if "builder" in host.roles))
     occupied = sum(event["task"].startswith(plan.draft + "/") for event in flight)
+    tasks = specs.checked_tasks(plan, tasks, events)
     views = state.fold(tasks, events)
     actions = [Action("flow", task=plan.draft, detail=f"target {limit}, {occupied} in flight")]
     actions.extend(Action("collect", task=event["task"], run=event["run"], host=event["host"],
                           detail=event["run"]) for event in drafts.owned(plan.draft, flight, events))
-    for identifier, view in views.items():
-        if view.status == "done":
-            actions.append(Action("land" if tasks[identifier].repo == "agents" else "ready",
-                                  task=identifier, branch=view.branch, detail=view.branch or ""))
+    landings, rebases, events = _landing_actions(tasks, views, events)
+    actions.extend(landings)
 
     candidates = [identifier for status in ("rejected", "runnable")
                   for identifier, view in views.items() if view.status == status]
     refused = {identifier for identifier in candidates
                if _start_kind(views[identifier], events)[1] is not None}
-    candidates = buffer.order(plan, tasks, candidates, refused)
-    refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)}
+    candidates = buffer.order(plan, tasks, rebases + candidates, refused | set(rebases))
+    refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
+                if refusal.task not in rebases}
     actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
 
     if len(candidates) < plan.low * limit:
@@ -303,7 +304,9 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         view = views[identifier]
         # Rebase runs are mechanical (the model's foreman writes them) and do not count.
         kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
-        if sum(kinds.get(run_id) != "rebase" for run_id in view.runs) >= MAX_RUNS:
+        kind, rejection = _start_kind(view, events)
+        if not (rejection or {}).get("skeleton") and sum(
+                kinds.get(run_id) != "rebase" for run_id in view.runs) >= MAX_RUNS:
             actions.append(Action("park", task=identifier,
                                   run=view.runs[-1],
                                   detail=f"{MAX_RUNS} runs without landing; needs judgement"))
@@ -314,7 +317,6 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         if not available:
             continue
         host = min(available, key=lambda name: (-free[name], name))
-        kind, rejection = _start_kind(view, events)
         if refusal is not None and refusal.state == "settled" and refusal.verdict == "fix":
             rejection = {**rejection, "section": refusal.section}
         actions.append(Action("start", task=identifier, host=host, run_kind=kind,
@@ -517,6 +519,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
     """
     detail = action.detail
     outcome = "failed"
+    finish_tip = ""
     try:
         match action.kind:
             case "collect":
@@ -524,7 +527,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "land":
                 detail = _land(action, tasks, sh=sh, log_path=log_path)
             case "ready":
-                _ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
+                detail = _screen_ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
             case "start":
                 _start(action, tasks, hosts, sh=sh, log_path=log_path)
             case "call":
@@ -542,6 +545,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "hold":
                 _hold(action, log_path=log_path)
             case "finish":
+                finish_tip = next((event["tip"] for event in reversed(log.read(log_path))
+                                   if event.get("ev") == "call.checked" and event.get("call") == action.run), "")
                 if plan.repo == "fabrig":
                     if _queue_branch(action.branch, checkout, sh=sh, log_path=log_path):
                         _finish(action, log_path=log_path)
@@ -557,8 +562,9 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                    text=f"{action.kind} {action.task or '-'} {detail}")
     finally:
         if action.kind == "finish" and (plan.repo != "fabrig" or outcome == "done"):
+            fields = {"tip": finish_tip} if finish_tip else {}
             log.append("call.finished", path=log_path, call=action.run,
-                       role=action.run_kind, outcome=outcome)
+                       role=action.run_kind, outcome=outcome, **fields)
     print(f"{action.kind} {action.task or '-'} {detail}")
 
 
@@ -682,6 +688,7 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
                log_path: Path | None) -> list[Action]:
     """Take decisions, then question and refusal actions from one fresh snapshot in that
     order, then calls decided from the resulting log."""
+    tasks = specs.checked_tasks(plan, tasks, log.read(log_path))
     actions = decide(plan, tasks, log.read(log_path), hosts, calm)
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
@@ -695,6 +702,7 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
     actions.extend(followups)
     for action in followups:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
+    _check_calls(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     return actions
 
 
@@ -725,7 +733,13 @@ def _load_plan(plan_dir: Path, events: list[dict], *, checkout: Path | None = No
     Dry-run uses this path without fetching.
     """
     if (plan_dir / "plan.toml").exists():
-        return specs.load(plan_dir)
+        plan = specs.load_plan(plan_dir / "plan.toml")
+        tasks = specs.load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
+        tasks = specs.checked_tasks(plan, tasks, events)
+        issues = specs.problems(plan, tasks)
+        if issues:
+            raise specs.PlanError(f"{plan_dir}: " + "\n".join(issues))
+        return plan, tasks
     draft = plan_dir.name
     if not any(event.get("ev") == "call.started" and event.get("role") == "cut"
                and event.get("subject") == designer.subject(draft, "cut") for event in events):
@@ -953,3 +967,144 @@ def main(argv: list[str]) -> int:
     except (OSError, ValueError, Failed) as error:
         print("fab tick: " + " ".join(str(error).splitlines()), file=sys.stderr)
         return 1
+
+
+def _check_calls(plan: Plan, directory: Path, checkout: Path, hosts: Mapping[str, Host], *,
+                 sh: Runner, log_path: Path | None) -> None:
+    """Check each completed design output once, independently of its Codex review.
+
+    Infra failures leave no checked mark and retry next tick. A check result pins the
+    tip and its task specs together; no task can start from untested spec text.
+    """
+    events = log.read(log_path)
+    for chain in call_review.chains(events).values():
+        if (chain.role not in ("skeleton", "contract") or chain.state in ("finished", "hold", "parked", "amending")
+                or chain.subject not in {f"{plan.draft}/{part}" for part in plan.parts}
+                or any(event.get("ev") == "call.checked" and event.get("call") == chain.latest
+                       for event in events)):
+            continue
+        try:
+            _check_call(chain, plan, directory, checkout, hosts, sh=sh, log_path=log_path)
+        except (OSError, ValueError, Failed) as error:
+            print(f"check {chain.latest} failed: {' '.join(str(error).splitlines())}")
+
+
+def _check_call(chain: call_review.Chain, plan: Plan, directory: Path, checkout: Path,
+                hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
+    """Resolve and test a design tip, then log its green or red result and exact specs."""
+    sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+    tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{chain.branch}^{{commit}}"],
+             cwd=str(checkout), check=True).out.strip()
+    if not tip:
+        raise ValueError("branch has no tip")
+    task = Task(chain.root, chain.subject.rsplit("/", 1)[1], "interface", plan.repo,
+                (), ("**",), "high", 25, "", "")
+    started = {"ev": "run.started", "task": task.id, "run": f"checks/{chain.latest}",
+               "branch": chain.branch, "tip": tip}
+    screen = rust_gates.screen if plan.repo == "fabrig" else gates.screen
+
+    def pinned(argv, **kwargs):
+        if list(argv) == ["git", "rev-parse", "--verify", f"refs/remotes/origin/{chain.branch}^{{commit}}"]:
+            argv = ["git", "rev-parse", "--verify", f"{tip}^{{commit}}"]
+        return sh(argv, **kwargs)
+
+    findings = screen(task, [started], sh=pinned,
+                      log_path=log.home() / "calls" / chain.latest / "checks.jsonl")
+    green = _call_tests(chain, plan, checkout, tip, hosts, sh=sh, log_path=log_path) and not findings
+    records, spec_paths = [], []
+    identifiers = []
+    if green:
+        paths = sh(["git", "ls-tree", "-r", "--name-only", tip],
+                   cwd=str(checkout), check=True).out.splitlines()
+        relative = directory.resolve().relative_to(checkout.resolve()).as_posix()
+        for path in sorted(paths):
+            if not path.startswith(relative + "/tasks/") or not path.endswith(".md"):
+                continue
+            text = sh(["git", "show", f"{tip}:{path}"], cwd=str(checkout), check=True).out
+            spec = specs.parse_task(text, str(checkout / path), plan.draft, plan.repo)
+            if spec.part == task.part:
+                identifiers.append(spec.id)
+                spec_paths.append(spec.path)
+                records.append(text)
+    log.append("call.checked", path=log_path, call=chain.latest, root=chain.root,
+               subject=chain.subject, branch=chain.branch, tip=tip,
+               outcome="green" if green else "red", tasks=identifiers, specs=records, paths=spec_paths,
+               findings=gates.findings_text(findings))
+    if green:
+        wake.want(f"call.checked {chain.latest}", path=wake.want_path(log_path))
+    print(f"check {chain.latest} {'green' if green else 'red'} {tip}")
+
+
+def _call_tests(chain: call_review.Chain, plan: Plan, checkout: Path, tip: str,
+                hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> bool:
+    """Run agents tests in a detached worktree or fabrig precheck in a claimed slot."""
+    if plan.repo == "fabrig":
+        host = _builder(hosts, log.read(log_path))
+        root = Path(runs.remote_home(host))
+        listed = sh(ssh(host.ssh, ["fab", "slot", "list"]), check=True)
+        idle = []
+        for line in listed.out.splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if (isinstance(entry, dict) and entry.get("claim", True) is None
+                    and isinstance(entry.get("slot"), int) and isinstance(entry.get("idle"), (int, float))):
+                idle.append(entry)
+        if not idle:
+            raise ValueError(f"{host.name}: no idle slot")
+        slot = str(min(idle, key=lambda entry: entry["idle"])["slot"])
+        run_id = f"checks/{chain.latest}"
+        sh(ssh(host.ssh, ["fab", "slot", "claim", slot, run_id, chain.root]), check=True)
+        try:
+            worktree = root.parent / "slots" / slot
+            sh(ssh(host.ssh, ["git", "-C", str(worktree), "fetch", "origin"]), check=True)
+            return sh(ssh(host.ssh, ["fab", "precheck", str(worktree), tip])).ok
+        finally:
+            sh(ssh(host.ssh, ["fab", "slot", "release", slot, run_id]), check=True)
+    home = log.home()
+    home.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="call-check-", dir=home) as directory:
+        worktree = Path(directory) / "tip"
+        sh(["git", "worktree", "add", "--detach", str(worktree), tip], cwd=str(checkout), check=True)
+        try:
+            return sh([str(worktree / "bin/fab"), "test"], cwd=str(worktree)).ok
+        finally:
+            sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(checkout), check=True)
+
+
+def _landing_actions(tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
+                     events: list[dict]) -> tuple[list[Action], list[str], list[dict]]:
+    """Hold optimistic landings until the skeleton lands, scheduling amendments as rebases.
+
+    Rebase context is local to this decision; it is no refusal event and changes no flow.
+    """
+    actions, rebases = [], []
+    for identifier, view in views.items():
+        source = call_review.task_source(tasks[identifier], events)
+        if source is not None:
+            _, chain = source
+            finished = any(event.get("ev") == "call.finished" and event.get("call") in chain.calls
+                           and event.get("outcome") == "done" for event in events)
+            if not finished:
+                continue
+        if view.status == "done":
+            amendment = call_review.task_rebase(tasks[identifier], events)
+            if amendment is not None:
+                rebases.append(identifier)
+                events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]
+                continue
+            actions.append(Action("land" if tasks[identifier].repo == "agents" else "ready",
+                                  task=identifier, branch=view.branch, detail=view.branch or ""))
+
+    return actions, rebases, events
+
+
+def _screen_ready(action: Action, task: Task, hosts: Mapping[str, Host], *,
+                  sh: Runner, log_path: Path | None) -> str:
+    """Run the Rust gates before delivering receipts or pushing a task's ready ref."""
+    findings = rust_gates.screen(task, log.read(log_path), sh=sh, log_path=log_path)
+    if findings:
+        return "rejected gate:" + ",".join(dict.fromkeys(finding.gate for finding in findings))
+    _ready(action, task, hosts, sh=sh, log_path=log_path)
+    return action.detail

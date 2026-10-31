@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import tomllib
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from fab import log
 
 MODES = ("feature", "migration", "fix", "probe", "direct")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
@@ -88,6 +91,7 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
     """Read plan.toml and tasks/; raise PlanError naming plan_dir and every problem if unsound."""
     plan = load_plan(plan_dir / "plan.toml")
     tasks = load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
+    tasks = checked_tasks(plan, tasks, log.read())
     issues = problems(plan, tasks)
     if issues:
         raise PlanError(f"{plan_dir}: " + "\n".join(issues))
@@ -323,3 +327,22 @@ def _cycles(graph: dict[str, tuple[str, ...]], kind: str) -> list[str]:
         if node not in indices:
             visit(node)
     return issues
+
+
+def checked_tasks(plan: Plan, tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, Task]:
+    """Add this plan's green checked specs, preserving specs already present on main.
+
+    Check records keep the exact git-show text and checkout path so status, needs and
+    buffer decisions see the same specs without reading a moving branch again.
+    """
+    result = {}
+    for event in events:
+        if (event.get("ev") != "call.checked" or event.get("outcome") != "green"
+                or event.get("subject", "").rsplit("/", 1)[0] != plan.draft):
+            continue
+        for path, text in zip(event.get("paths", ()), event.get("specs", ())):
+            task = parse_task(text, path, plan.draft, plan.repo)
+            if task.part in plan.parts:
+                result[task.id] = task
+    result.update(tasks)
+    return result

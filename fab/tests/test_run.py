@@ -1045,3 +1045,25 @@ class RefusalTextTest(unittest.TestCase):
             text = run.refusal_text({"step": "test", "log": "/red"}, "fabrig", sh=fake)
             self.assertTrue(text.startswith("(log unreadable: "))
             self.assertIn("permission denied", text)
+
+
+class OptimisticRunTest(unittest.TestCase):
+    def test_checked_tip_is_base_in_worktrees_slots_briefs_and_events(self):
+        for repo in ("agents", "fabrig"):
+            with self.subTest(repo=repo), tmp_home():
+                task = replace(TASK, repo=repo)
+                events = [dict(ev="call.started", call="root", role="skeleton", subject="draft/part", branch="calls/root"),
+                          dict(ev="call.ended", call="root", outcome="done"),
+                          dict(ev="call.checked", call="root", root="root", subject="draft/part", outcome="green",
+                               tip="checked-tip", tasks=[task.id])]
+                fake = starter()
+                run_id = run.start(task, HOST, events=events, sh=fake)
+                entry = log.read()[-1]
+                self.assertEqual(entry["base"], "checked-tip")
+                self.assertIn("- Base: `checked-tip`", (log.home() / "runs" / run_id / "brief.md").read_text())
+                commands = [command(call) for call in fake.calls]
+                if repo == "fabrig":
+                    self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "-C", task.id, "checked-tip"], commands)
+                else:
+                    self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-b", task.id,
+                                   str(ROOT / "wt" / run_id), "checked-tip"], commands)

@@ -254,3 +254,47 @@ class AnswerUnparksOnlyTest(unittest.TestCase):
                   {"ev": "branch.landed", "task": "d/a", "tip": "t", "main": "t"},
                   {"ev": "question.answered", "task": "d/a", "answer": "x"}]
         self.assertEqual(state.fold(tasks, events)["d/a"].status, "landed")
+
+
+class CheckedTasksTest(unittest.TestCase):
+    def setUp(self):
+        self.plan = Plan("draft", "agents", (), 1, 2, {"core": Part("core", "Core", "feature", (), "design.md")}, ())
+        self.spec = '+++\nid = "a"\npart = "core"\nkind = "feature"\n+++\nBuild it.\n'
+        self.checked = dict(ev="call.checked", subject="draft/core", call="root", root="root",
+                            outcome="green", tip="tip", tasks=["draft/a"], paths=["tasks/a.md"], specs=[self.spec])
+
+    def test_checked_specs_join_status_needs_and_part_status(self):
+        from fab.plan import checked_tasks
+        existing = {"draft/b": task("draft/b", needs=("draft/a",))}
+        tasks = checked_tasks(self.plan, existing, [self.checked])
+        self.assertEqual(set(tasks), {"draft/a", "draft/b"})
+        self.assertEqual(set(existing), {"draft/b"})
+        views = state.fold(tasks, [])
+        self.assertEqual((views["draft/a"].status, views["draft/b"].status), ("runnable", "waiting"))
+        self.assertEqual(state.part_statuses(self.plan, tasks, {}), {"core": "designed"})
+        self.assertEqual(state.fold(tasks, [dict(ev="branch.landed", task="draft/a", tip="t", main="m")])["draft/b"].status,
+                         "runnable")
+
+    def test_red_and_other_drafts_specs_do_not_count(self):
+        from fab.plan import checked_tasks
+        for changes in ({"outcome": "red"}, {"subject": "another/core"}):
+            with self.subTest(changes=changes):
+                self.assertEqual(checked_tasks(self.plan, {}, [{**self.checked, **changes}]), {})
+
+    def test_newest_checked_spec_wins_until_main_has_its_spec(self):
+        from fab.plan import checked_tasks
+        newer = {**self.checked, "specs": [self.spec.replace("Build it.", "Amended.")]}
+        tasks = checked_tasks(self.plan, {}, [self.checked, newer])
+        self.assertEqual(tasks["draft/a"].body, "Amended.\n")
+        main = task("draft/a")
+        self.assertEqual(checked_tasks(self.plan, {main.id: main}, [self.checked, newer])[main.id], main)
+
+    def test_status_reads_checked_specs_without_a_task_file(self):
+        from fab.tests.support import write_plan
+        with tmp_home() as home:
+            directory = write_plan(home / "docs/plan/draft", "draft")
+            log.append(**self.checked)
+            out = io.StringIO()
+            with redirect_stdout(out):
+                self.assertEqual(state.main([str(directory)]), 0)
+            self.assertEqual(out.getvalue(), "draft/a runnable 0 -\n")
