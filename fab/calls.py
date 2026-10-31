@@ -38,7 +38,7 @@ ROLES = {
 }
 MODEL = "claude-opus-5-5"  # every Claude call's model, explicit (the user, 10-30): Opus 5.5
 BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the call reads the rest itself
-TIMEOUT = 40 * 60
+TIMEOUT = 60 * 60  # seconds; 40 minutes until the playground replay's cut ran out with its designers in flight (the user, 10-31)
 
 
 @dataclass(frozen=True)

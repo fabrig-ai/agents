@@ -641,7 +641,8 @@ before it lands (13.1).
   with its minutes, turns, peak context, weight and whether it is over.
 - **A call is measured, not capped, for now** (the user, 10-30): no context
   cap and no turn limit (no `--max-turns`); a call is stopped only by its
-  40-minute timeout. call.ended carries its peak context and turns, and the
+  60-minute timeout (40 until the user raised it, 10-31, after the
+  playground replay's cut ran out with its four designers in flight). call.ended carries its peak context and turns, and the
   code report flags calls over the user's 600k target (10-30; the model's
   draft said 120k). Of the first eleven calls, seven peaked over 120k
   (130k-190k) and all ended well; the user sets a cap, if any, from the
@@ -1017,7 +1018,7 @@ only as tweaks once a replay matches its run.
     designers from shared binding calls; they write specs and notes only,
     and the cut checks and releases them batch by batch (the user, 10-31,
     after the playground replay's cut ran out of time with its four
-    designers in flight). It is one call throughout: it never waits for, watches or
+    designers in flight; the call's timeout is now 60 minutes, 13.5). It is one call throughout: it never waits for, watches or
     reacts to a run, and hands its output over in pieces (the early release)
     only so fab can start them. It carries the plan and spec formats, and the brief leaves out
     the Designs, Plans and Inventory sections.
