@@ -35,4 +35,11 @@ builds = 4
 [hetzner8]
 ssh = "free@2.29.110.236"
 hostname = "debian-16gb-hel1-8"
-roles = ["gate"]
+roles = ["gate", "builder"]
+disk_gb = 305
+places = 4
+slots = 7
+slot_bound_gb = 25
+kache_gb = 50
+headroom_gb = 10
+builds = 4
