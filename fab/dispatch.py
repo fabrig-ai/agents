@@ -240,7 +240,10 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         history = [event for event in reversed(events) if event.get("task") == identifier]
         kind = "implement"
         rejection = None
-        if view.status == "rejected":
+        # history is newest first: a refusal since the last run still decides the kind, even
+        # when the task was parked and answered in between.
+        last = next((event for event in history if event.get("ev") in ("branch.rejected", "run.started")), {})
+        if view.status == "rejected" or last.get("ev") == "branch.rejected":
             rejection = next(event for event in history if event.get("ev") == "branch.rejected")
             kind = "rebase" if rejection.get("step") in ("rebase", "merge") else "repair"
         else:

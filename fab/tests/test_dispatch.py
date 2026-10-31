@@ -1211,3 +1211,14 @@ class RebaseRunsTest(unittest.TestCase):
         events.append(event("branch.rejected", "a", step="rebase", tip="t", log="conflict"))
         actions = dispatch.decide(spec, {"draft/a": task("a")}, events, hosts)
         self.assertNotIn("park", [action.kind for action in actions])
+
+
+class AnsweredRefusalTest(unittest.TestCase):
+    def test_a_refused_task_answered_after_parking_still_rebases(self):
+        spec = make_plan(part("core"))
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
+        events = [started("a"), ended("a"),
+                  event("branch.rejected", "a", step="rebase", tip="t", log="conflict"),
+                  event("question.asked", "a", text="4 runs"), event("question.answered", "a", answer="go")]
+        (start,) = [a for a in dispatch.decide(spec, {"draft/a": task("a")}, events, hosts) if a.kind == "start"]
+        self.assertEqual(start.run_kind, "rebase")
