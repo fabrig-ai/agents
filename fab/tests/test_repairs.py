@@ -473,6 +473,23 @@ class CommitTest(RepairsTestCase):
             self.assertFalse((home / "fab/runs" / RUN / "wt").exists())
             self.assertEqual(git(checkout, "branch", "--list", branch), "")
 
+    def test_fabrig_section_reuses_pushed_branch_before_landing(self):
+        """Real git verifies the section's pushed commit survives worktree cleanup."""
+        with tmp_home() as home:
+            origin, checkout, task = spec_checkout(home)
+            task = replace(task, repo="fabrig")
+            commands = []
+            text = repairs.section(refusal(), day="2026-10-31", run_id=RUN, body="fix x")
+            branch = repairs.commit(refusal(), task, text, checkout, run_id=RUN, sh=git_runner(commands))
+            tip = git(origin, "rev-parse", branch)
+            commands.clear()
+            self.assertEqual(repairs.commit(refusal(), task, text, checkout, run_id=RUN,
+                                             sh=git_runner(commands)), branch)
+            self.assertEqual(git(origin, "rev-parse", branch), tip)
+            self.assertEqual([argv[1] for argv in commands], ["show"])
+            self.assertEqual((checkout / TASK.path).read_text(), SPEC)
+            self.assertFalse((home / "fab/runs" / RUN / "wt").exists())
+
 
 if __name__ == "__main__":
     unittest.main()

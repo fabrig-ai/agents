@@ -365,6 +365,23 @@ class CommitTest(unittest.TestCase):
                                  for argv, _ in commands))
             self.assert_clean(checkout)
 
+    def test_fabrig_answer_reuses_pushed_branch_before_landing(self):
+        """Real git verifies the push leaves a remote-tracking ref after local cleanup."""
+        with tmp_home() as home:
+            origin, checkout, task = self.prepare(home)
+            task = replace(task, repo="fabrig")
+            commands = []
+            branch = foreman.commit(QUESTION, task, "Choose A.", checkout, run_id=RUN,
+                                     day="2026-10-31", sh=self.runner(commands))
+            tip = git(origin, "rev-parse", branch)
+            commands.clear()
+            self.assertEqual(foreman.commit(QUESTION, task, "Choose A.", checkout, run_id=RUN,
+                                             day="2026-11-01", sh=self.runner(commands)), branch)
+            self.assertEqual(git(origin, "rev-parse", branch), tip)
+            self.assertEqual([argv[1] for argv, _ in commands], ["show"])
+            self.assertEqual((checkout / TASK.path).read_text(), SPEC)
+            self.assert_clean(checkout)
+
     def test_failed_push_cleans_worktree_and_branch(self):
         with tmp_home() as home:
             origin, checkout, task = self.prepare(home)

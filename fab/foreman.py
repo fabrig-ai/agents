@@ -203,6 +203,13 @@ def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id:
     Return answers/<run_id> to land, or None when origin/main already records the answer;
     the worktree is FAB_HOME/runs/<run_id>/wt. Commands and outcomes are spec_edit's.
     """
+    if task.repo == "fabrig":
+        relative = Path(task.path).resolve().relative_to(checkout.resolve())
+        result = sh(["git", "show", f"refs/remotes/origin/answers/{run_id}:{relative.as_posix()}"],
+                    cwd=str(checkout))
+        spec = result.out
+        if result.ok and with_answer(spec, day=day, question=question, answer=text, run=run_id) == spec:
+            return f"answers/{run_id}"
     return spec_edit.commit(
         task, checkout, lambda spec: with_answer(spec, day=day, question=question,
                                                 answer=text, run=run_id),

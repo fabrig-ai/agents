@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import io
+import json
 import sys
 from collections import Counter
 from collections.abc import Sequence, Iterable, Mapping
@@ -349,12 +350,23 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
     Each cursor is its newest imported queue_ts, or empty before its first record.
     Remote torn lines and other plans' records are skipped; imported keys deduplicate.
     """
+    owners = {event["branch"]: draft for event in events
+              if event.get("ev") == "call.started" and isinstance(event.get("branch"), str)
+              for draft in plan_drafts if drafts.under(draft, event.get("subject"))}
+    for event in events:
+        if (event.get("ev") == "run.started" and event.get("kind") == foreman.KIND
+                and isinstance(event.get("run"), str) and isinstance(event.get("task"), str)):
+            identifier = event.get("task", "").removesuffix("/foreman")
+            if identifier in tasks:
+                for prefix in ("answers", "repairs"):
+                    owners[f"{prefix}/{event['run']}"] = tasks[identifier].draft
     gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
     if gate_hosts:
         imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
                      event.get("tip")) for event in events if "queue_ts" in event}
         since = min((max((event["queue_ts"] for event in events if "queue_ts" in event
-                           and drafts.under(draft, event.get("task"))), default="")
+                           and (drafts.under(draft, event.get("task"))
+                                or owners.get(event.get("branch")) == draft)), default="")
                      for draft in plan_drafts), default="")
         result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
         if not result.ok:
@@ -368,18 +380,46 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             branch = entry.get("branch")
             if not isinstance(branch, str):
                 continue
-            identifier = land.task_of(branch)
-            if identifier not in tasks:
+            identifier = branch if branch in owners else land.task_of(branch)
+            if identifier not in tasks and branch not in owners:
                 continue
             ev = "branch." + entry["ev"]
             key = (entry["ts"], ev, branch, entry.get("tip"))
             if key in imported:
                 continue
-            fields = {field: entry[field] for field in ("tip", "main", "step", "log")
+            fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
                       if field in entry}
             events.append(log.append(ev, path=log_path, task=identifier, branch=branch,
                                      queue_ts=entry["ts"], **fields))
             imported.add(key)
+
+
+def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | None,
+                  section: str = "") -> bool:
+    """Ready a call or spec branch once; return True only after its queue landing imports."""
+    events = log.read(log_path)
+    if any(event.get("ev") == "branch.landed" and event.get("branch") == branch
+           and "queue_ts" in event for event in events):
+        return True
+    ready = next((index for index in range(len(events) - 1, -1, -1)
+                  if events[index].get("ev") == "branch.ready"
+                  and events[index].get("branch") == branch), -1)
+    calls_on_branch = {event.get("call") for event in events
+                       if event.get("ev") == "call.started" and event.get("branch") == branch}
+    changed = max((index for index, event in enumerate(events)
+                   if event.get("ev") == "call.ended" and event.get("call") in calls_on_branch),
+                  default=-1)
+    if ready > changed:
+        return False
+    tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+             cwd=str(checkout), check=True).out.strip()
+    if not tip:
+        raise ValueError("branch has no tip")
+    sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{branch}"],
+       cwd=str(checkout), check=True)
+    fields = {"section": section} if section else {}
+    log.append("branch.ready", path=log_path, task=branch, branch=branch, tip=tip, **fields)
+    return False
 
 
 def _land_branch(argv: list[str]) -> None:
@@ -457,8 +497,11 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
     """Land an approved branch and record answers from the latest call's report or its root's."""
-    _land_branch([action.branch])
-    chain = call_review.chains(log.read(log_path))[action.task]
+    events = log.read(log_path)
+    if not any(event.get("ev") == "branch.landed" and event.get("branch") == action.branch
+               and "queue_ts" in event for event in events):
+        _land_branch([action.branch])
+    chain = call_review.chains(events)[action.task]
     if chain.role == "answer":
         for identifier in dict.fromkeys(_answered(chain)):
             log.append("question.answered", path=log_path, task=identifier, call=chain.latest)
@@ -498,8 +541,13 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "hold":
                 _hold(action, log_path=log_path)
             case "finish":
-                _finish(action, log_path=log_path)
-                outcome = "done"
+                if plan.repo == "fabrig":
+                    if _queue_branch(action.branch, checkout, sh=sh, log_path=log_path):
+                        _finish(action, log_path=log_path)
+                        outcome = "done"
+                else:
+                    _finish(action, log_path=log_path)
+                    outcome = "done"
             case "park":
                 _park(action, log_path=log_path)
     except Exception as error:
@@ -507,7 +555,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
         log.append("note", path=log_path,
                    text=f"{action.kind} {action.task or '-'} {detail}")
     finally:
-        if action.kind == "finish":
+        if action.kind == "finish" and (plan.repo != "fabrig" or outcome == "done"):
             log.append("call.finished", path=log_path, call=action.run,
                        role=action.run_kind, outcome=outcome)
     print(f"{action.kind} {action.task or '-'} {detail}")
@@ -744,13 +792,23 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     Share checkout resolution with refusal remedies, refusing a non-checkout. An answer
     already recorded by commit needs no landing. Read the collected report locally and log
     its first answer line with both the asking and foreman runs after success."""
-    question = _question(action, tasks, log.read(log_path), "settled")
+    events = log.read(log_path)
+    question = _question(action, tasks, events, "settled")
+    queued = specs.load_plan(plan_dir / "plan.toml").repo == "fabrig"
+    pending = f"answers/{action.run}"
+    ready = queued and any(event.get("ev") == "branch.ready" and event.get("branch") == pending
+                           for event in events)
     checkout = _spec_checkout(plan_dir, sh=sh)
     answer = foreman.answer((log.home() / "runs" / action.run / "report.md").read_text())
-    branch = foreman.commit(question, tasks[action.task], answer, checkout,
-                            run_id=action.run, day=log.now()[:10], sh=sh)
+    branch = pending if ready else foreman.commit(
+        question, tasks[action.task], answer, checkout,
+        run_id=action.run, day=log.now()[:10], sh=sh)
     if branch is not None:
-        _land_branch([branch])
+        if queued:
+            if not _queue_branch(branch, checkout, sh=sh, log_path=log_path):
+                return
+        else:
+            _land_branch([branch])
     log.append("question.answered", path=log_path, task=question.task, by=action.run,
                run=question.run, answer=answer.splitlines()[0])
 
@@ -790,7 +848,8 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     Land a fix's spec section before recording it; retry and none need no commit.
     Failures leave the refusal decided for the next tick. Return verdict and reason.
     """
-    refusal = _refusal(action, tasks, log.read(log_path), "decided")
+    events = log.read(log_path)
+    refusal = _refusal(action, tasks, events, "decided")
     try:
         report = (log.home() / "runs" / action.run / "report.md").read_text()
     except (OSError, UnicodeError):
@@ -799,10 +858,32 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     branch, section = None, ""
     if verdict == "fix":
         section = repairs.section(refusal, day=log.now()[:10], run_id=action.run, body=body)
-        branch = repairs.commit(refusal, tasks[action.task], section,
-                                _spec_checkout(plan_dir, sh=sh), run_id=action.run, sh=sh)
+        queued = specs.load_plan(plan_dir / "plan.toml").repo == "fabrig"
+        pending = f"repairs/{action.run}"
+        ready = next((event for event in events if queued and event.get("ev") == "branch.ready"
+                      and event.get("branch") == pending), None)
+        if ready is not None:
+            section = ready.get("section", section)
+        checkout = _spec_checkout(plan_dir, sh=sh)
+        branch = pending if ready else repairs.commit(
+            refusal, tasks[action.task], section, checkout, run_id=action.run, sh=sh)
         if branch is not None:
-            _land_branch([branch])
+            if queued:
+                if ready is None:
+                    relative = Path(tasks[action.task].path).resolve().relative_to(checkout.resolve())
+                    spec = sh(["git", "show", f"refs/remotes/origin/{branch}:{relative.as_posix()}"],
+                              cwd=str(checkout), check=True).out.splitlines(keepends=True)
+                    heading = next((index for index, line in enumerate(spec)
+                                    if line.startswith(("## Repair (", "## Rebase ("))
+                                    and line.rstrip().endswith(f" foreman {action.run})")), None)
+                    if heading is not None:
+                        end = next((index for index in range(heading + 1, len(spec))
+                                    if spec[index].startswith("## ")), len(spec))
+                        section = "".join(spec[heading:end]).rstrip("\n") + "\n"
+                if not _queue_branch(branch, checkout, sh=sh, log_path=log_path, section=section):
+                    return f"{verdict} {reason}"
+            else:
+                _land_branch([branch])
     log.append("refusal.settled", path=log_path, task=refusal.task, run=action.run,
                verdict=verdict, reason=reason, branch=branch or "", section=section)
     return f"{verdict} {reason}"
@@ -816,6 +897,8 @@ def _hold(action: Action, *, log_path: Path | None) -> None:
     report = next((event.get("report", "") for event in reversed(events)
                    if refusal is not None and event.get("ev") == "run.ended"
                    and event.get("run") == refusal), "")
+    if refusal is not None and refusal.startswith("queue:"):
+        report = json.loads(refusal.removeprefix("queue:")).get("log", "")
     log.append("call.parked", path=log_path, call=chain.root, subject=chain.subject,
                reason=action.detail, report=report)
 

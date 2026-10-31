@@ -241,6 +241,13 @@ def commit(refusal: Refusal, task: Task, text: str, checkout: Path, *, run_id: s
     fab.spec_edit.commit(task, checkout, <with_section of the spec, text, run_id>,
     branch="repairs/<run_id>", message="Write <task.id>'s <refusal.kind> from its refusal
     at <refusal.step>", worktree=FAB_HOME/runs/<run_id>/wt, sh=sh)."""
+    if task.repo == "fabrig":
+        relative = Path(task.path).resolve().relative_to(checkout.resolve())
+        result = sh(["git", "show", f"refs/remotes/origin/repairs/{run_id}:{relative.as_posix()}"],
+                    cwd=str(checkout))
+        spec = result.out
+        if result.ok and with_section(spec, text, run_id=run_id) == spec:
+            return f"repairs/{run_id}"
     return spec_edit.commit(
         task, checkout, lambda spec: with_section(spec, text, run_id=run_id),
         branch=f"repairs/{run_id}",

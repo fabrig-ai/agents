@@ -1467,6 +1467,15 @@ parts = []
         self.start.assert_called_once()
         self.assertEqual(log.read(), [])
 
+    def test_agents_spec_answers_land_even_when_task_builds_in_fabrig(self):
+        self.add_task("a", repo="fabrig")
+        self.settled_question()
+        with patch.object(foreman, "commit", return_value="answers/foreman"):
+            self.tick()
+        self.land.assert_called_once_with(["answers/foreman"])
+        self.assertEqual(log.read()[-1]["ev"], "question.answered")
+        self.assertFalse(any(event["ev"] == "branch.ready" for event in log.read()))
+
     def test_settle_already_recorded_answer_skips_landing(self):
         self.settled_question()
         with patch.object(foreman, "commit", return_value=None) as commit:
@@ -2239,6 +2248,179 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(len(self.queries()), 1)
         page.assert_called_once()
 
+    def fabrig_plan(self, *, draft="draft", tasks=()):
+        """A nested fabrig plan and runner that resolves each plan's own checkout."""
+        self.fabrig_checkout = log.home() / "repos/fabrig"
+        directory = write_plan(self.fabrig_checkout / "skein/docs/plan" / draft,
+                               draft, tasks=tasks, repo="fabrig")
+        self.fake.rules.insert(0, (["git", "rev-parse", "--show-toplevel"], lambda call: Result(
+            0, str(self.fabrig_checkout if Path(call.cwd).is_relative_to(self.fabrig_checkout)
+                   else self.checkout) + "\n")))
+        self.tip = "first-tip"
+        self.fake.on(["git", "rev-parse", "--verify"], lambda call: Result(0, self.tip + "\n"))
+        self.lands = self.enterContext(patch.object(dispatch.land, "main", return_value=0))
+        return directory
+
+    def test_nested_fabrig_plan_loads_beside_agents_and_fetches_each_checkout_once(self):
+        rust = self.fabrig_plan(draft="rust", tasks=("a",))
+        agents = self.plan_dir("agents", tasks=("a",))
+        self.hosts["builder"] = replace(self.hosts["builder"], places=4)
+        designer.enlist(rust)
+        designer.enlist(agents)
+        self.tick()
+        self.assertEqual([call.args[0].repo for call in self.starts.call_args_list], ["fabrig", "agents"])
+        self.assertEqual(self.starts.call_args_list[0].args[0].path, str(rust / "tasks/a.md"))
+        fetches = [call.cwd for call in self.fake.calls if call.argv == ["git", "fetch", "origin"]]
+        self.assertEqual(fetches, [str(self.fabrig_checkout), str(self.checkout)])
+        self.assertEqual(len(self.queries()), 1)
+
+    def test_approved_fabrig_skeleton_readies_once_and_finishes_only_on_imported_landing(self):
+        rust = self.fabrig_plan()
+        self.append(*chain_history("approved"))
+        self.tick(rust)
+        branch = "calls/root"
+        ready = [event for event in log.read() if event["ev"] == "branch.ready"]
+        self.assertEqual([(event["task"], event["branch"], event["tip"]) for event in ready],
+                         [(branch, branch, self.tip)])
+        push = ["git", "push", "origin", f"{self.tip}:refs/heads/ready/{branch}"]
+        self.assertEqual(next(call.cwd for call in self.fake.calls if call.argv == push), str(self.fabrig_checkout))
+        self.tick(rust)
+        self.assertEqual(self.fake.argvs().count(push), 1)
+        self.assertFalse(any(event["ev"] == "call.finished" for event in log.read()))
+        self.queue_records = [dict(ev="landed", ts="001", branch=branch, tip=self.tip, main="main")]
+        self.tick(rust)
+        self.tick(rust)
+        imported = [event for event in log.read() if "queue_ts" in event]
+        self.assertEqual([(event["ev"], event["task"]) for event in imported], [("branch.landed", branch)])
+        finished = [event for event in log.read() if event["ev"] == "call.finished"]
+        self.assertEqual([(event["call"], event["outcome"]) for event in finished], [("root", "done")])
+        self.assertEqual(self.queries()[-1], ssh("fake@gate", ["fab", "queue", "log", "--since", "001"]))
+        self.lands.assert_not_called()
+        self.assertFalse(any("receipt" in argv[-1] for argv in self.fake.argvs() if argv[0] == "ssh"))
+
+    def test_fabrig_answer_call_keeps_questions_parked_until_landing(self):
+        rust = self.fabrig_plan(tasks=("a",))
+        self.append(*question_history(status="parked"), *chain_history("approved", role="answer", subject="draft"))
+        write(log.home() / "calls/root/report.md", "Done: answered\nAnswered: draft/a draft/a\n")
+        self.tick(rust)
+        self.tick(rust)
+        self.starts.assert_not_called()
+        self.assertFalse(any(event["ev"] == "question.answered" for event in log.read()))
+        self.queue_records = [dict(ev="landed", ts="001", branch="calls/root", tip=self.tip, main="main")]
+        self.tick(rust)
+        answered = [event for event in log.read() if event["ev"] == "question.answered"]
+        self.assertEqual([(event["task"], event["call"]) for event in answered], [("draft/a", "root")])
+        self.tick(rust)
+        self.starts.assert_called_once()
+        self.assertEqual(len([event for event in log.read() if event["ev"] == "call.finished"]), 1)
+        self.lands.assert_not_called()
+
+    def test_fabrig_queue_refusal_amends_once_and_second_refusal_parks(self):
+        rust = self.fabrig_plan()
+        self.append(*chain_history("approved"))
+        self.tick(rust)
+        first = dict(ev="rejected", ts="001", branch="calls/root", tip=self.tip,
+                     step="cargo", log="/queue/first", findings="compile error")
+        self.queue_records = [first]
+        actions = self.tick(rust)
+        self.assertEqual([action.run_kind for action in actions if action.kind == "call"], ["amend"])
+        refusal = next(event for event in log.read() if event["ev"] == "branch.rejected")
+        self.assertEqual((refusal["step"], refusal["findings"]), ("cargo", "compile error"))
+        self.append(dict(ev="call.started", call="amend", role="amend", amends="root",
+                         subject="draft/core", branch="calls/root"))
+        self.assertFalse(any(action.kind == "call" for action in self.tick(rust)))
+        self.append(dict(ev="call.ended", call="amend", outcome="done"),
+                    dict(ev="run.started", run="amend-review", task="root", kind="review", host="builder"),
+                    dict(ev="run.ended", run="amend-review", outcome="done"))
+        self.tip = "second-tip"
+        self.tick(rust)
+        self.assertEqual(len([event for event in log.read() if event["ev"] == "branch.ready"]), 2)
+        self.queue_records.append(dict(first, ts="002", tip=self.tip, log="/queue/second"))
+        self.tick(rust)
+        self.tick(rust)
+        parked = [event for event in log.read() if event["ev"] == "call.parked"]
+        self.assertEqual([(event["call"], event["report"]) for event in parked], [("root", "/queue/second")])
+        self.assertEqual(len(units(self.fake)), 1)
+        self.assertFalse(any(event["ev"] == "call.finished" for event in log.read()))
+        self.lands.assert_not_called()
+
+    def test_failed_fabrig_ready_push_leaves_approved_chain_retryable(self):
+        rust = self.fabrig_plan()
+        self.append(*chain_history("approved"))
+        push = ["git", "push", "origin", "first-tip:refs/heads/ready/calls/root"]
+        attempt = [Result(1, err="push refused"), Result(0)]
+        self.fake.on(push, lambda call: attempt.pop(0))
+        self.tick(rust)
+        self.assertEqual(log.read()[-1]["ev"], "note")
+        self.assertEqual(call_review.chains(log.read())["root"].state, "approved")
+        self.assertFalse(any(event["ev"] in ("call.finished", "branch.ready") for event in log.read()))
+        self.tick(rust)
+        self.assertEqual(log.read()[-1]["ev"], "branch.ready")
+        self.assertEqual(self.fake.argvs().count(push), 2)
+        self.lands.assert_not_called()
+
+    def test_fabrig_foreman_answer_is_committed_once_and_waits_for_landing(self):
+        rust = self.fabrig_plan(tasks=("a",))
+        self.append(*question_history(status="settled"))
+        write(log.home() / "runs/draft/a/foreman-1/report.md", "Done: Use option A\n")
+        branch = "answers/draft/a/foreman-1"
+        with patch.object(foreman, "commit", return_value=branch) as commit:
+            self.tick(rust)
+            self.tick(rust)
+            commit.assert_called_once()
+            self.assertEqual(commit.call_args.args[3], self.fabrig_checkout)
+            tasks = plan.load(rust)[1]
+            self.assertEqual(foreman.questions(tasks, log.read())[0].state, "settled")
+            self.assertEqual(state.fold(tasks, log.read())["draft/a"].status, "parked")
+            self.queue_records = [dict(ev="landed", ts="001", branch=branch, tip=self.tip, main="main")]
+            self.tick(rust)
+            self.tick(rust)
+            commit.assert_called_once()
+        imported = [event for event in log.read() if "queue_ts" in event]
+        self.assertEqual([(event["ev"], event["task"]) for event in imported], [("branch.landed", branch)])
+        answered = [event for event in log.read() if event["ev"] == "question.answered"]
+        self.assertEqual([(event["task"], event["by"], event["run"]) for event in answered],
+                         [("draft/a", "draft/a/foreman-1", "draft/a-1")])
+        self.starts.assert_called_once()
+        self.assertEqual(len([event for event in log.read() if event["ev"] == "branch.ready"]), 1)
+        self.lands.assert_not_called()
+
+    def test_answer_ready_failure_reuses_the_pushed_commit_on_retry(self):
+        rust = self.fabrig_plan(tasks=("a",))
+        self.append(*question_history(status="settled"))
+        write(log.home() / "runs/draft/a/foreman-1/report.md", "Done: Use option A\n")
+        worktree = log.home() / "runs/draft/a/foreman-1/wt"
+        spec_path = Path("skein/docs/plan/draft/tasks/a.md")
+        pushed = []
+        self.fake.on(["git", "worktree", "add"], lambda call: (
+            write(worktree / spec_path, (rust / "tasks/a.md").read_text()) or Result(0)))
+        self.fake.on(["git", "push", "-q", "--force"], lambda call: (
+            pushed.append((worktree / spec_path).read_text()) or Result(0)))
+        self.fake.on(["git", "show"], lambda call: Result(0, pushed[-1]) if pushed else Result(128))
+        attempts = [Result(1, err="push refused"), Result(0)]
+        self.fake.on(["git", "push", "origin"], lambda call: attempts.pop(0))
+        self.tick(rust)
+        self.assertEqual(log.read()[-1]["ev"], "note")
+        self.tick(rust)
+        self.assertEqual(log.read()[-1]["ev"], "branch.ready")
+        self.assertEqual(len(pushed), 1)
+        self.assertEqual(len([call for call in self.fake.calls if "commit" in call.argv]), 1)
+        self.assertFalse(any(event["ev"] == "question.answered" for event in log.read()))
+        self.lands.assert_not_called()
+
+    def test_queue_import_tracks_only_owned_call_and_spec_branches(self):
+        rust = self.fabrig_plan(tasks=("a",))
+        self.append(*chain_history("approved"), *question_history(status="deciding"))
+        branches = ("calls/root", "answers/draft/a/foreman-1", "repairs/draft/a/foreman-1")
+        foreign = ("calls/foreign", "answers/other/a/foreman-1", "repairs/other/a/foreman-1")
+        self.queue_records = [dict(ev="landed", ts="010", branch=branch, tip="tip", main="main")
+                              for branch in (*branches, *foreign)]
+        self.tick(rust)
+        self.tick(rust)
+        imported = [event for event in log.read() if "queue_ts" in event]
+        self.assertEqual([event["task"] for event in imported], list(branches))
+        self.assertEqual(self.queries()[-1], ssh("fake@gate", ["fab", "queue", "log", "--since", "010"]))
+
     def test_one_probe_per_builder_for_all_plans(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         self.hosts["second"] = Host("second", "fake@second", ("builder",), places=1)
@@ -2643,6 +2825,62 @@ class RepairTickTest(unittest.TestCase):
         self.assertEqual(self.commit.call_count, 2)
         self.assertEqual(self.land.call_count, 2)
         self.assertEqual(log.read(self.path)[-1]["ev"], "refusal.settled")
+
+    def test_fabrig_fix_section_waits_for_queue_landing_without_committing_twice(self):
+        write_plan(self.directory, "draft", tasks=("task",), repo="fabrig")
+        self.decided(report("fix", "Repair it."))
+        branch = "repairs/draft/task/foreman-1"
+        self.commit.return_value = branch
+        self.fake.rules.insert(0, (["git", "rev-parse", "--verify"], Result(0, "section-tip\n")))
+        with patch.object(log, "now", return_value="2026-10-31T23:59:00.000Z"):
+            self.tick()
+        ready = log.read(self.path)[-1]
+        self.assertEqual((ready["ev"], ready["task"], ready["branch"]), ("branch.ready", branch, branch))
+        _, tasks = plan.load(self.directory)
+        self.assertEqual(repairs.refusals(tasks, log.read(self.path))[0].state, "decided")
+        self.assertFalse(any(event["ev"] == "refusal.settled" for event in log.read(self.path)))
+        with patch.object(log, "now", return_value="2026-11-01T00:01:00.000Z"):
+            self.tick()
+            self.commit.assert_called_once()
+            record = dict(ev="landed", ts="001", branch=branch, tip="section-tip", main="main")
+            prefix = ssh("fake@gate", ["fab", "queue", "log"])[:-1]
+            self.fake.rules.insert(0, (prefix, Result(0, json.dumps(record))))
+            self.tick()
+        self.commit.assert_called_once()
+        settlement = log.read(self.path)[-1]
+        self.assertEqual((settlement["ev"], settlement["verdict"], settlement["branch"]),
+                         ("refusal.settled", "fix", branch))
+        self.assertEqual(settlement["section"], ready["section"])
+        self.assertIn("2026-10-31", settlement["section"])
+        self.assertEqual(repairs.refusals(tasks, log.read(self.path))[0].state, "settled")
+        with patch.object(runs, "start") as start:
+            self.assertEqual([action.kind for action in self.tick()], ["start"])
+        self.assertEqual(start.call_args.args[0].repo, "fabrig")
+        self.assertEqual(start.call_args.kwargs["rejection"]["section"], ready["section"])
+        self.assertEqual(len([event for event in log.read(self.path) if event["ev"] == "refusal.settled"]), 1)
+        self.land.assert_not_called()
+        self.assertEqual(log.read(), [])
+
+    def test_fabrig_fix_ready_retry_records_the_section_from_its_pushed_spec(self):
+        write_plan(self.directory, "draft", tasks=("task",), repo="fabrig")
+        refusal = self.decided(report("fix", "Repair it."))
+        branch = "repairs/draft/task/foreman-1"
+        self.commit.return_value = branch
+        section = repairs.section(refusal, day="2026-10-31", run_id=refusal.foreman, body="Repair it.")
+        self.fake.rules.insert(0, (["git", "rev-parse", "--verify"], Result(0, "section-tip\n")))
+        self.fake.on(["git", "show"], Result(0, "Spec.\n\n" + section + "\n## Later\nOther work.\n"))
+        attempts = [Result(1, err="push refused"), Result(0)]
+        self.fake.on(["git", "push", "origin"], lambda call: attempts.pop(0))
+        with patch.object(log, "now", return_value="2026-10-31T23:59:00.000Z"):
+            self.tick()
+        self.assertEqual(log.read(self.path)[-1]["ev"], "note")
+        with patch.object(log, "now", return_value="2026-11-01T00:01:00.000Z"):
+            self.tick()
+        ready = log.read(self.path)[-1]
+        self.assertEqual(ready["ev"], "branch.ready")
+        self.assertEqual(ready["section"], section)
+        self.assertFalse(any(event["ev"] == "refusal.settled" for event in log.read(self.path)))
+        self.land.assert_not_called()
 
     def test_retry_settles_and_next_tick_lands_same_branch(self):
         self.decided(report("retry", "A flake."))
