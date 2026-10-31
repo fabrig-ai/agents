@@ -2,9 +2,10 @@ import io
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
+from dataclasses import replace
 
 from fab import log, state
-from fab.plan import Task
+from fab.plan import Part, Plan, Task
 from fab.tests.support import tmp_home
 
 
@@ -120,6 +121,45 @@ class FoldTest(unittest.TestCase):
         self.assertEqual(state.runnable(views), ["c", "a"])
         self.assertEqual(state.runnable({}), [])
         self.assertEqual(state.fold({}, [self.start]), {})
+
+
+class PartStatusesTest(unittest.TestCase):
+    def setUp(self):
+        self.plan = Plan("draft", "repo", (), 1, 2, {
+            name: Part(name, name, "feature", (), "design.md")
+            for name in ("empty", "core", "built")
+        }, ())
+        self.plan.parts["built"] = replace(self.plan.parts["built"], done=True)
+        self.tasks = {"draft/a": task("draft/a"), "draft/b": task("draft/b")}
+
+    def test_empty_parts_and_plan_done_in_plan_order(self):
+        self.assertEqual(list(state.part_statuses(self.plan, {}, {}).items()), [
+            ("empty", "not designed"), ("core", "not designed"), ("built", "done"),
+        ])
+
+    def test_task_specs_design_a_part_but_every_task_must_land_to_finish(self):
+        for status in state.STATUSES:
+            with self.subTest(status=status):
+                statuses = {"draft/a": "landed", "draft/b": status}
+                expected = "done" if status == "landed" else "designed"
+                self.assertEqual(state.part_statuses(self.plan, self.tasks, statuses)["core"],
+                                 expected)
+        self.assertEqual(state.part_statuses(self.plan, self.tasks, {})["core"], "designed")
+        self.assertEqual(state.part_statuses(self.plan, self.tasks, {"draft/a": "landed"})
+                         ["core"], "designed")
+
+    def test_plan_done_overrides_unlanded_tasks(self):
+        self.plan.parts["core"] = replace(self.plan.parts["core"], done=True)
+        self.assertEqual(state.part_statuses(self.plan, self.tasks, {})["core"], "done")
+
+    def test_each_part_uses_only_its_tasks_and_inputs_stay_unchanged(self):
+        self.tasks["draft/c"] = replace(task("draft/c"), part="empty")
+        statuses = {"draft/a": "landed", "draft/b": "landed"}
+        before = deepcopy((self.plan, self.tasks, statuses))
+        self.assertEqual(state.part_statuses(self.plan, self.tasks, statuses), {
+            "empty": "designed", "core": "done", "built": "done",
+        })
+        self.assertEqual((self.plan, self.tasks, statuses), before)
 
 
 class StatusTest(unittest.TestCase):

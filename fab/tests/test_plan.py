@@ -60,6 +60,17 @@ class PlanTest(unittest.TestCase):
         self.assertTrue(self.read(text).parts["core"].done)
         self.assertFalse(self.read(FULL).parts["core"].done)
 
+    def test_needs_landed_is_optional_and_parsed_as_a_tuple(self):
+        self.assertEqual(self.read(FULL).parts["core"].needs_landed, ())
+        text = FULL.replace('needs = []',
+                            'needs = ["contract", "probe"]\nneeds_landed = ["probe"]')
+        self.assertEqual(self.read(text).parts["core"].needs_landed, ("probe",))
+
+    def test_needs_landed_requires_a_list_of_strings(self):
+        for value in ('"core"', '[1]', 'false'):
+            with self.subTest(value=value), self.assertRaisesRegex(PlanError, "needs_landed"):
+                self.read(FULL.replace('needs = []', f'needs = []\nneeds_landed = {value}'))
+
     def test_partial_buffer_uses_the_other_default(self):
         self.assertEqual(self.read(MINIMAL + "[buffer]\nlow = 2\n").high, 2.0)
         self.assertEqual(self.read(MINIMAL + "[buffer]\nhigh = 4\n").low, 1.0)
@@ -254,6 +265,15 @@ class ProblemsTest(unittest.TestCase):
         self.parts["next"] = replace(self.parts["next"], needs=("core",))
         tasks = {"draft/a": task("draft/a"), "draft/b": task("draft/b", ("draft/a",))}
         self.assertEqual(problems(self.plan, tasks), [])
+
+    def test_needs_landed_must_also_be_a_need(self):
+        self.parts["next"] = replace(self.parts["next"], needs=("core",), needs_landed=("core",))
+        self.assertEqual(problems(self.plan, {}), [])
+        self.parts["next"] = replace(self.parts["next"], needs_landed=("missing", "core", "next"))
+        self.assertEqual(problems(self.plan, {}), [
+            "part next needs_landed names missing outside needs",
+            "part next needs_landed names next outside needs",
+        ])
 
     def test_each_unknown_reference_and_missing_slice_in_stable_order(self):
         self.parts["core"] = replace(self.parts["core"], needs=("heavy-x",))

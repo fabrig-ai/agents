@@ -25,6 +25,7 @@ class Part:
     design: str
     done: bool = False  # built without task specs (by hand); counts as landed for its readers
     contract: bool = False  # a shared contract: the designer's contract call designs it (13.3)
+    needs_landed: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -94,8 +95,8 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
 
 def load_plan(path: Path) -> Plan:
     """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
-    retired=false. A part's contract defaults to false. Each `[[question]]` table requires id,
-    text and parts (strings) and defaults answer="".
+    retired=false. A part's contract defaults to false and needs_landed to ().
+    Each `[[question]]` table requires id, text and parts (strings) and defaults answer="".
 
     Raises PlanError for a missing key, a wrong type, an unknown mode, or a part id used twice.
     """
@@ -134,7 +135,8 @@ def load_plan(path: Path) -> Plan:
                     value(item, "mode", (str,), required=True),
                     strings(item, "needs", required=True),
                     value(item, "design", (str,), required=True),
-                    value(item, "done", (bool,), False))
+                    value(item, "done", (bool,), False),
+                    needs_landed=strings(item, "needs_landed"))
         if part.mode not in MODES:
             raise PlanError(f"{path}: part {part.id} has unknown mode {part.mode!r}")
         if part.id in parts:
@@ -226,7 +228,8 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
 
     a part's need or a slice's part naming no part; a task naming no part or needing no task;
     a cycle among part needs or among task needs; a part in no slice; a part whose id is in
-    RESERVED; a question id used twice; a question naming no part.
+    RESERVED; a question id used twice; a question naming no part; a part's needs_landed
+    naming a part outside its needs.
     """
     issues = []
     included = {part for item in plan.slices for part in item.parts}
@@ -234,6 +237,9 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
         for need in part.needs:
             if need not in plan.parts:
                 issues.append(f"part {part.id} needs unknown part {need}")
+        for need in part.needs_landed:
+            if need not in part.needs:
+                issues.append(f"part {part.id} needs_landed names {need} outside needs")
         if part.id not in included:
             issues.append(f"part {part.id} is in no slice")
     for item in plan.slices:

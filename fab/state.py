@@ -94,7 +94,18 @@ def part_statuses(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, 
     designed when it has task specs; else not designed. statuses maps task ids to fold's
     statuses; a task missing from it is not landed. fab.calls' parts table, fab.dispatch.decide's
     design step and fab.designer.retire_due read it."""
-    raise NotImplementedError
+    by_part = {identifier: [] for identifier in plan.parts}
+    for identifier, task in tasks.items():
+        if task.part in by_part:
+            by_part[task.part].append(identifier)
+    result = {}
+    for identifier, part in plan.parts.items():
+        members = by_part[identifier]
+        if part.done or members and all(statuses.get(task_id) == "landed" for task_id in members):
+            result[identifier] = "done"
+        else:
+            result[identifier] = "designed" if members else "not designed"
+    return result
 
 
 def main(argv: list[str]) -> int:
