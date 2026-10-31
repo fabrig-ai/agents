@@ -406,8 +406,8 @@ class RunStartTest(unittest.TestCase):
                     ["fab", "slot", "list"],
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
                     ["git", "-C", str(slot), "fetch", "origin"],
-                    ["git", "-C", str(slot), "switch", "--discard-changes", "-C", branch, source],
-                    ["git", "-C", str(slot), "clean", "-fdq"]])
+                    ["git", "-C", str(slot), "clean", "-fdq"],
+                    ["git", "-C", str(slot), "switch", "--discard-changes", "-C", branch, source]])
                 expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort), "--model", run.MODEL]
                 if kind == "review":
                     expected.append("--read-only")
