@@ -270,6 +270,13 @@ class BriefTest(unittest.TestCase):
             self.assertIn(fragment, text)
         self.assertNotIn("Keep this contract.", text)
 
+    def test_fabrig_cut_adds_rust_role_rules(self):
+        text = designer.cut_brief(designer.uncut("new", "fabrig", [SOURCE]), self.root, **FACTS)
+        variant = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
+        self.assertIn(variant, text)
+        for fragment in ("Rust", "heavy cargo check -p <crate>", "tasks/", "globs", 'repo = "fabrig"'):
+            self.assertIn(fragment, text)
+
     def test_empty_cut_sections_and_sources_in_order(self):
         empty = self.root / "empty"
         text = designer.cut_brief(designer.uncut("new", "agents", ["a.md", "b.md"]), empty, **FACTS)
@@ -355,6 +362,22 @@ class MainTest(unittest.TestCase):
                 self.assertIn("# Call facts", text)
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
+
+    def test_fabrig_designer_calls_start_in_dispatcher_clone(self):
+        path = self.directory / "plan.toml"
+        atomic.write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
+        self.fake = (FakeRunner().on(["git", "rev-parse"], Result(0, str(self.root)))
+                     .on(["git", "remote"], Result(0, runs.REMOTES["fabrig"]))
+                     .on(["git", "log"], Result(0, "start\n")))
+        for role, args, directory in (("cut", ("--source", SOURCE), self.root / "docs/plan/new"),
+                                      ("contract", ("base",), self.directory),
+                                      ("decision", ("probe", "--run", "demo/probe-1"), self.directory),
+                                      ("retire", (), self.directory)):
+            with self.subTest(role=role), \
+                 patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/id")) as start:
+                result, _, errors = self.invoke(role, *args, directory=directory, brief_only=False)
+                self.assertEqual((result, errors), (0, ""))
+                self.assertEqual(start.call_args.args[2], log.home() / "repos/fabrig")
 
     def test_cut_refuses_existing_plan_elsewhere_and_missing_source(self):
         cases = ((self.directory, SOURCE, "plan.toml already exists"),

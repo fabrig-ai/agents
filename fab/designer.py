@@ -185,8 +185,11 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str)
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
     plans = sorted(path.relative_to(root).as_posix() for path in (root / PLANS).glob("*/plan.toml")
                    if path.is_file())
+    role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
+    if plan.repo == "fabrig":
+        role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
     return calls._brief([
-        ("Role", calls.ROLES["cut"].read_text(encoding="utf-8")),
+        ("Role", role_text),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("The draft", f"- Draft: {plan.draft}\n- Repository: {plan.repo}\n"
          f"- Plan: write `{PLANS}/{plan.draft}/plan.toml`\n"
@@ -315,8 +318,9 @@ def main(argv: list[str]) -> int:
             return 0
         if args.role == "cut":
             enlist(args.plan)
+        repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
         result = calls.start(args.role, subject(plan.draft, args.role, getattr(args, "part", None)),
-                             root, text, sh=run)
+                             repo, text, sh=run)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:

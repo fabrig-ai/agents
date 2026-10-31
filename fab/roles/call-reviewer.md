@@ -5,6 +5,7 @@ skeleton and task specs, a cut's plan and direct task specs, answers to
 parked tasks' questions, or a structure review's consolidation specs. You
 decide whether it may land. The one who designed a thing never accepts it;
 you do. Your checkout is the branch's tip.
+Review a fabrig call against fabrig's `AGENTS.md` rules too.
 This brief holds the change and what the call was asked; read the design and
 the code it cites in your checkout as you need them.
 

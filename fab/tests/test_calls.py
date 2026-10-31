@@ -339,6 +339,39 @@ class BriefTest(unittest.TestCase):
             self.assertIn("- Readers: (none)", text)
             self.assertNotIn("- Contract: yes", text)
 
+    def test_fabrig_briefs_select_cited_and_needed_crates_and_plan_example(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            plan = replace(plan, repo="fabrig")
+            plan.parts["core"] = replace(plan.parts["core"], needs=("base",))
+            write(root / "design.md", "# Design\n\n## 1. Outside\n`skein/crates/outside`.\n\n"
+                  "## 2. Core\n`skein/crates/cited/src/lib.rs`; `named`.\n\n## 8. Rules\nRust.\n")
+            for name in ("cited", "named", "needed", "outside", "own"):
+                crate = root / "skein/crates" / name
+                write(crate / "Cargo.toml", f'[package]\nname = "{name}"\n')
+                write(crate / "src/lib.rs", f"/// {name} contract.\npub struct {name.title()};\n")
+                write(crate / "src/other.rs", f"pub fn {name}_sibling() {{}}\n")
+            write(root / "fab/broken.py", "This is not Python!")
+            tasks["demo/one"] = replace(tasks["demo/one"], files=("skein/crates/needed/src/*.rs",))
+            tasks["demo/two"] = replace(tasks["demo/two"], part="core", files=("skein/crates/own/**",))
+            # A landed spec elsewhere in this plan is useful even before the first need lands.
+            statuses = {"demo/three": "landed"}
+            for role in ("skeleton", "contract"):
+                with self.subTest(role=role):
+                    text = calls.skeleton_brief(plan, "core", tasks, statuses, root,
+                                                call_id="c", branch="b", report="r", role=role)
+                    variant = calls.ROLES[role].with_name(f"{role}-fabrig.md").read_text()
+                    self.assertIn(variant, text)
+                    self.assertIn("todo!()", text)
+                    inventory = text.split("# Inventory\n\n", 1)[1].split("\n\n# Task spec examples", 1)[0]
+                    for name in ("cited", "named", "needed"):
+                        self.assertIn(f"pub struct {name.title()}", inventory)
+                        self.assertIn(f"pub fn {name}_sibling()", inventory)
+                    for name in ("outside", "own", "fab/"):
+                        self.assertNotIn(name, inventory)
+                    self.assertIn("# Spec three", text.split("# Task spec examples", 1)[1])
+                    self.assertNotIn("# Fixed example", text)
+
     def test_skeleton_refuses_another_role(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
@@ -613,6 +646,41 @@ class StartTest(unittest.TestCase):
                               "outcome": "done", "tokens": "23/50/9", "cache_write": 7,
                               "peak": 80, "turns": 2, "minutes": 1.5})
 
+    def test_fabrig_call_fetches_builds_and_pushes_in_its_clone(self):
+        for branch in (None, "calls/root"):
+            with self.subTest(branch=branch), tmp_home() as root:
+                repo = log.home() / "repos/fabrig"
+                repo.mkdir(parents=True)
+
+                def claude(call):
+                    write(Path(call.cwd).parent / "report.md", "Done: Rust skeleton\n")
+                    return Result(0, "{}")
+
+                fake = FakeRunner().on(["claude"], claude)
+                result = calls.start("amend" if branch else "skeleton", "demo/core", repo,
+                                     "Brief.", sh=fake, branch=branch)
+                worktree = Path(result["report"]).parent / "wt"
+                target = branch or f"calls/{result['call']}"
+                self.assertEqual(result["branch"], target)
+                self.assertEqual(fake.argvs(), [
+                    ["git", "fetch", "origin"],
+                    ["git", "worktree", "add", "-B" if branch else "-b", target,
+                     str(worktree), f"origin/{target}" if branch else "origin/main"],
+                    calls.claude_argv(worktree.parent / "brief.md", worktree),
+                    ["git", "push", "origin", target],
+                    ["git", "worktree", "remove", "--force", str(worktree)],
+                ])
+                self.assertEqual([call.cwd for call in fake.calls],
+                                 [str(repo), str(repo), str(worktree), str(repo), str(repo)])
+
+    def test_fabrig_push_failure_removes_worktree_without_reporting_done(self):
+        with tmp_home():
+            fake = FakeRunner().on(["git", "push"], Result(1, err="offline"))
+            with self.assertRaises(Failed):
+                calls.start("skeleton", "demo/core", log.home() / "repos/fabrig", "Brief.", sh=fake)
+            self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+            self.assertEqual([event["ev"] for event in log.read()], ["call.started"])
+
     def test_start_binds_subject_answers_after_facts_before_next_section_or_end(self):
         for tail in ("", "\n\n# The task\n\nKeep the task.\n"):
             with self.subTest(tail=tail), tmp_home() as root:
@@ -770,6 +838,20 @@ class MainTest(unittest.TestCase):
                     self.assertNotIn("Other plan", text)
                 self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
                 self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
+
+    def test_fabrig_main_starts_each_call_in_dispatcher_clone(self):
+        for role in ("skeleton", "answer", "review", "amend"):
+            with self.subTest(role=role), tmp_home() as root:
+                fixture(root)
+                path = root / "docs/plan/demo/plan.toml"
+                write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
+                self.amend_chain()
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                args = {"skeleton": ["core"], "amend": ["root"]}.get(role, [])
+                with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()), \
+                     patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/id")) as start:
+                    self.assertEqual(calls.main([role, *args, "--plan", str(path.parent)]), 0)
+                self.assertEqual(start.call_args.args[2], log.home() / "repos/fabrig")
 
     def test_answer_brief_only_lists_queued_questions_with_foreman_reports(self):
         with tmp_home() as root:

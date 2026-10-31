@@ -170,17 +170,25 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
         if part_id in question.parts:
             details += f"\n- Question {question.id}: {question.text}\n  Answer: {question.answer or '(open)'}"
     design = _cited_design(root, part.design)
-    modules = {f"fab/{name}.py" for name in ("sh", "log", "atomic", "plan", "state")}
-    modules.update(re.findall(r"\bfab/[\w]+\.py\b", design))
-    modules.update(f"fab/{name}.py" for name in re.findall(r"\bfab\.([\w]+)\b", design))
-    for task in tasks.values():
-        if task.part in part.needs:
-            for pattern in task.files:
-                modules.update(path.relative_to(root).as_posix() for path in root.glob(pattern)
-                               if path.suffix == ".py")
+    if plan.repo == "fabrig":
+        patterns = [pattern for task in tasks.values() if task.part in part.needs for pattern in task.files]
+        signatures = render_inventory(_rust_inventory(root, design, patterns))
+    else:
+        modules = {f"fab/{name}.py" for name in ("sh", "log", "atomic", "plan", "state")}
+        modules.update(re.findall(r"\bfab/[\w]+\.py\b", design))
+        modules.update(f"fab/{name}.py" for name in re.findall(r"\bfab\.([\w]+)\b", design))
+        for task in tasks.values():
+            if task.part in part.needs:
+                for pattern in task.files:
+                    modules.update(path.relative_to(root).as_posix() for path in root.glob(pattern)
+                                   if path.suffix == ".py")
+        signatures = render_inventory(entry for entry in inventory(root) if entry.module in modules)
     examples = sorted((task for task in tasks.values()
                        if part.needs and task.part == part.needs[0]
                        and statuses.get(task.id) == "landed"), key=lambda task: task.path)
+    if plan.repo == "fabrig" and not examples:
+        examples = sorted((task for task in tasks.values() if statuses.get(task.id) == "landed"),
+                          key=lambda task: task.path)
     path = Path(examples[0].path if examples else "docs/plan/agents-rebuild/tasks/files.md")
     label = path.relative_to(root) if path.is_absolute() else path
     heading = f"{examples[0].id} ({label})" if examples else str(label)
@@ -188,16 +196,39 @@ def skeleton_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     if not examples and not spec_path.is_file():
         spec_path = Path(__file__).resolve().parents[1] / path
     example = f"## {heading}\n\n{spec_path.read_text(encoding='utf-8')}"
+    role_text = ROLES[role].read_text(encoding="utf-8")
+    if plan.repo == "fabrig":
+        role_text += "\n\n" + ROLES[role].with_name(f"{role}-fabrig.md").read_text(encoding="utf-8")
     return _brief([
-        ("Role", ROLES[role].read_text(encoding="utf-8")),
+        ("Role", role_text),
         ("Call facts", _facts(call_id, branch, report)),
         ("Plan parts and slices", _parts_table(plan, tasks, statuses)),
         ("Part to design", details),
         ("The user's drafts", _part_drafts(plan, part_id, root, design)),
         ("Cited design", design_text(root, part.design)),
-        ("Inventory", render_inventory(entry for entry in inventory(root) if entry.module in modules)),
+        ("Inventory", signatures),
         ("Task spec examples", example),
     ])
+
+
+def _rust_inventory(root: Path, design: str, patterns: Iterable[str]) -> list[Signature]:
+    """Public Rust items in cited crates and crates owned by direct needs."""
+    from fab import rust_digest
+
+    crates = set(re.findall(r"\b(?:skein|smith|jig|temper)/(?:crates|testing)/[\w-]+", design))
+    for directory in (*root.glob("*/crates/*"), *root.glob("*/testing/*")):
+        if directory.is_dir() and re.search(r"(?<![\w/-])" + re.escape(directory.name)
+                                            + r"(?![\w-])", design):
+            crates.add(directory.relative_to(root).as_posix())
+    for pattern in patterns:
+        for path in root.glob(pattern):
+            for parent in (path, *path.parents):
+                if parent == root:
+                    break
+                if (parent / "Cargo.toml").is_file():
+                    crates.add(parent.relative_to(root).as_posix())
+                    break
+    return rust_digest.inventory(root, sorted(crates))
 
 
 def _headings(text: str) -> list[tuple[int, str, int, int]]:
@@ -458,7 +489,8 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     report_path = directory / "report.md"
     brief = _bind_brief(brief, call_id, branch, str(report_path),
                         channel.answers_text(subject, log.read(log_path)))
-    if existing:
+    fabrig = repo.resolve() == (log.home() / "repos/fabrig").resolve()
+    if existing or fabrig:
         sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
     sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
         f"origin/{branch}" if existing else "origin/main"], cwd=str(repo), check=True)
@@ -476,6 +508,8 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         atomic.write(directory / "stream.jsonl", result.out)
         atomic.write(directory / "stderr.log", result.err)
         status = _call_result(report_path)
+        if fabrig:
+            sh(["git", "push", "origin", branch], cwd=str(repo), check=True)
         log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
                    outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
         wake.want(f"call {call_id}", path=wake.want_path(log_path))
@@ -627,7 +661,8 @@ def main(argv: list[str]) -> int:
         if args.brief_only:
             print(text)
             return 0
-        result = start(args.role, subject, root, text, sh=run, **options)
+        repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
+        result = start(args.role, subject, repo, text, sh=run, **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:
