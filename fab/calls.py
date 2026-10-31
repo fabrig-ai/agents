@@ -19,7 +19,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, channel, foreman, log, state
+from fab import atomic, channel, foreman, log, state, wake
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -337,8 +337,8 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     supplied), run Claude without nested-session environment markers, keep its stdout as
     stream.jsonl and its stderr as stderr.log, then
     log call.ended with the report's outcome, claude_usage(stdout).log_fields() and the
-    elapsed minutes. Nothing ends a call but TIMEOUT; a call cut short there is measured from
-    what its stream holds. Remove the worktree even on failure; return {call, branch,
+    elapsed minutes, then wake the tick with `call <id>` beside log_path. Nothing ends a call
+    but TIMEOUT; a call cut short there is measured from what its stream holds. Remove the worktree even on failure; return {call, branch,
     outcome, report}."""
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
@@ -372,6 +372,7 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         status = _call_result(report_path)
         log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
                    outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
+        wake.want(f"call {call_id}", path=wake.want_path(log_path))
         return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
     finally:
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)

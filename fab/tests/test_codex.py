@@ -129,7 +129,8 @@ class CodexFilesTest(unittest.TestCase):
                              (run_id, state))
         launcher = Path(codex.__file__).resolve().parent.parent / "bin/fab"
         self.assertEqual(self.fake.argvs(), [["systemd-run", "--user", "--collect", "--quiet",
-                          "--unit", "fab-codex-" + run_id, "--property=UMask=0077", "--",
+                          "--unit", "fab-codex-" + run_id, "--property=UMask=0077",
+                          f"--property=ExecStopPost=-{sys.executable} -I -B {launcher} wake codex {run_id}", "--",
                           sys.executable, "-I", "-B", str(launcher), "codex", "_exec", run_id]])
         self.assertFalse(self.report.exists())
 

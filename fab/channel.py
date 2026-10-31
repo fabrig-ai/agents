@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, log, plan
+from fab import atomic, log, plan, wake
 from fab.plan import Plan
 from fab.report import LANDING
 
@@ -268,7 +268,8 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
            log_path: Path | None = None) -> dict:
     """Log the user's answer to subject's open asks of kind call or parked and return the
     record: fab.log.append(ANSWERED, path=log_path, subject=subject, call=<the ask's call>,
-    by=by, question=<the question>, answer=<text stripped>).
+    by=by, question=<the question>, answer=<text stripped>), then wake the tick with
+    `answer <subject>` beside log_path.
 
     The ask is the last of asks((), events) whose subject equals subject (call or parked).
     The question: for call, the first non-blank line of excerpt(Path(<its report>)); for
@@ -287,8 +288,10 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
     ask = matching[-1]
     question = (next(line for line in excerpt(Path(ask.report)).splitlines() if line.strip())
                 if ask.kind == "call" else f"parked: {ask.text}")
-    return log.append(ANSWERED, path=log_path, subject=subject, call=ask.call, by=by,
-                      question=question, answer=text)
+    record = log.append(ANSWERED, path=log_path, subject=subject, call=ask.call, by=by,
+                        question=question, answer=text)
+    wake.want(f"answer {subject}", path=wake.want_path(log_path))
+    return record
 
 
 def main(argv: list[str]) -> int:

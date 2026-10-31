@@ -381,6 +381,8 @@ parts = ["core"]
         self.assertEqual(record, dict(ts=ts(2), ev="call.answered", subject="demo/core",
                                       call="cut-1", by="user", question="Question: Which host?", answer="hel8"))
         self.assertEqual(log.read(path), [record])
+        self.assertEqual((path.parent / "tick.want").read_text(), "answer demo/core\n")
+        self.assertFalse((self.fab_home / "tick.want").exists())
         self.assertEqual(log.read(), [])
 
     def test_answer_uses_last_open_ask_and_parked_reason(self):
@@ -388,6 +390,7 @@ parts = ["core"]
         self.assertEqual((record["call"], record["question"], record["by"]),
                          ("root-1", "parked: Choose capacity", "free"))
         self.assertEqual(log.read(), [record])
+        self.assertEqual((self.fab_home / "tick.want").read_text(), "answer demo/core\n")
         self.assertEqual(channel.asks((), [question(1), parked(2), record]), [])
 
     def test_answer_refuses_blank_unknown_and_plan_id_without_logging(self):
@@ -401,6 +404,7 @@ parts = ["core"]
         with self.assertRaisesRegex(ValueError, "open subjects: none"):
             channel.answer("missing", "yes", [])
         self.assertFalse(log.default_path().exists())
+        self.assertFalse((self.fab_home / "tick.want").exists())
 
     def test_main_show_and_write_through_cli(self):
         directory = self.home / "draft"

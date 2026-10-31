@@ -453,13 +453,21 @@ class StartTest(unittest.TestCase):
                 self.assertNotIn(channel.SECTION, brief)
                 self.assertIn((root / tasks["demo/one"].path).read_text(), brief)
                 self.assertEqual([event["ev"] for event in log.read(root / "custom.jsonl")], ["call.started"])
+                self.assertFalse((root / "tick.want").exists())
                 write(directory / "report.md", "\nDone: designed core\nDetails.\n")
                 return Result(0, result_json, "Claude diagnostic\n")
 
-            fake = FakeRunner().on(["claude"], claude)
+            def removed(call):
+                self.assertEqual(log.read(root / "custom.jsonl")[-1]["ev"], "call.ended")
+                self.assertEqual((root / "tick.want").read_text(), f"call {Path(call.argv[-1]).parent.name}\n")
+                return Result(0)
+
+            fake = FakeRunner().on(["claude"], claude).on(["git", "worktree", "remove"], removed)
             runner = Mock(wraps=fake)
             with patch.object(calls.time, "monotonic", side_effect=[100.0, 190.0]):
                 result = calls.start("skeleton", "demo/core", root, text, sh=runner, log_path=root / "custom.jsonl")
+            self.assertEqual((root / "tick.want").read_text(), f"call {result['call']}\n")
+            self.assertFalse((root / "fab/tick.want").exists())
             directory = root / "fab/calls" / result["call"]
             self.assertEqual(result, {"call": directory.name, "branch": f"calls/{directory.name}",
                                       "outcome": "done", "report": str(directory / "report.md")})
@@ -574,6 +582,7 @@ class StartTest(unittest.TestCase):
                 self.assertEqual((Path(result["report"]).parent / "stderr.log").read_text(), "failed")
                 self.assertEqual(log.read()[-1]["tokens"], tokens)
                 self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+                self.assertEqual((root / "fab/tick.want").read_text(), f"call {result['call']}\n")
 
     def test_report_sets_outcome_even_when_claude_exits_nonzero(self):
         for prefix, expected in (("Question", "question"), ("Infra", "infra"), ("Failed", "failed"), ("Unexpected", "failed")):
@@ -593,6 +602,7 @@ class StartTest(unittest.TestCase):
             with self.assertRaisesRegex(OSError, "cannot launch"):
                 calls.start("answer", "demo", root, "Brief.", sh=fake)
             self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+            self.assertFalse((root / "fab/tick.want").exists())
 
     def test_worktree_creation_failure_never_launches_claude(self):
         with tmp_home() as root:

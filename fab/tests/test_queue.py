@@ -8,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import gate, log, queue, receipts, reds
+from fab import gate, log, queue, receipts, reds, wake
 from fab.sh import Failed, Result, run
 from fab.tests.landing_checks import MAIN, TIP, FakeNextest, alone, kept, receipt, receipt_text
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
@@ -800,16 +800,109 @@ class ShellTest(unittest.TestCase):
             with contextlib.redirect_stdout(output):
                 self.assertEqual(queue.main(['plan', '--repo', '/clone', '--batch', '2']), 0)
             self.assertEqual(output.getvalue(), 'draft/task\n')
-            constructor.assert_called_with(Path('/clone'), batch=2)
+            constructor.assert_called_with(Path('/clone'), batch=2, wake=wake.wake)
             self.assertEqual(queue.main(['once']), 0)
             cycle.assert_called_once_with()
-            constructor.assert_called_with(log.home() / 'repos/fabrig', batch=8)
+            constructor.assert_called_with(log.home() / 'repos/fabrig', batch=8, wake=wake.wake)
             self.assertEqual(queue.main(['run']), 0)
             run_loop.assert_called_once_with(stop=q.home / 'queue.stop')
             cycle.side_effect = RuntimeError('unavailable')
             with contextlib.redirect_stderr(io.StringIO()) as errors:
                 self.assertEqual(queue.main(['once']), 1)
             self.assertIn('unavailable', errors.getvalue())
+
+
+class QueueWakeTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.branches = [queue.Branch('draft/a', 'a', 1), queue.Branch('draft/b', 'b', 2)]
+        self.notes = []
+        self.q = queue.Queue(self.home / 'clone', sh=FakeRunner(), wake=self.notes.append)
+        self.enterContext(patch.object(queue, 'candidates', return_value=self.branches))
+
+    def test_bisected_attempts_wake_once_in_record_order_and_clear_for_the_next_cycle(self):
+        a, b = self.branches
+        groups = []
+
+        def attempt(group):
+            groups.append(list(group))
+            self.q.last_merged = list(group)
+            if len(group) == 2:
+                return False
+            if group == [a]:
+                self.q._retire(group, 'main')
+                return True
+            self.q._reject(b, 'test', self.home / 'checks.log')
+            return False
+
+        with patch.object(self.q, 'attempt', side_effect=attempt):
+            self.assertTrue(self.q.cycle())
+        self.assertEqual(groups, [[a, b], [a], [b]])
+        self.assertEqual(self.notes, ['queue landed draft/a, rejected draft/b'])
+        self.assertEqual([record['ev'] for record in log.read(self.q.log_path)], ['landed', 'rejected'])
+        with patch.object(queue, 'candidates', return_value=[]):
+            self.assertFalse(self.q.cycle())
+        self.assertEqual(len(self.notes), 1)
+
+    def test_idle_and_attempt_without_landing_or_rejection_never_wake(self):
+        with patch.object(queue, 'candidates', return_value=[]):
+            self.assertFalse(self.q.cycle())
+        with patch.object(self.q, 'attempt', return_value=True):
+            self.assertTrue(self.q.cycle())
+        self.assertEqual(self.notes, [])
+
+    def test_queue_without_a_wake_still_records_decisions(self):
+        q = queue.Queue(self.home / 'clone', sh=FakeRunner())
+
+        def attempt(group):
+            q._retire(group[:1], 'main')
+            q._reject(group[1], 'test', self.home / 'checks.log')
+            return True
+
+        with patch.object(q, 'attempt', side_effect=attempt), \
+                patch.object(wake, 'wake', side_effect=AssertionError('unexpected wake')):
+            self.assertTrue(q.cycle())
+        self.assertEqual([record['ev'] for record in log.read(q.log_path)], ['landed', 'rejected'])
+
+    def test_attempt_error_after_a_record_still_wakes_and_keeps_the_error(self):
+        def attempt(group):
+            self.q._reject(group[0], 'merge', self.home / 'checks.log')
+            raise RuntimeError('checks failed')
+
+        with patch.object(self.q, 'attempt', side_effect=attempt):
+            with self.assertRaisesRegex(RuntimeError, 'checks failed'):
+                self.q.cycle()
+        self.assertEqual(self.notes, ['queue rejected draft/a'])
+
+    def test_raising_wake_is_printed_does_not_fail_the_cycle_and_is_not_retried(self):
+        def deliver(reason):
+            self.assertEqual(log.read(self.q.log_path)[-1]['ev'], 'rejected')
+            self.notes.append(reason)
+            raise OSError('cannot reach dispatcher')
+
+        def attempt(group):
+            self.q._reject(group[0], 'merge', self.home / 'checks.log')
+            return True
+
+        self.q.wake = deliver
+        with patch.object(self.q, 'attempt', side_effect=attempt), \
+                contextlib.redirect_stderr(io.StringIO()) as errors:
+            self.assertTrue(self.q.cycle())
+        self.assertEqual(self.notes, ['queue rejected draft/a'])
+        self.assertEqual(errors.getvalue(), 'fab queue: wake: cannot reach dispatcher\n')
+        with patch.object(self.q, 'attempt', return_value=True):
+            self.assertTrue(self.q.cycle())
+        self.assertEqual(len(self.notes), 1)
+
+    def test_failed_record_has_no_note_to_wake(self):
+        def attempt(group):
+            self.q._reject(group[0], 'merge', self.home / 'checks.log')
+
+        with patch.object(self.q, 'attempt', side_effect=attempt), \
+                patch.object(queue.log, 'append', side_effect=OSError('disk full')):
+            with self.assertRaisesRegex(OSError, 'disk full'):
+                self.q.cycle()
+        self.assertEqual(self.notes, [])
 
 
 if __name__ == '__main__':

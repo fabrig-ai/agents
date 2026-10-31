@@ -5,9 +5,10 @@ import unittest
 from contextlib import redirect_stdout
 from unittest.mock import patch
 
-from fab import land as landing, log
+from fab import land as landing, log, wake
 from fab.sh import run
 from fab.tests.support import GIT_ENV, git, git_pair, tmp_home
+from fab.tests.wakes import WakeTestCase
 
 
 class LandPureTest(unittest.TestCase):
@@ -218,3 +219,31 @@ class LandGitTest(unittest.TestCase):
         self.assertEqual(outcome.step, "fetch")
         self.assertEqual(git(self.origin, "rev-parse", "main"), self.base)
         self.assert_clean_detached()
+
+
+class LandWakeTest(WakeTestCase):
+    def test_landing_and_refusal_wake_after_logging_with_the_logged_task(self):
+        checkout = self.home / "checkout"
+        checkout.mkdir()
+        cases = [
+            ("draft/task-r2", [], "draft/task", landing.Outcome(True, "landed", "ok")),
+            ("draft/task", ["--task", "other/task"], "other/task", landing.Outcome(False, "paths", "outside")),
+            ("calls", [], None, landing.Outcome(False, "test", "red")),
+        ]
+        want = wake.want
+        for branch, options, task, outcome in cases:
+            expected = f"land {task if task is not None else '-'} {outcome.step}"
+
+            def note(reason):
+                record = log.read()[-1]
+                self.assertEqual(record["task"], task)
+                self.assertEqual(record["ev"], "branch.landed" if outcome.landed else "branch.rejected")
+                self.assertEqual(reason, expected)
+                return want(reason)
+
+            with self.subTest(task=task), patch.object(landing, "land", return_value=outcome), \
+                    patch.object(wake, "want", side_effect=note), redirect_stdout(io.StringIO()):
+                self.assertEqual(landing.main([branch, "--checkout", str(checkout), *options]),
+                                 0 if outcome.landed else 1)
+            self.assertWanted(expected)
+            wake.take()

@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import log
+from fab import log, wake
 from fab.sh import Runner, run
 
 # What fab land may land; anything else still goes through tools/land.
@@ -119,7 +119,8 @@ def main(argv: list[str]) -> int:
     The checkout defaults to FAB_HOME/repos/agents, cloned from REMOTE when missing. A flock
     on FAB_HOME/land-agents.lock serializes landings. The task defaults to task_of(BRANCH).
     Logs branch.landed (task, branch, tip, main) or branch.rejected (task, branch, tip, step,
-    log: the detail); prints the outcome; exits 0 when landed, 1 when refused.
+    log: the detail); wakes the tick with `land <task or -> <step>` after logging;
+    prints the outcome; exits 0 when landed, 1 when refused.
     """
     parser = argparse.ArgumentParser(prog="fab land", description=__doc__)
     parser.add_argument("branch")
@@ -146,5 +147,6 @@ def main(argv: list[str]) -> int:
             log.append("branch.landed", **fields, main=outcome.main)
         else:
             log.append("branch.rejected", **fields, step=outcome.step, log=outcome.detail)
+        wake.want(f"land {task if task is not None else '-'} {outcome.step}")
         print(f"{args.branch}: {outcome.step}: {outcome.detail}")
         return 0 if outcome.landed else 1

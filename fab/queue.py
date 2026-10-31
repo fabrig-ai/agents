@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
-from fab import atomic, gate, log, receipts, reds, slots
+from fab import atomic, gate, log, receipts, reds, slots, wake as events
 from fab.sh import Runner, run
 
 
@@ -125,14 +125,18 @@ def bisect(branches: Sequence[Branch], check: Callable[[list[Branch]], bool]) ->
 
 class Queue:
     def __init__(self, repo: Path, *, batch: int = 8, full_every: int = 5, home: Path | None = None,
-                 sh: Runner = run, load: Callable[[Path], dict] | None = None):
-        """repo: the queue's own clone; home: FAB_HOME; load: the metadata loader (fab.gate.metadata)."""
+                 sh: Runner = run, load: Callable[[Path], dict] | None = None,
+                 wake: Callable[[str], object] | None = None):
+        """repo: the queue's own clone; home: FAB_HOME; load: the metadata loader (fab.gate.metadata).
+        wake: when set, cycle wakes the tick once for its landed and rejected records."""
         if batch < 1 or full_every < 1:
             raise ValueError("batch and full_every must be positive")
         self.repo = Path(repo).resolve()
         self.home = Path(home) if home is not None else log.home()
         self.batch, self.full_every = batch, full_every
         self.sh, self.load = sh, load
+        self.wake = wake
+        self._wake_notes: list[str] = []
         self.state_path = self.home / "queue-state.json"
         self.log_path = self.home / "queue.jsonl"
         self.state = json.loads(self.state_path.read_text()) if self.state_path.exists() else {}
@@ -151,12 +155,15 @@ class Queue:
         atomic.write(self.state_path, json.dumps(self.state) + "\n")
 
     def _reject(self, branch: Branch, step: str, detail: Path) -> None:
+        """Record a rejection and note it for the cycle's wake."""
         self.state["tried"][branch.name] = branch.tip
         self.state["collateral"].pop(branch.name, None)
         log.append("rejected", path=self.log_path, branch=branch.name, tip=branch.tip,
                    step=step, log=str(detail))
+        self._wake_notes.append(f"rejected {branch.name}")
 
     def _retire(self, branches: Sequence[Branch], main: str) -> str | None:
+        """Retire pinned refs, recording each landing and noting it for the cycle's wake."""
         if not branches:
             return
         # Without --atomic, an updated head does not prevent retiring the other pinned refs.
@@ -169,6 +176,7 @@ class Queue:
             if result.ok:
                 self.state["tried"][branch.name] = branch.tip
             log.append("landed", path=self.log_path, branch=branch.name, tip=branch.tip, main=main)
+            self._wake_notes.append(f"landed {branch.name}")
         return None if result.ok else f"cleanup: {result.out}{result.err}"
 
     def attempt(self, branches: Sequence[Branch]) -> bool:
@@ -371,7 +379,10 @@ class Queue:
         Take up to `batch` candidates and attempt them, bisecting when red;
         return whether there was anything to do. A collateral attempt (last_outcome
         "collateral") is not bisected: its branches go again next cycle. Within a bisection, a
-        collateral attempt counts as passed, so its group is not split further."""
+        collateral attempt counts as passed, so its group is not split further. Finally, wake
+        once with `queue <landed/rejected notes joined by comma>` when records were written
+        and wake is set; clear the notes even on error. A failed wake is printed to stderr
+        and never fails the cycle."""
         self._error_recorded = False
         self._force_full = False
         requests = self.home / "queue-untry"
@@ -387,19 +398,28 @@ class Queue:
         branches = candidates(self.repo, self.state["tried"], sh=self.sh)[:self.batch]
         if not branches:
             return False
-        initial_green = self.attempt(branches)
-        merged = self.last_merged
-        first = True
+        try:
+            initial_green = self.attempt(branches)
+            merged = self.last_merged
+            first = True
 
-        def check(group):
-            nonlocal first
-            if first:
-                first = False
-                return initial_green or self.last_outcome == "collateral"
-            return self.attempt(group) or self.last_outcome == "collateral"
+            def check(group):
+                nonlocal first
+                if first:
+                    first = False
+                    return initial_green or self.last_outcome == "collateral"
+                return self.attempt(group) or self.last_outcome == "collateral"
 
-        bisect(merged, check)
-        return True
+            bisect(merged, check)
+            return True
+        finally:
+            try:
+                if self._wake_notes and self.wake is not None:
+                    self.wake("queue " + ", ".join(self._wake_notes))
+            except Exception as error:
+                print(f"fab queue: wake: {error}", file=sys.stderr)
+            finally:
+                self._wake_notes.clear()
 
     def run(self, *, stop: Path, idle: float = 30.0, sleep: Callable[[float], None] | None = None) -> None:
         """Cycle until the file `stop` exists, sleeping `idle` seconds after a cycle with nothing to do.
@@ -424,7 +444,8 @@ def main(argv: list[str]) -> int:
     `fab queue log [--since TS]` (queue.jsonl records at or after TS, one per line),
     `fab queue untry BRANCH` (ask the running queue to forget its tried tip next cycle),
     `fab queue receipt TIP` (keep the precheck receipt on stdin for TIP, fab.receipts.store
-    with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1)."""
+    with FAB_HOME; a refusal prints `fab queue: <error>` and exits 1).
+    Running cycles wake the tick through fab.wake.wake."""
     parser = argparse.ArgumentParser(prog="fab queue")
     parser.add_argument("command", choices=("run", "once", "plan", "log", "untry", "receipt"))
     parser.add_argument("branch", nargs="?")
@@ -451,7 +472,7 @@ def main(argv: list[str]) -> int:
             path = log.home() / "queue-untry" / args.branch.replace("/", "%2F")
             atomic.write(path, "")
             return 0
-        queue = Queue(args.repo, batch=args.batch)
+        queue = Queue(args.repo, batch=args.batch, wake=events.wake)
         if args.command == "plan":
             queue._git("fetch", "--prune", "origin")
             for branch in candidates(queue.repo, queue.state["tried"], sh=queue.sh)[:queue.batch]:

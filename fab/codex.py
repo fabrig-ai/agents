@@ -64,8 +64,10 @@ def start(brief: Path, workdir: Path, report: Path, *, effort: str = "high", rea
     """Refuse (ValueError) a relative path, a missing brief or workdir, an existing report or an
     unknown effort. Create the state directory with meta.json (brief, dir, report, effort,
     read_only, model, started), then `systemd-run --user --collect --quiet --unit fab-codex-<id>
-    --property=UMask=0077 -- <python3> -I -B <this repo's bin/fab> codex _exec <id>`. Returns
-    (id, state directory)."""
+    --property=UMask=0077 --property=ExecStopPost=-<python3> -I -B <bin/fab> wake codex <id>
+    -- <python3> -I -B <this repo's bin/fab> codex _exec <id>`. Returns
+    (id, state directory). ExecStopPost wakes the tick after the unit stops; its leading -
+    keeps a failed wake from changing the unit's result."""
     for name, path in (("brief", brief), ("workdir", workdir), ("report", report)):
         if not path.is_absolute():
             raise ValueError(f"{name} must be absolute")
@@ -90,7 +92,9 @@ def start(brief: Path, workdir: Path, report: Path, *, effort: str = "high", rea
     atomic.write(state / "meta.json", json.dumps(meta) + "\n")
     launcher = Path(__file__).resolve().parent.parent / "bin/fab"
     sh(["systemd-run", "--user", "--collect", "--quiet", "--unit", f"fab-codex-{run_id}",
-        "--property=UMask=0077", "--", sys.executable, "-I", "-B", str(launcher),
+        "--property=UMask=0077",
+        f"--property=ExecStopPost=-{sys.executable} -I -B {launcher} wake codex {run_id}",
+        "--", sys.executable, "-I", "-B", str(launcher),
         "codex", "_exec", run_id], check=True)
     return run_id, state
 
