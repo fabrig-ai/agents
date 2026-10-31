@@ -109,3 +109,12 @@ This task waits for `atomic-write` (`enlist` writes through
   they are answered; the answer is what the call designs from.
 - Briefs refuse past BRIEF_LIMIT rather than cutting designs: a cut design
   would be a contract read in part.
+
+## Answers
+
+- 2026-10-31. Q: may this task rename the plan's part `retire`, which the
+  new reserved-id problem reports? A: no need: the answer call renamed the
+  part to `retire-kit` in `docs/plan/agents-rebuild/plan.toml` (part and
+  slice 5) on its branch, since no task spec belongs to that part. Resume
+  on a base with it; keep RESERVED and the `part <id> takes a reserved id` problem
+  unchanged, and leave plan.toml outside this task's files.

@@ -153,7 +153,7 @@ needs = ["calls"]
 design = "docs/design/fab.md, 12"
 
 [[part]]
-id = "retire"
+id = "retire-kit"
 title = "Retire session, watch's session rules, post, lease, record-collect and the old kit"
 mode = "migration"
 needs = ["dispatch", "report"]
@@ -186,7 +186,7 @@ walk = false
 [[slice]]
 id = 5
 story = "Every branch passes the gates and a structure review; no resident session is needed"
-parts = ["gates", "retire"]
+parts = ["gates", "retire-kit"]
 walk = false
 
 # Slice 6: the full model, built by the loop itself (docs/design/fab.md, 13).
