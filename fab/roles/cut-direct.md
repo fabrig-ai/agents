@@ -22,8 +22,9 @@ come before the ones above where they differ.
 - **One crate family per site task,** each owning disjoint files. Two
   tasks that must change the same files are ordered by `needs`.
 - **Counted forms:** when the draft sets counts that may only fall, a first
-  task adds them to the tree's `scripts/old_forms.py` ratchet, and every
-  later task lowers `scripts/old-forms.txt` with `--write`. The tick
+  task adds them to the tree's `scripts/old_forms.py` ratchet, every other
+  task needs it (so no branch predates the counts it must not raise), and
+  every task lowers `scripts/old-forms.txt` with `--write`. The tick
   recounts that file when merges meet on it.
 - **Shared notes** go once in the plan's `notes/`: `common.md` (the
   standing rules every implementer follows: scope, the checks, the code
