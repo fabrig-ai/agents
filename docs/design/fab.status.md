@@ -23,6 +23,10 @@
   `fab` on PATH). hetzner6's slots 5 and 7 carry fab claims mirroring the
   paused ladder work's old claims.
 - **fabrig's landing:** `fab gate`, `fab queue`, `fab precheck` on main.
+- **Logins:** `fab logins` (13.13): the shelf, capture, lend, return, swap,
+  retire and check. Its live use starts with moving the machines' logins
+  and the old pool's working copies onto the shelf by hand; QA's logins
+  stay in hetzner6's `tools/qa/logins` until the live pairs use the shelf.
 
 ## Gaps and departures
 

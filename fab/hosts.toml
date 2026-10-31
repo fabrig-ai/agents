@@ -55,27 +55,3 @@ slot_bound_gb = 25
 kache_gb = 50
 headroom_gb = 10
 builds = 4
-
-[hetzner11]
-ssh = "free@46.62.137.30"
-hostname = "debian-16gb-hel1-11"
-roles = ["builder"]
-disk_gb = 305
-places = 4
-slots = 7
-slot_bound_gb = 25
-kache_gb = 50
-headroom_gb = 10
-builds = 4
-
-[hetzner12]
-ssh = "free@37.27.20.25"
-hostname = "debian-16gb-hel1-12"
-roles = ["builder"]
-disk_gb = 305
-places = 4
-slots = 7
-slot_bound_gb = 25
-kache_gb = 50
-headroom_gb = 10
-builds = 4

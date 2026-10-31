@@ -19,6 +19,7 @@ COMMANDS = {
     "check": ("fab.integration", "check an integration trunk as a user unit"),
     "codex": ("fab.codex", "start a Codex run as a user unit (the builder's side of fab run)"),
     "hosts": ("fab.hosts", "the machines and their disk budget"),
+    "logins": ("fab.logins", "the shelf of Claude, Codex and QA logins: lend, return, swap, check"),
     "slot": ("fab.slots", "a builder's slots: claim, release, reclaim"),
     "queue": ("fab.queue", "fabrig's merge queue"),
     "precheck": ("fab.precheck", "the queue's checks on a branch, in its slot"),

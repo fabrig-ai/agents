@@ -51,6 +51,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 | `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
+| `~/src/fabrig/logins/shelf/` on hel8 | every login at rest or its placeholder while lent (13.13) |
 
 - **hel8** runs the dispatcher, Claude calls and `fab land` for this
   repository. **Builders** (hetzner6 today) run Codex and builds. **hetzner8**
@@ -1119,6 +1120,54 @@ only as tweaks once a replay matches its run.
   and test-writers are not built yet either. Each may come back as an
   option once a replay matches its run.
 
+### 13.13 Logins
+
+Replaces the agents repository's `tools/qa/logins` (QA's held logins) and
+the unlanded `agents-logins` of `deploy/logins-pool-1b` (the machines'
+sign-ins, director decisions 0015 and 0017). The user, 10-31: one custody
+for both, recorded in the log; 4 Claude and 3 Codex subscriptions, every
+login that still works reused across them before more are signed in.
+
+- **One shelf, on hel8:** `~/src/fabrig/logins/shelf/<id>/` (0700), one
+  entry per login, holding it under its kind's name. The kinds are `codex`
+  (`~/.codex/auth.json`) and `claude` (`~/.claude/.credentials.json`), lent
+  to a machine at that path, and QA's `chatgpt` (temper's ChatGPT record,
+  a live run's `TEMPER_LIVE_ACCOUNT`) and `claude-box` (a Claude Code
+  directory, `TEMPER_LIVE_CLAUDE`), lent to a run at a path of its own. An
+  id is `<kind>-<n>`.
+- **Custody is the log:** `login.added` (id, kind, origin, sha),
+  `login.lent` (id, holder, host, at, sha), `login.returned` (id, sha),
+  `login.checked` (id, email, plan, used, resets, error) and
+  `login.retired` (id, reason). `fab.logins.fold` derives each login's
+  holder; the dispatcher's machine is the only writer, under the shelf's
+  flock.
+- **Copied out, copied back:** both products refresh their tokens, so the
+  copy last used is the true one. A lent login's shelf copy is a
+  placeholder until `fab logins return` copies the lent copy back, checks
+  its digest on both ends, and removes it where it was only if it has not
+  changed meanwhile (its user must have stopped). Lending checks the shelf
+  copy against the last returned digest, installs it only where nothing
+  is, and checks it again there. tar, ssh and sha256sum move and hash the
+  bytes; Python never holds them and nothing prints them.
+- **A machine's logins:** `fab logins capture HOST KIND` takes a machine's
+  current sign-in onto the shelf, still lent to it (decision 0017's
+  "bound"); `--free --path P` takes one whose source is used no more (QA's
+  custody holds it, its machine is gone). `fab logins swap HOST ID` gives
+  back the machine's login of that kind and lends ID; `fab logins list`
+  names each role's missing logins (a dispatcher or builder needs both
+  kinds).
+- **Checks by the products themselves:** `fab logins check ID` asks Codex's
+  app-server (`account/read`, `account/rateLimits/read`: the account, the
+  plan, the weekly window's percent used) or `claude auth status`. A lent
+  machine login is checked in place, on its machine; a free one is lent to
+  hel8 in a private directory, checked with a real request (a Claude call
+  of a few tokens; Codex refreshes its token) and returned, so an expired
+  login says so. The weekly percent is the signal for a swap.
+- **Left out:** the old tools' pending journals and backups, QA's waiting
+  queue, reservations and admission caps (the dispatcher decides who gets a
+  login, as it does places), and checks of `chatgpt` records, which only a
+  temper box can read: their live runs show whether they work.
+
 ## 14. Later
 
 - (The self-critique is 13.1's, part `critique`, not later.)
@@ -1143,6 +1192,13 @@ only as tweaks once a replay matches its run.
   branches are suspects, CPU accounting against the tiers' budgets, and the
   landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
+- Logins (13.13), next: the live pairs (`live-temper`, `live-skein`, ...)
+  in after-landing, on the queue's machine as well as builders (the user,
+  10-31), each pair holding a `chatgpt` or `claude-box` login lent to its
+  run and returned when it ends; QA's six logins moved from hetzner6's
+  `tools/qa/logins` onto the shelf, and that tool retired. Then a new
+  builder lent its logins when it joins and returned when it goes, and
+  swaps proposed from `login.checked`'s weekly percent.
 - The tick's event and backstop units kept by fleet, as the queue's will be;
   lost-event notes counted in the code report; a wake retried before the
   backstop, if those notes show wakes are lost.
