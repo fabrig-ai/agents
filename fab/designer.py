@@ -11,13 +11,15 @@ Retire brings a finished plan's status files current and marks the plan retired.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from fab import atomic, calls, log, state
 from fab import run as runs
-from fab.plan import Plan, Task, load_plan, load_tasks
+from fab.plan import Plan, Task, load_plan, load_tasks, parse_options
 from fab.sh import Failed, Runner, run
 
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
@@ -42,12 +44,13 @@ def subject(draft: str, role: str, part: str | None = None) -> str:
     return f"{draft}/{role}"
 
 
-def uncut(draft: str, repo: str, sources: Sequence[str] = ()) -> Plan:
+def uncut(draft: str, repo: str, sources: Sequence[str] = (),
+          options: Mapping[str, object] | None = None) -> Plan:
     """The stand-in for a plan whose plan.toml does not exist yet: Plan(draft, repo,
     tuple(sources), 1.0, 2.0, {}, ()), no parts, slices or questions, not retired. The cut's
     brief reads its sources through fab.calls.drafts_text; the tick of a plan directory
-    being cut runs on it (fab.dispatch.tick)."""
-    return Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ())
+    being cut runs on it (fab.dispatch.tick). Parsed options replace the plan defaults."""
+    return replace(Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ()), **(options or {}))
 
 
 def repository(checkout: Path, *, sh: Runner = run) -> str:
@@ -170,7 +173,7 @@ def enlist(plan_dir: Path) -> bool:
 
 
 def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
-              plan_path: str | None = None) -> str:
+              plan_path: str | None = None, options: Sequence[str] = ()) -> str:
     """The cut's brief, plan being uncut(draft, repo, sources), through fab.calls' section
     builder and facts (fab.calls._brief, _facts), sections in this order:
 
@@ -185,6 +188,10 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     7. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
        when it is empty (a repository without fab/).
 
+    When options are given, insert `Plan options` after `The draft`, with parsed
+    KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true,
+    require direct parts, task specs written by the cut, shared notes under the plan's
+    notes/ cited by repository path, and needs naming tasks whose merged code is needed.
     plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
     plan_path = plan_path or f"{PLANS}/{plan.draft}"
@@ -193,12 +200,25 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
     if plan.repo == "fabrig":
         role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
+    option_sections = []
+    if options:
+        parsed = parse_options(options)
+        lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
+        text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
+                f"```toml\n{lines}\n```")
+        if parsed.get("direct"):
+            text += ("\n\nEvery part is `mode = \"direct\"`, so the cut writes every task spec itself. "
+                     f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
+                     "cited from each spec by repository path; the implementers read them in their checkout. "
+                     "A task's `needs` name the tasks whose merged code it builds on.")
+        option_sections.append(("Plan options", text))
     return calls._brief([
         ("Role", role_text),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("The draft", f"- Draft: {plan.draft}\n- Repository: {plan.repo}\n"
          f"- Plan: write `{plan_path}/plan.toml`\n"
          f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
+        *option_sections,
         ("The user's drafts", calls.drafts_text(plan, root)),
         ("Designs", design_index(root)),
         ("Plans", "\n".join(f"- `{path}`" for path in plans) or "(none)"),
@@ -300,13 +320,16 @@ def main(argv: list[str]) -> int:
     """The designer's calls as `fab call ROLE ...` (fab.calls.main hands argv over when its
     first item is in ROLES), each with `--brief-only` (print the brief, run nothing):
 
-    - `fab call cut --plan PLAN_DIR --source PATH [--source PATH ...]`: the draft is
+    - `fab call cut --plan PLAN_DIR --source PATH [--source PATH ...] [--set KEY=VALUE ...]`:
+      the draft is
       PLAN_DIR's name; the checkout root is `git rev-parse --show-toplevel` in the nearest
       existing directory at or above PLAN_DIR; ValueError when PLAN_DIR is not
       root/<prefix>docs/plan/<draft>, PLAN_DIR/plan.toml exists, or a source is not a
       relative path naming a file under the root. The plan is
-      uncut(draft, repository(root), sources); without --brief-only, enlist(PLAN_DIR)
-      before the call.
+      uncut(draft, repository(root), sources, parse_options(entries)); parse options
+      before preparing the checkout. An integration cut requires root's upstream to be
+      origin/<draft>/integration. Without --brief-only, enlist(PLAN_DIR) before the call;
+      raw option entries are logged in call.started's options.
     - `fab call contract PART --plan PLAN_DIR`: fab.calls.skeleton_brief with role
       contract; ValueError for an unknown part or one the plan does not mark contract.
     - `fab call decision PART --plan PLAN_DIR --run RUN`: decision_brief.
@@ -315,12 +338,13 @@ def main(argv: list[str]) -> int:
 
     The others load the plan and its tasks as fab.calls.main does (no problems check),
     statuses from fab.state.fold over fab.log.read(). Each runs fab.calls.start(role,
-    subject(draft, role, part), root, brief), prints `<outcome> <branch>` and exits 0 when
+    subject(draft, role, part), root, brief, base=plan.trunk), prints `<outcome> <branch>` and exits 0 when
     the outcome is done, 1 otherwise; an OSError, ValueError or fab.sh.Failed prints
     `fab call: <error>` on stderr and exits 1, starting nothing."""
     args = _arguments(argv)
     try:
-        plan, tasks, root, plan_path = _prepare(args)
+        options = parse_options(args.set) if args.role == "cut" else {}
+        plan, tasks, root, plan_path = _prepare(args, options)
         statuses = {key: view.status for key, view in state.fold(tasks, log.read()).items()}
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
         text = _compile(args, plan, tasks, statuses, root, facts, plan_path)
@@ -330,8 +354,9 @@ def main(argv: list[str]) -> int:
         if args.role == "cut":
             enlist(args.plan)
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
+        fields = {"options": args.set} if args.role == "cut" and args.set else None
         result = calls.start(args.role, subject(plan.draft, args.role, getattr(args, "part", None)),
-                             repo, text, sh=run)
+                             repo, text, sh=run, base=plan.trunk, fields=fields)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:
@@ -353,10 +378,11 @@ def _arguments(argv):
             command.add_argument("--run", required=True)
         if role == "cut":
             command.add_argument("--source", action="append", required=True)
+            command.add_argument("--set", action="append", default=[], metavar="KEY=VALUE")
     return parser.parse_args(argv)
 
 
-def _prepare(args):
+def _prepare(args, options):
     """Find the checkout and read a plan, or validate a cut's destination and sources."""
     directory = args.plan.resolve()
     ancestor = directory
@@ -375,13 +401,20 @@ def _prepare(args):
         path = root / source
         if Path(source).is_absolute() or not path.resolve().is_relative_to(root) or not path.is_file():
             raise ValueError(f"source must name a relative file under {root}: {source}")
-    return uncut(directory.name, repository(root, sh=run), args.source), {}, root, plan_path.as_posix()
+    plan = uncut(directory.name, repository(root, sh=run), args.source, options)
+    if plan.landing == "integration":
+        expected = f"origin/{plan.trunk}"
+        upstream = run(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                       cwd=str(root), check=False)
+        if not upstream.ok or upstream.out.strip() != expected:
+            raise ValueError(f"checkout {root} must track {expected}")
+    return plan, {}, root, plan_path.as_posix()
 
 
 def _compile(args, plan, tasks, statuses, root, facts, plan_path):
     """Build a brief only after the role's preconditions hold."""
     if args.role == "cut":
-        return cut_brief(plan, root, plan_path=plan_path, **facts)
+        return cut_brief(plan, root, plan_path=plan_path, options=args.set, **facts)
     if args.role == "contract":
         if args.part not in plan.parts:
             raise ValueError(f"unknown part {args.part!r}")

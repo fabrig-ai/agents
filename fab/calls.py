@@ -465,15 +465,18 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: 
 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
           log_path: Path | None = None, branch: str | None = None,
-          amends: str | None = None) -> dict:
+          amends: str | None = None, base: str = "main",
+          fields: Mapping[str, object] | None = None) -> dict:
     """Run a fresh call, keeping its own id, directory, brief, report and result artifacts.
 
-    Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/main, or fetch origin and
+    Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/<base>, fetching first
+    when base is not main (also for fabrig), or fetch origin and
     reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts
     and insert the subject's user answers after them, before the next # section or at the
     end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
     brief before facts and answers are bound. Log call.started (including amends when
-    supplied), run Claude without nested-session environment markers, keep its stdout as
+    supplied, trunk when base is not main, and fields), run Claude without
+    nested-session environment markers, keep its stdout as
     stream.jsonl and its stderr as stderr.log, then
     log call.ended with the report's outcome, claude_usage(stdout).log_fields() and the
     elapsed minutes, then wake the tick with `call <id>` beside log_path. Nothing ends a call
@@ -492,14 +495,18 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     brief = _bind_brief(brief, call_id, branch, str(report_path),
                         channel.answers_text(subject, log.read(log_path)))
     fabrig = repo.resolve() == (log.home() / "repos/fabrig").resolve()
-    if existing or fabrig:
+    if existing or fabrig or base != "main":
         sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
     sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
-        f"origin/{branch}" if existing else "origin/main"], cwd=str(repo), check=True)
+        f"origin/{branch}" if existing else f"origin/{base}"], cwd=str(repo), check=True)
     began = time.monotonic()
     try:
         atomic.write(brief_path, brief)
-        fields = {"amends": amends} if amends is not None else {}
+        fields = dict(fields or {})
+        if amends is not None:
+            fields["amends"] = amends
+        if base != "main":
+            fields["trunk"] = base
         log.append("call.started", path=log_path, call=call_id, role=role, subject=subject,
                    branch=branch, **fields)
         environment = {key: value for key, value in os.environ.items()
@@ -665,7 +672,7 @@ def main(argv: list[str]) -> int:
             print(text)
             return 0
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
-        result = start(args.role, subject, repo, text, sh=run, **options)
+        result = start(args.role, subject, repo, text, sh=run, base=plan.trunk, **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:

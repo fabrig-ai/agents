@@ -658,6 +658,38 @@ class StartTest(unittest.TestCase):
                               "outcome": "done", "tokens": "23/50/9", "cache_write": 7,
                               "peak": 80, "turns": 2, "minutes": 1.5})
 
+    def test_integration_base_fetches_sets_start_and_logs_trunk_and_fields(self):
+        for branch in (None, "calls/root"):
+            with self.subTest(branch=branch), tmp_home() as root:
+                fields = {"options": ['landing="integration"', "reviews=false"]}
+                fake = FakeRunner()
+                result = calls.start("amend" if branch else "cut", "demo/cut", root, "Brief.",
+                                     sh=fake, base="demo/integration", fields=fields,
+                                     branch=branch, amends="root" if branch else None)
+                worktree = Path(result["report"]).parent / "wt"
+                self.assertEqual(fake.argvs()[:2], [
+                    ["git", "fetch", "origin"],
+                    ["git", "worktree", "add", "-B" if branch else "-b", result["branch"],
+                     str(worktree), f"origin/{branch}" if branch else "origin/demo/integration"],
+                ])
+                self.assertEqual([call.cwd for call in fake.calls[:2]], [str(root), str(root)])
+                started = log.read()[0]
+                self.assertEqual(started["trunk"], "demo/integration")
+                self.assertEqual(started["options"], fields["options"])
+                self.assertEqual(fields, {"options": ['landing="integration"', "reviews=false"]})
+                if branch:
+                    self.assertEqual(started["amends"], "root")
+                else:
+                    self.assertNotIn("amends", started)
+
+    def test_integration_base_fetch_failure_starts_nothing(self):
+        with tmp_home() as root:
+            fake = FakeRunner().on(["git", "fetch"], Result(1, err="offline"))
+            with self.assertRaises(Failed):
+                calls.start("cut", "demo/cut", root, "Brief.", sh=fake, base="demo/integration")
+            self.assertEqual(fake.argvs(), [["git", "fetch", "origin"]])
+            self.assertEqual(log.read(), [])
+
     def test_fabrig_call_fetches_builds_and_pushes_in_its_clone(self):
         for branch in (None, "calls/root"):
             with self.subTest(branch=branch), tmp_home() as root:
@@ -949,6 +981,20 @@ class MainTest(unittest.TestCase):
                 self.assertIs(start.call_args.kwargs["sh"], fake)
                 self.assertEqual(output.getvalue(), f"{outcome} calls/id\n")
 
+    def test_main_calls_start_on_plan_trunk(self):
+        for role in ("skeleton", "answer", "review", "amend"):
+            with self.subTest(role=role), tmp_home() as root:
+                fixture(root)
+                path = root / "docs/plan/demo/plan.toml"
+                write(path, 'landing = "integration"\n' + path.read_text())
+                self.amend_chain()
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                args = {"skeleton": ["core"], "amend": ["root"]}.get(role, [])
+                with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()), \
+                     patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/id")) as start:
+                    self.assertEqual(calls.main([role, *args, "--plan", str(path.parent)]), 0)
+                self.assertEqual(start.call_args.kwargs["base"], "demo/integration")
+
     def amend_chain(self):
         log.append("call.started", call="root", role="answer", subject="demo", branch="calls/root")
         log.append("call.ended", call="root", outcome="done")
@@ -981,7 +1027,7 @@ class MainTest(unittest.TestCase):
                  patch.object(calls, "start", return_value={"outcome": "done", "branch": "calls/root"}) as start:
                 self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo")]), 0)
             self.assertEqual(start.call_args.args[:3], ("amend", "demo", root))
-            self.assertEqual(start.call_args.kwargs, dict(sh=fake, branch="calls/root", amends="root"))
+            self.assertEqual(start.call_args.kwargs, dict(sh=fake, base="main", branch="calls/root", amends="root"))
 
     def test_main_amend_refuses_unknown_root_and_every_other_state(self):
         for status in ("unknown", *[state for state in call_review.STATES if state != "amend"]):

@@ -9,7 +9,7 @@ from unittest.mock import Mock, patch
 
 from fab import atomic, calls, cli, designer, log
 from fab import run as runs
-from fab.plan import Part, Plan, Task, load_plan, load_tasks
+from fab.plan import Part, Plan, Task, load_plan, load_tasks, parse_options
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
@@ -85,6 +85,12 @@ class SubjectTest(unittest.TestCase):
         self.assertEqual(designer.uncut("draft", "agents", sources),
                          Plan("draft", "agents", tuple(sources), 1.0, 2.0, {}, ()))
         self.assertEqual(designer.uncut("draft", "agents").sources, ())
+
+    def test_uncut_carries_parsed_options(self):
+        options = parse_options(['landing="integration"', "ready=false", "reviews=false", "direct=true"])
+        plan = designer.uncut("draft", "agents", [SOURCE], options)
+        self.assertEqual(plan, replace(designer.uncut("draft", "agents", [SOURCE]), **options))
+        self.assertEqual(plan.trunk, "draft/integration")
 
 
 class FilesTest(unittest.TestCase):
@@ -288,6 +294,30 @@ class BriefTest(unittest.TestCase):
             self.assertIn(fragment, text)
         self.assertNotIn("Keep this contract.", text)
 
+    def test_cut_options_follow_draft_and_emit_one_toml_assignment_per_key(self):
+        plan = designer.uncut("new", "agents", [SOURCE])
+        text = designer.cut_brief(plan, self.root, **FACTS,
+                                  options=["reviews=true", "landing='integration'", "reviews=false"])
+        self.assertIn("Write these keys at the top of plan.toml, before the first table, verbatim:", text)
+        self.assertIn('```toml\nreviews = false\nlanding = "integration"\n```', text)
+        self.assertLess(text.index("# The draft\n"), text.index("# Plan options\n"))
+        self.assertLess(text.index("# Plan options\n"), text.index("# The user's drafts\n"))
+        self.assertNotIn("# Plan options", self.cut())
+
+    def test_cut_direct_instructions_and_shared_notes_only_when_enabled(self):
+        plan = designer.uncut("new", "agents", [SOURCE])
+        for entries, direct in (((), False), (["reviews=false"], False),
+                                (["direct=false"], False), (["direct=true", "direct=false"], False),
+                                (["direct=true"], True)):
+            with self.subTest(entries=entries):
+                text = designer.cut_brief(plan, self.root, **FACTS, options=entries,
+                                          plan_path="skein/docs/plan/new")
+                for fragment in ('Every part is `mode = "direct"`', "the cut writes every task spec itself",
+                                 "`skein/docs/plan/new/notes/<name>.md`", "cited from each spec by repository path",
+                                 "the implementers read them in their checkout",
+                                 "A task's `needs` name the tasks whose merged code it builds on."):
+                    self.assertEqual(fragment in text, direct, fragment)
+
     def test_plan_path_preserves_root_briefs_and_changes_only_destination(self):
         cut_plan = designer.uncut("new", "agents", [SOURCE])
         compilers = (
@@ -485,13 +515,87 @@ class MainTest(unittest.TestCase):
             self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
             self.assertEqual((role, subject, root), ("cut", "new/cut", self.root))
             self.assertIn("The user's draft, whole.", brief)
-            self.assertEqual(options, dict(sh=self.fake))
+            self.assertEqual(options, dict(sh=self.fake, base="main", fields=None))
             return dict(outcome="done", branch="calls/cut-id")
         with patch.object(calls, "start", side_effect=start) as launch:
             result, text, errors = self.invoke("cut", "--source", SOURCE, directory=directory, brief_only=False)
         self.assertEqual((result, text, errors), (0, "done calls/cut-id\n", ""))
         launch.assert_called_once()
         self.assertEqual(self.fake.calls[0].cwd, str(self.root / "docs/plan"))
+
+    def test_cut_options_reach_brief_event_and_worktree_through_fake_runner(self):
+        directory = self.root / "skein/docs/plan/new"
+        entries = ['landing="integration"', "ready=false", "reviews=true", "reviews=false", "direct=true"]
+
+        def claude(call):
+            worktree = Path(call.cwd)
+            text = (worktree.parent / "brief.md").read_text()
+            self.assertIn('# Plan options\n\nWrite these keys at the top of plan.toml, before the first table, verbatim:', text)
+            self.assertIn('```toml\nlanding = "integration"\nready = false\nreviews = false\ndirect = true\n```', text)
+            self.assertIn("`skein/docs/plan/new/notes/<name>.md`", text)
+            atomic.write(worktree.parent / "report.md", "Done: cut the replay\n")
+            return Result(0, "{}")
+
+        self.fake = (FakeRunner()
+                     .on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.root)))
+                     .on(["git", "rev-parse", "--abbrev-ref"], Result(0, "origin/new/integration\n"))
+                     .on(["git", "remote"], Result(0, runs.REMOTES["agents"]))
+                     .on(["claude"], claude))
+        args = [argument for entry in entries for argument in ("--set", entry)]
+        result, _, errors = self.invoke("cut", "--source", SOURCE, *args,
+                                        directory=directory, brief_only=False)
+        self.assertEqual((result, errors), (0, ""))
+        started, ended = log.read()
+        self.assertEqual(started["options"], entries)
+        self.assertEqual(started["trunk"], "new/integration")
+        self.assertEqual(ended["outcome"], "done")
+        self.assertIn(["git", "fetch", "origin"], self.fake.argvs())
+        addition = next(call for call in self.fake.calls if call.argv[:3] == ["git", "worktree", "add"])
+        self.assertEqual(addition.argv[-1], "origin/new/integration")
+        upstream = next(call for call in self.fake.calls if "@{upstream}" in call.argv)
+        self.assertEqual(upstream.argv, ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"])
+        self.assertEqual(upstream.cwd, str(self.root))
+        self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
+
+    def test_cut_integration_refuses_wrong_or_missing_upstream_before_enlisting(self):
+        for upstream in (Result(0, "origin/main\n"), Result(0, "origin/other/integration\n"),
+                         Result(0, "new/integration\n"), Result(0, "origin/new/integration\nextra\n"),
+                         Result(1, err="no upstream")):
+            with self.subTest(upstream=upstream), patch.object(calls, "start") as start:
+                self.fake = (FakeRunner()
+                             .on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.root)))
+                             .on(["git", "rev-parse", "--abbrev-ref"], upstream)
+                             .on(["git", "remote"], Result(0, runs.REMOTES["agents"])))
+                result, _, errors = self.invoke("cut", "--source", SOURCE, "--set", 'landing="integration"',
+                                                directory=self.root / "docs/plan/new", brief_only=False)
+                self.assertEqual(result, 1)
+                self.assertIn(f"checkout {self.root} must track origin/new/integration", errors)
+                start.assert_not_called()
+                self.assertFalse((log.home() / "plans").exists())
+                self.assertEqual(log.read(), [])
+
+    def test_cut_bad_options_start_nothing_and_run_no_commands(self):
+        for entry in ("ready=1", 'landing="unknown"', "unknown=true", "direct=True"):
+            with self.subTest(entry=entry), patch.object(calls, "start") as start:
+                result, _, errors = self.invoke("cut", "--source", SOURCE, "--set", entry,
+                                                directory=self.root / "docs/plan/new", brief_only=False)
+                self.assertEqual(result, 1)
+                self.assertIn(entry, errors)
+                start.assert_not_called()
+                self.assertEqual(self.fake.calls, [])
+                self.assertFalse((log.home() / "plans").exists())
+
+    def test_designer_calls_start_on_plan_trunk(self):
+        path = self.directory / "plan.toml"
+        atomic.write(path, 'landing = "integration"\n' + path.read_text())
+        for role, args in (("contract", ("base",)), ("decision", ("probe", "--run", "demo/probe-1")),
+                           ("retire", ())):
+            with self.subTest(role=role), patch.object(calls, "start", return_value={
+                    "outcome": "done", "branch": "calls/id"}) as start:
+                result, _, errors = self.invoke(role, *args, brief_only=False)
+                self.assertEqual((result, errors), (0, ""))
+                self.assertEqual(start.call_args.kwargs["base"], "demo/integration")
+                self.assertIsNone(start.call_args.kwargs["fields"])
 
     def test_roles_start_with_correct_subject_and_exit_status(self):
         for role, args, subject in (("contract", ("base",), "demo/base"),
