@@ -1,0 +1,116 @@
+landing = "queue"
+
+# The thin cut of dogfood-faults: the fab faults dogfood/design found, built
+# as the designs now say (each marked "fixed 11-01"), and the status files
+# brought to the code. Every part is direct; specs in tasks/, shared rules in
+# notes/common.md, decisions and the critical path in notes/decisions.md.
+# The tasks that change fab/dispatch.py are ordered by needs, in the
+# request's order; the others start at once.
+draft = "dogfood-faults"
+repo = "agents"
+sources = [
+  "docs/plan/dogfood-faults/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "retire-main"
+title = "An integration plan's retire works from main: starts from origin/main, its calls queued once the trunk landed, the plan checkout detached at origin/main"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "queue-depth"
+title = "The queue takes ready refs of two segments or more"
+mode = "direct"
+needs = []
+design = "docs/design/landing.md, 2"
+
+[[part]]
+id = "stop-asks"
+title = "A stop logs plan.stopped and its question; the answer lifts it, counts start afresh, the answer reaches later repairs"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "stop-answer"
+title = "The answerer takes a stop's question without a task: fab.foreman.questions, the answer brief, the role text"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "rebase-trunk"
+title = "A rebase onto the trunk consumes the amendment"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 2"
+
+[[part]]
+id = "reruns"
+title = "A rerun continues from origin/<branch> when it exists and starts from the base when it does not, in slots and worktrees"
+mode = "direct"
+needs = []
+design = "docs/design/tick.md, 3"
+
+[[part]]
+id = "status-current"
+title = "tick.status.md and gates.status.md brought to the code on main"
+mode = "direct"
+needs = []
+design = "docs/design/tick.md, 2"
+
+[[part]]
+id = "paper-cuts"
+title = "Call units carry FAB_HOME; cut-direct.md worded for queue plans"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[slice]]
+id = 1
+story = "An integration plan whose trunk has landed retires from main: the retire call starts from origin/main, its branch goes through fabrig's queue, and the tick reads the retired plan.toml from main"
+parts = ["retire-main"]
+walk = false
+
+[[slice]]
+id = 2
+story = "The queue lands ready/ladder/<draft>/backlog-<n>, answers/<run> and repairs/<run>"
+parts = ["queue-depth"]
+walk = false
+
+[[slice]]
+id = 3
+story = "A stopped trunk asks the answerer: plan.stopped and its question are logged, an answer call starts at once, its answer lifts the stop and reaches the trunk's later repairs"
+parts = ["stop-asks", "stop-answer"]
+walk = false
+
+[[slice]]
+id = 4
+story = "A task rebased onto an integration trunk after its skeleton was amended runs its rebase once"
+parts = ["rebase-trunk"]
+walk = false
+
+[[slice]]
+id = 5
+story = "An Infra: rerun that pushed nothing starts from the task's base; an implement rerun in a worktree continues from the work its earlier run pushed"
+parts = ["reruns"]
+walk = false
+
+[[slice]]
+id = 6
+story = "fab's tick and gates status files say what is built and where"
+parts = ["status-current"]
+walk = false
+
+[[slice]]
+id = 7
+story = "A tick with a non-default FAB_HOME starts calls that write to it; a direct queue plan's cut reads that its branch lands on main"
+parts = ["paper-cuts"]
+walk = false
