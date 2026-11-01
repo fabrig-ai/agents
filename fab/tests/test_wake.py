@@ -16,6 +16,15 @@ from fab.tests.wakes import (
 
 
 class ExemplarTest(WakeTestCase):
+    def test_red_settled_and_closed_wake_and_imported_reds_note_lost_events(self):
+        records = [dict(ev="tiers.red", key="default::b::t", al_ts="1"),
+                   dict(ev="tiers.recovered", key="default::b::t", al_ts="2"),
+                   dict(ev="red.settled"), dict(ev="red.closed"), dict(ev="red.opened")]
+        self.assertEqual(wake.wanted(records), ["red.settled", "red.closed"])
+        wake.settle("backstop", None, records, path=self.want, log_path=self.log_path)
+        self.assertEqual(self.notes(), ["lost event: tiers.red default::b::t; tiers.recovered default::b::t"])
+        self.assertWanted("tick 1: red.settled, red.closed")
+
     def test_an_event_reaches_the_tick_once_and_a_lost_one_is_noted(self):
         fake = FakeRunner()
         # A builder's run ends: its wake goes over ssh to the dispatcher, where it is a want.

@@ -27,7 +27,7 @@ WANT = "tick.want"  # beside the log: one reason per line; its existence is the 
 TAKEN = ".tick.want.taken"  # the want a tick has taken, beside it, until read
 TRIGGERS = ("hand", "event", "backstop")  # what started a tick round
 AGAIN = ("run.ended", "branch.landed", "branch.rejected", "question.asked", "question.answered",
-         "refusal.settled", "call.finished", "call.parked", "call.answered")  # a round's records that want another
+         "refusal.settled", "call.finished", "call.parked", "call.answered", "red.settled", "red.closed")  # a round's records that want another
 AGAIN_LIMIT = 5  # rounds in a row that may want another with no outside wake between them
 EVENT_PATH = "fab-events.path"  # starts EVENT_SERVICE while the want exists
 EVENT_SERVICE = "fab-events.service"  # `fab tick --trigger event`
@@ -144,6 +144,8 @@ def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
     for record in records:
         if record.get("ev") == "run.ended":
             found.append(f"run.ended {record['run']}")
+        if record.get("ev") in ("tiers.red", "tiers.recovered") and "al_ts" in record:
+            found.append(f"{record['ev']} {record.get('key', '')}")
         if "queue_ts" in record:
             found.append(f"{record['ev']} {record.get('task', record.get('branch'))}")
     return found
