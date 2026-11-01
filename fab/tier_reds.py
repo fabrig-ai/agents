@@ -7,17 +7,16 @@ start and settle act; their pure counterparts let callers decide without machine
 
 from __future__ import annotations
 
-import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from fab import atomic, foreman, land, log, run as runs
+from fab import atomic, fix, foreman, land, log, run as runs
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run, ssh
 
-RED_RUNS = 2
+RED_RUNS = fix.RUNS
 KIND = "red"
 OPENED = "red.opened"
 SETTLED = "red.settled"
@@ -28,7 +27,7 @@ RECOVERED = "tiers.recovered"
 ROLE = Path(__file__).resolve().parent / "roles" / "foreman-red.md"
 STATES = ("foreman", "deciding", "decided", "repairing", "landed", "signal", "closed")
 VERDICTS = ("fix", "left", "none")
-SECTION_LINES = 30
+SECTION_LINES = fix.SECTION_LINES
 
 
 @dataclass(frozen=True)
@@ -479,16 +478,11 @@ def repair_tasks(plan: Plan, events: Sequence[dict], evidence_texts: Mapping[str
     kind red, part after-landing, repo fabrig, no needs, files **, high, 20 minutes,
     no path. Quote evidence, owner and section, then fab-after-landing.md 2's acceptance. Append
     question.answered answers under ## Answers, in log order, scanning events once for
-    all answers. Missing evidence is marked. folded may be reds(events), reused for
-    this same events snapshot, to avoid folding again.
+    all answers through fab.fix. Missing evidence is marked. folded may be reds(events),
+    reused for this same events snapshot, to avoid folding again.
     """
     folded = reds(events) if folded is None else folded
-    answers, sections = {}, {}
-    for event in events:
-        if event.get("ev") == "question.answered" and "task" in event and event.get("answer"):
-            answers.setdefault(event["task"], []).append(event["answer"])
-        elif event.get("ev") == "refusal.settled" and event.get("verdict") == "fix" and event.get("section"):
-            sections.setdefault(event.get("task"), []).append(event["section"])
+    answers, sections = fix.answers(events), fix.sections(events)
     result = {}
     for red in folded:
         if red.draft != plan.draft or not red.repair or (red.state == "closed" and not red.started):
@@ -508,9 +502,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], evidence_texts: Mapping[str
                 "after-landing run as the check.\n")
         for section in sections.get(red.task, ()):
             body += "\n" + section.rstrip("\n") + "\n"
-        if answers.get(red.task):
-            body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers[red.task]) + "\n"
-        result[red.task] = Task(red.task, "after-landing", KIND, "fabrig", (), ("**",), "high", 20, body, "")
+        result[red.task] = fix.task(red.task, KIND, "after-landing", body, answers.get(red.task, ()))
     return result
 
 
@@ -592,17 +584,15 @@ def start(red: Red, host: Host, events: Sequence[dict], *, plan_tasks: Mapping[s
     base red.tip and extra run.started fields red=red.id, tip=red.tip. The brief's report
     path is runs.remote_home(host)/runs/<id>/report.md. collect handles its end as usual.
     """
-    run_id = runs.next_run(foreman.task_field(red.task), events)
     if specs is None:
         specs = {task_id: Path(task.path).read_text() if task.path else task.body
                  for task_id, task in plan_tasks.items() if task_id in red.tasks}
-    report = str(Path(runs.remote_home(host)) / "runs" / run_id / "report.md")
-    text = brief(red, run_id=run_id, report=report, evidence=_read_evidence(red.id),
-                 plan_tasks=plan_tasks, specs=specs, role=ROLE.read_text())
-    return runs.launch_detached(host, run_id, "fabrig", red.tip, sh=sh, log_path=log_path,
-                                task=foreman.task_field(red.task), kind=foreman.KIND,
-                                branch=red.task, base=red.tip, brief=text, effort=foreman.EFFORT,
-                                red=red.id, tip=red.tip)
+    evidence, role = _read_evidence(red.id), ROLE.read_text()
+    return fix.launch(
+        red.task, host, red.tip,
+        lambda run_id, report: brief(red, run_id=run_id, report=report, evidence=evidence,
+                                     plan_tasks=plan_tasks, specs=specs, role=role),
+        events, sh=sh, log_path=log_path, red=red.id)
 
 
 def remedy(red: Red, report: str, *, plan_tasks: Mapping[str, Task] | None = None,
@@ -619,27 +609,19 @@ def remedy(red: Red, report: str, *, plan_tasks: Mapping[str, Task] | None = Non
     trailing blanks removed, newline. day defaults to red.since's date (no clock read).
     left/none have empty owner and section. Supply all loaded tasks to validate trunks.
     """
-    lines = report.splitlines()
-    first = next((i for i, line in enumerate(lines) if line.strip()), None)
-    head = lines[first].strip() if first is not None else ""
-    match = re.fullmatch(r"Done\s*:\s*(fix|retry)\s*:\s*(.+)", head)
-    if match is None or not match[2].strip():
-        return "none", "no verdict: " + head[:120], "", ""
-    reason = match[2].strip()
-    if match[1] == "retry":
-        return "left", reason, "", ""
-    rest, owner = lines[first + 1:], ""
-    if rest and rest[0].strip().startswith("Owner:"):
-        candidate = rest.pop(0).strip().removeprefix("Owner:").strip()
+    verdict, reason, lines, skipped = fix.parse(report, skip=lambda line: line.strip().startswith("Owner:"))
+    if verdict != "fix":
+        return verdict, reason, "", ""
+    owner = ""
+    if skipped:
+        candidate = skipped[0].strip().removeprefix("Owner:").strip()
         trunk_task = (plan_tasks or {}).get(candidate)
         if (candidate in red.tasks and "/" in candidate) or (trunk_task is not None
                 and trunk_task.draft in red.tasks and f"{trunk_task.draft}/integration" in red.suspects):
             owner = candidate
-    kept = [reason, *(line.rstrip() for line in rest[:SECTION_LINES])]
-    while not kept[-1]:
-        kept.pop()
-    section = (f"## Repair ({day or red.since[:10]}, after landing {red.id}, foreman {red.foreman})"
-               + "\n\n" + "\n".join(kept) + "\n")
+    section = fix.section(
+        f"## Repair ({day or red.since[:10]}, after landing {red.id}, foreman {red.foreman})",
+        reason, lines)
     return "fix", reason, owner, section
 
 
@@ -650,7 +632,9 @@ def settle(red: Red, report: str, *, plan_tasks: Mapping[str, Task] | None = Non
     red.report. Day and timestamp use log.now together. No spec is edited; the section
     belongs to the red task body.
     """
-    stamp = log.now()
-    verdict, reason, owner, section = remedy(red, report, plan_tasks=plan_tasks, day=stamp[:10])
-    return log.append(SETTLED, path=log_path, ts=stamp, red=red.id, run=red.foreman,
-                      verdict=verdict, reason=reason, owner=owner, section=section)
+    def fields(day: str) -> dict:
+        """Build the red settlement using the shared stamp's day."""
+        verdict, reason, owner, section = remedy(red, report, plan_tasks=plan_tasks, day=day)
+        return dict(red=red.id, run=red.foreman, verdict=verdict, reason=reason,
+                    owner=owner, section=section)
+    return fix.settle(SETTLED, fields, log_path=log_path)
