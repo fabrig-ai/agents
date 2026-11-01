@@ -63,6 +63,9 @@ def growth():
             ended("seed-b"), event("branch.landed", "seed-b"), ended("seed-c"), ended("seed-d")]
 
 
+FAB = str(Path(dispatch.__file__).resolve().parent.parent / "bin/fab")
+
+
 def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     sibling = path.with_name(path.name + ".tmp")
@@ -1254,7 +1257,7 @@ parts = []
                                    Action("call", task="next", run_kind="skeleton")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("skeleton", "draft/next"),
-                          "fab", "call", "skeleton", "next", "--plan", str(self.directory)])
+                          FAB, "call", "skeleton", "next", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n"
                          + f"page - {log.home() / channel.PAGE}\n")
@@ -1282,7 +1285,7 @@ parts = []
                                       Action("call", task="core", run_kind="contract")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("contract", "draft/core"),
-                          "fab", "call", "contract", "core", "--plan", str(self.directory)])
+                          FAB, "call", "contract", "core", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
 
     def test_retire_unit_takes_no_part_and_uses_subject(self):
@@ -1293,7 +1296,7 @@ parts = []
         self.assertEqual(self.tick(), [Action("call", task="draft/retire", run_kind="retire")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("retire", "draft/retire"),
-                          "fab", "call", "retire", "--plan", str(self.directory)])
+                          FAB, "call", "retire", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
 
     def test_uncut_plan_moves_its_cut_chain_after_fetch_with_no_tasks(self):
@@ -1401,7 +1404,7 @@ parts = []
         self.assertEqual(self.tick(), [Action("call", task="draft", run_kind="answer")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("answer", "draft"),
-                          "fab", "call", "answer", "--plan", str(self.directory)])
+                          FAB, "call", "answer", "--plan", str(self.directory)])
         self.assertEqual(len([e for e in log.read() if e["ev"] == "call.started"]), 2)
 
     def test_call_decisions_see_questions_written_by_collect(self):
@@ -1411,7 +1414,7 @@ parts = []
         actions = self.tick()
         self.assertEqual([a.kind for a in actions], ["collect", "call"])
         self.assertEqual(self.fake.argvs()[-1][-5:],
-                         ["fab", "call", "answer", "--plan", str(self.directory)])
+                         [FAB, "call", "answer", "--plan", str(self.directory)])
 
     def test_vet_selects_freest_builder_then_name_even_with_no_free_places(self):
         self.append(event("question.asked", text="Which?"))
@@ -1620,7 +1623,7 @@ parts = []
         with patch.object(foreman, "start") as start, patch.object(log, "now", return_value=now):
             self.assertEqual([action.kind for action in self.tick()], ["collect", "call"])
         start.assert_not_called()
-        self.assertEqual(self.fake.argvs()[-1][-5:], ["fab", "call", "answer", "--plan", str(self.directory)])
+        self.assertEqual(self.fake.argvs()[-1][-5:], [FAB, "call", "answer", "--plan", str(self.directory)])
 
     def test_foreman_actions_recompute_questions_before_acting(self):
         for status in ("foreman", "settled"):
@@ -1719,7 +1722,7 @@ parts = []
                     dict(ev="call.ended", call="old-amend", outcome="failed"))
         self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
         self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("amend", "root"),
-                           "fab", "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
+                           FAB, "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
         self.land.assert_not_called()
 
     def test_finish_answer_uses_latest_call_line_then_root_fallback(self):

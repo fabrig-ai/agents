@@ -661,7 +661,9 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
     """
     role = action.run_kind
     key = f"{draft}/{action.task}" if role in drafts.DESIGN_ROLES else action.task
-    argv = ["fab", "call", role]
+    # The call runs the fab that started it, not whatever `fab` is on PATH: a replay's own
+    # install (coord/fab-replay) beside fab's, which follows main at each tick.
+    argv = [str(Path(__file__).resolve().parent.parent / "bin/fab"), "call", role]
     if role in ("skeleton", "contract", "amend"):
         argv.append(action.task)
     argv.extend(["--plan", str(plan_dir.resolve())])
