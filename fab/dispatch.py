@@ -931,8 +931,9 @@ def _finish_outcome(action: Action, plan: Plan, checkout: Path, *, outcome: str,
                     since: int, sh: Runner, log_path: Path | None) -> str | None:
     """Return the finish outcome to record, or None to leave a refusal open.
 
-    A fab land refusal stays in its chain unless already landed or lost at fetch
-    (docs/design/calls.md, 2). Queue and integration failures retain their own paths.
+    A fab land refusal stays in its chain unless already landed or lost at fetch:
+    the ref is absent (exit 2; docs/design/calls.md, 2). Queue and integration
+    failures retain their own paths.
     """
     if outcome == "done":
         return outcome
@@ -948,9 +949,9 @@ def _finish_outcome(action: Action, plan: Plan, checkout: Path, *, outcome: str,
            for event in events):
         _finish(action, log_path=log_path)
         return "done"
-    if refusal.get("step") == "fetch" and not sh(
+    if refusal.get("step") == "fetch" and sh(
             ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{action.branch}"],
-            cwd=str(checkout), check=False).ok:
+            cwd=str(checkout), check=False).code == 2:
         return "failed"
     return None
 

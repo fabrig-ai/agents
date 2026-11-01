@@ -2574,8 +2574,8 @@ parts = []
 
     def test_finish_land_refusal_steps_and_terminal_exceptions(self):
         cases = [(step, 0, False, None) for step in ("fetch", "paths", "test", "push")]
-        cases += [("fetch", 2, False, "failed"), ("fetch", 128, False, "failed"),
-                  ("fetch", 2, True, "done"), ("rebase", 0, True, "done")]
+        cases += [("fetch", 2, False, "failed"), ("fetch", 128, False, None),
+                  ("fetch", 1, False, None), ("fetch", 2, True, "done"), ("rebase", 0, True, "done")]
         for number, (step, remote_code, landed, outcome) in enumerate(cases):
             with self.subTest(step=step, remote_code=remote_code, landed=landed):
                 path = self.home / f"step-{number}.jsonl"
