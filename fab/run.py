@@ -193,25 +193,25 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     First move an unpinned builder install forward to this package's HEAD; failures only note
     stderr. Dispatcher hosts are skipped (docs/design/tick.md, 3).
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
-    REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
-    (implement, review, rebase: the branch made afresh from origin/<trunk>, an earlier run's local branch reset; repair: the existing
-    origin/<branch>); write the brief to FAB_HOME/runs/<run>/brief.md; then
+    REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch.
+    In worktrees and slots, implement and repair start from origin/<branch> when it exists,
+    otherwise the base; implement merges the base into continued work, aborting a conflicting
+    merge so the run can resolve it. Review and rebase start afresh from the base.
+    Write the brief to FAB_HOME/runs/<run>/brief.md; then
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
     The brief is also kept on this machine at FAB_HOME/runs/<run>/brief.md. run.started carries
     run, task, kind, host, dir (the worktree), branch, base ("origin/<trunk>", or the checked
     skeleton tip), codex (the id), state (codex-run's state directory) and report (the builder's
-    report path).
-    A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
+    report path). A repository in SLOTTED builds in a slot instead of a worktree: claim the first
     idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
     naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
-    (`git clean -fdq`, then `git switch --discard-changes -C <branch> origin/<trunk>`, so an
-    earlier run's edits never carry over and its untracked files never block the switch; repair: `origin/<branch>`). dir is the slot, and
-    run.started also carries slot (the number). The launcher is `fab codex start` (same
+    (`git clean -fdq`, then `git switch --discard-changes -C <branch> <source>`, so an
+    earlier run's edits never carry over and its untracked files never block the switch).
+    dir is the slot; run.started also carries slot (the number). The launcher is `fab codex start` (same
     arguments and output as codex-run task) once LAUNCHER says so.
-
-    A rejection's text is its `findings` when it has them (a gate's, fab.gates.screen), read
-    from no machine; otherwise rejection_text from the first gate host.
+    A rejection's text is its `findings` when present (a gate's), read from no machine;
+    otherwise rejection_text from the first gate host.
     """
     if checkout is not None and Path(task.path).is_absolute():
         try:
@@ -323,33 +323,29 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["fab", "slot", "claim", str(slot), run_id, task.id])
         worktree = root.parent / "slots" / str(slot)
         remote(["git", "-C", str(worktree), "fetch", "origin"])
-        source = f"origin/{branch}" if kind == "repair" else base
-        # A rerun continues from the work its earlier run pushed (the implementer pushes before
-        # it asks: fabrig-run.md), rather than redoing it from the trunk.
-        if kind == "implement" and sh(ssh(host.ssh, ["git", "-C", str(worktree), "rev-parse", "-q", "--verify",
-                                                     f"refs/remotes/origin/{branch}"])).ok:
-            source = f"origin/{branch}"
+    source = base
+    clone = worktree if slot is not None else repo
+    if kind in ("implement", "repair") and sh(ssh(host.ssh, ["git", "-C", str(clone), "rev-parse",
+                                                            "-q", "--verify", f"refs/remotes/origin/{branch}"])).ok:
+        source = f"origin/{branch}"
+    if slot is not None:
         # A slot keeps only its build cache between runs: an earlier run's uncommitted edits
         # and untracked files go (ignored files, target/ among them, stay warm). Clean first:
         # an untracked file the new base tracks stops the switch (the playground replay, 10-31).
         remote(["git", "-C", str(worktree), "clean", "-fdq"])
         remote(["git", "-C", str(worktree), "switch", "--discard-changes", "-C", branch, source])
-        if kind == "implement" and source != base:
-            # The continued branch catches up with the trunk, which may now hold the needs it
-            # started early on (the playground replay, 11-01: fe-world-remove reran three times
-            # asking for its merged needs). A conflict is left for the run: it is aborted here.
-            caught = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
-                                       "user.email=fab@localhost", "merge", "--no-edit", base]))
-            if not caught.ok:
-                sh(ssh(host.ssh, ["git", "-C", str(worktree), "merge", "--abort"]))
-    elif kind == "repair":
-        source = f"origin/{branch}"
+    elif kind == "repair" and source != base:
         remote(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), source])
         remote(["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source])
     else:
-        # -B, not -b: an earlier run's local branch stays in the clone after its worktree goes,
-        # and -b refused every rerun's start once (findings-loop, 11-01).
-        remote(["git", "-C", str(repo), "worktree", "add", "-B", branch, str(worktree), base])
+        # -B resets the local branch an earlier run left behind.
+        remote(["git", "-C", str(repo), "worktree", "add", "-B", branch, str(worktree), source])
+    if kind == "implement" and source != base:
+        # Catch continued work up with the base; leave a conflict for the run to resolve.
+        caught = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
+                                   "user.email=fab@localhost", "merge", "--no-edit", base]))
+        if not caught.ok:
+            sh(ssh(host.ssh, ["git", "-C", str(worktree), "merge", "--abort"]))
     for need, need_branch in early:
         merged = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
                                    "user.email=fab@localhost", "merge", "--no-edit", f"origin/{need_branch}"]))

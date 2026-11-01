@@ -4306,6 +4306,8 @@ class OptimisticStartTest(unittest.TestCase):
 
     def remote(self, call):
         argv = shlex.split(shlex.split(call.argv[-1])[2])
+        if argv[3:6] == ["rev-parse", "-q", "--verify"]:
+            return Result(1)
         if argv[:3] == ["fab", "slot", "list"]:
             return Result(0, 'torn\n[]\n{"slot": 1, "claim": null, "idle": 0}\n')
         if argv[:3] == ["fab", "codex", "start"]:

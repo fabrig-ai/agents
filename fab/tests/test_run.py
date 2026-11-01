@@ -385,7 +385,7 @@ class RunStartTest(unittest.TestCase):
                 worktree = ROOT / "wt" / run_id
                 directory = ROOT / "runs" / run_id
                 commands = [command(call) for call in fake.calls]
-                self.assertEqual(len(commands), 7 if kind == "repair" else 6)
+                self.assertEqual(len(commands), 7 if kind in ("implement", "repair") else 6)
                 self.assertTrue(all(call.argv[5] == HOST.ssh for call in fake.calls))
                 self.assertEqual(commands[0], ["mkdir", "-p", str(repo.parent), str(ROOT / "wt"),
                                                str(ROOT / "runs")])
@@ -394,14 +394,12 @@ class RunStartTest(unittest.TestCase):
                 self.assertIn(shlex.join(["git", "clone", "--", run.REMOTES[TASK.repo], str(repo)]),
                               commands[1][2])
                 self.assertEqual(commands[2], ["git", "-C", str(repo), "fetch", "origin"])
-                if kind == "repair":
-                    self.assertEqual(commands[3], ["git", "-C", str(repo), "worktree", "add", "--detach",
-                                                   str(worktree), "origin/" + branch])
-                    self.assertEqual(commands[4], ["git", "-C", str(worktree), "checkout",
-                                                   "--ignore-other-worktrees", "-B", branch, "origin/" + branch])
-                else:
-                    self.assertEqual(commands[3], ["git", "-C", str(repo), "worktree", "add", "-B",
-                                                   branch, str(worktree), "origin/main"])
+                probe = kind in ("implement", "repair")
+                if probe:
+                    self.assertEqual(commands[3], ["git", "-C", str(repo), "rev-parse", "-q",
+                                                   "--verify", f"refs/remotes/origin/{branch}"])
+                self.assertEqual(commands[3 + probe], ["git", "-C", str(repo), "worktree", "add", "-B",
+                                                       branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"mkdir -p {directory} && cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
                 expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, "high"), "--model", run.MODEL]
@@ -426,7 +424,7 @@ class RunStartTest(unittest.TestCase):
         for repo in ("agents", "fabrig"):
             for kind in run.KINDS:
                 with self.subTest(repo=repo, kind=kind), tmp_home():
-                    fake = starter()
+                    fake = starter(pushed=kind in ("review", "rebase"))
                     task = replace(TASK, repo=repo)
                     run_id = run.start(task, HOST, kind=kind, events=[started()], sh=fake,
                                        trunk="component-kit/integration")
@@ -439,14 +437,13 @@ class RunStartTest(unittest.TestCase):
                     self.assertIn(f"- Base: `{base}`\n- Trunk: `{base}`\n", text)
                     self.assertEqual(fake.calls[-2].input, text)
                     commands = [command(call) for call in fake.calls]
-                    source = f"origin/{branch}" if kind == "repair" else base
+                    if kind in ("review", "rebase"):
+                        self.assertFalse(any("rev-parse" in argv or "merge" in argv for argv in commands))
+                    source = base
                     if repo == "fabrig":
                         self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes",
                                        "-C", branch, source], commands)
                         self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "clean", "-fdq"], commands)
-                    elif kind == "repair":
-                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
-                                       "--detach", str(ROOT / "wt" / run_id), source], commands)
                     else:
                         self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
                                        "-B", branch, str(ROOT / "wt" / run_id), source], commands)
@@ -540,16 +537,81 @@ class RunStartTest(unittest.TestCase):
             self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "merge", "--abort"],
                           [command(call) for call in fake.calls])
 
+    def test_a_repair_uses_pushed_work_or_falls_back_to_the_base(self):
+        for repo in ("agents", "fabrig"):
+            for pushed in (False, True):
+                with self.subTest(repo=repo, pushed=pushed), tmp_home():
+                    fake = starter(pushed=pushed)
+                    branch = "draft/task-r1"
+                    run_id = run.start(replace(TASK, repo=repo), HOST, kind="repair", sh=fake,
+                                       events=[started(kind="rebase", branch=branch)],
+                                       trunk="component-kit/integration")
+                    base = "origin/component-kit/integration"
+                    source = f"origin/{branch}" if pushed else base
+                    worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
+                    clone = worktree if repo == "fabrig" else ROOT / "repos/agents"
+                    commands = [command(call) for call in fake.calls]
+                    probe = ["git", "-C", str(clone), "rev-parse", "-q", "--verify",
+                             f"refs/remotes/origin/{branch}"]
+                    self.assertEqual(commands.count(probe), 1)
+                    self.assertLess(commands.index(["git", "-C", str(clone), "fetch", "origin"]),
+                                    commands.index(probe))
+                    if repo == "fabrig":
+                        setup = ["git", "-C", str(worktree), "switch", "--discard-changes", "-C", branch, source]
+                    elif pushed:
+                        self.assertIn(["git", "-C", str(clone), "worktree", "add", "--detach",
+                                       str(worktree), source], commands)
+                        setup = ["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source]
+                    else:
+                        setup = ["git", "-C", str(clone), "worktree", "add", "-B", branch, str(worktree), source]
+                    self.assertLess(commands.index(probe), commands.index(setup))
+                    self.assertFalse(any("merge" in argv for argv in commands))
+                    self.assertEqual(log.read()[-1]["run"], run_id)
+
     def test_an_implement_rerun_continues_from_its_pushed_branch(self):
-        with tmp_home():
-            fake = starter(pushed=True)
-            run.start(replace(TASK, repo="fabrig"), HOST, kind="implement",
-                      events=[started(kind="implement")], sh=fake)
-            commands = [command(call) for call in fake.calls]
-            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes",
-                           "-C", TASK.id, f"origin/{TASK.id}"], commands)
-            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "-c", "user.name=fab", "-c",
-                           "user.email=fab@localhost", "merge", "--no-edit", "origin/main"], commands)
+        for repo in ("agents", "fabrig"):
+            for trunk in ("main", "component-kit/integration"):
+                with self.subTest(repo=repo, trunk=trunk), tmp_home():
+                    fake = starter(pushed=True)
+                    run_id = run.start(replace(TASK, repo=repo), HOST, kind="implement",
+                                       events=[started()], sh=fake, trunk=trunk)
+                    commands = [command(call) for call in fake.calls]
+                    worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
+                    clone = worktree if repo == "fabrig" else ROOT / "repos/agents"
+                    probe = ["git", "-C", str(clone), "rev-parse", "-q", "--verify",
+                             f"refs/remotes/origin/{TASK.id}"]
+                    self.assertEqual(commands.count(probe), 1)
+                    self.assertLess(commands.index(["git", "-C", str(clone), "fetch", "origin"]),
+                                    commands.index(probe))
+                    if repo == "fabrig":
+                        setup = ["git", "-C", str(worktree), "switch", "--discard-changes", "-C", TASK.id, f"origin/{TASK.id}"]
+                    else:
+                        setup = ["git", "-C", str(clone), "worktree", "add", "-B", TASK.id, str(worktree), f"origin/{TASK.id}"]
+                    merge = ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
+                             "user.email=fab@localhost", "merge", "--no-edit", f"origin/{trunk}"]
+                    self.assertLess(commands.index(probe), commands.index(setup))
+                    self.assertLess(commands.index(setup), commands.index(merge))
+                    self.assertFalse(any("--abort" in argv for argv in commands))
+                    self.assertEqual(log.read()[-1]["base"], f"origin/{trunk}")
+
+    def test_an_implement_rerun_aborts_a_conflicting_base_merge_and_launches(self):
+        fallback = starter(pushed=True).rules[0][1]
+        def answer(call):
+            argv = command(call)
+            if "merge" in argv and "--no-edit" in argv:
+                return Result(1, err="conflict")
+            return fallback(call)
+        for repo in ("agents", "fabrig"):
+            with self.subTest(repo=repo), tmp_home():
+                fake = FakeRunner().on(["ssh"], answer)
+                run_id = run.start(replace(TASK, repo=repo), HOST, events=[started()], sh=fake)
+                worktree = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "wt" / run_id
+                commands = [command(call) for call in fake.calls]
+                abort = ["git", "-C", str(worktree), "merge", "--abort"]
+                self.assertEqual(commands.count(abort), 1)
+                self.assertLess(commands.index(abort), len(commands) - 2)
+                self.assertEqual(commands[-1][:3], ["fab", "codex", "start"])
+                self.assertEqual(log.read()[-1]["run"], run_id)
 
     def test_start_fabrig_claims_slot_and_switches_for_every_kind(self):
         for kind in run.KINDS:
@@ -559,12 +621,12 @@ class RunStartTest(unittest.TestCase):
                 events = [started(kind="rebase", branch="draft/task-r1")]
                 run_id = run.start(task, HOST, kind=kind, events=events, sh=fake)
                 branch = {"repair": "draft/task-r1", "rebase": "draft/task-r2"}.get(kind, TASK.id)
-                source = "origin/" + branch if kind == "repair" else "origin/main"
+                source = "origin/main"
                 slot = ROOT.parent / "slots/2"
                 directory = ROOT / "runs" / run_id
                 commands = [command(call) for call in fake.calls]
                 probe = ([["git", "-C", str(slot), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}"]]
-                         if kind == "implement" else [])
+                         if kind in ("implement", "repair") else [])
                 self.assertEqual(commands[3:8 + len(probe)], [
                     ["fab", "slot", "list"],
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
@@ -658,8 +720,8 @@ class RunStartTest(unittest.TestCase):
             task = replace(TASK, id="draft/a b'$(touch NEVER)")
             run.start(task, HOST, sh=fake)
             commands = [command(call) for call in fake.calls]
-            self.assertEqual(commands[3][-3], task.id)
-            tokens = shlex.split(commands[4][2])
+            self.assertEqual(commands[4][-3], task.id)
+            tokens = shlex.split(commands[5][2])
             self.assertEqual(tokens[6], str(ROOT / "runs" / (task.id + "-1") / "brief.md.tmp"))
             self.assertEqual(commands[-1][-2], str(ROOT / "wt" / (task.id + "-1")))
 
@@ -698,13 +760,13 @@ class RunStartTest(unittest.TestCase):
             git(clone, "commit", "--allow-empty", "-m", "Local branch differs from origin")
             self.assertNotEqual(git(clone, "rev-parse", "HEAD"),
                                 git(clone, "rev-parse", f"origin/{TASK.id}"))
-            fake = starter()
+            fake = starter(pushed=True)
             run.start(TASK, HOST, kind="repair", events=[started()], sh=fake)
-            argv = command(fake.calls[3])
+            argv = command(fake.calls[4])
             argv[2] = str(clone)
             argv[-2] = str(home / "repair")
             git(home, *argv[1:])
-            argv = command(fake.calls[4])
+            argv = command(fake.calls[5])
             argv[2] = str(home / "repair")
             git(home, *argv[1:])
             self.assertEqual(git(home / "repair", "branch", "--show-current"), TASK.id)
