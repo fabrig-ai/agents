@@ -927,6 +927,48 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
                        **({"answer": answer} if answer else {}))
 
 
+def _finish_outcome(action: Action, plan: Plan, checkout: Path, *, outcome: str,
+                    since: int, sh: Runner, log_path: Path | None) -> str | None:
+    """Return the finish outcome to record, or None to leave a refusal open.
+
+    A fab land refusal stays in its chain unless already landed or lost at fetch
+    (docs/design/calls.md, 2). Queue and integration failures retain their own paths.
+    """
+    if outcome == "done":
+        return outcome
+    if plan.repo == "fabrig" or plan.landing == "integration":
+        return None
+    events = log.read(log_path)
+    refusal = next((event for event in reversed(events[since:])
+                    if event.get("ev") == "branch.rejected"
+                    and event.get("branch") == action.branch and "queue_ts" not in event), None)
+    if refusal is None:
+        return "failed"
+    if any(event.get("ev") == "branch.landed" and event.get("branch") == action.branch
+           for event in events):
+        _finish(action, log_path=log_path)
+        return "done"
+    if refusal.get("step") == "fetch" and not sh(
+            ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{action.branch}"],
+            cwd=str(checkout), check=False).ok:
+        return "failed"
+    return None
+
+
+def _record_finish(action: Action, plan: Plan, checkout: Path, before: list[dict], *,
+                   outcome: str, sh: Runner, log_path: Path | None) -> None:
+    """Record a terminal delivery outcome with the call's previously checked tip."""
+    outcome = _finish_outcome(action, plan, checkout, outcome=outcome, since=len(before),
+                              sh=sh, log_path=log_path)
+    if outcome is None:
+        return
+    tip = next((event["tip"] for event in reversed(before)
+                if event.get("ev") == "call.checked" and event.get("call") == action.run), "")
+    fields = {"tip": tip} if tip else {}
+    log.append("call.finished", path=log_path, call=action.run,
+               role=action.run_kind, outcome=outcome, **fields)
+
+
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
     """Take task, question, refusal or call-chain actions, logging failures as notes.
@@ -936,7 +978,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
     """
     detail = action.detail
     outcome = "failed"
-    finish_tip = ""
+    finish_events = []
     try:
         match action.kind:
             case "collect":
@@ -967,8 +1009,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "hold":
                 _hold(action, log_path=log_path)
             case "finish":
-                finish_tip = next((event["tip"] for event in reversed(log.read(log_path))
-                                   if event.get("ev") == "call.checked" and event.get("call") == action.run), "")
+                finish_events = log.read(log_path)
                 if _deliver(action.branch, plan, checkout, sh=sh, log_path=log_path):
                     _finish(action, log_path=log_path)
                     outcome = "done"
@@ -979,11 +1020,9 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
         log.append("note", path=log_path,
                    text=f"{action.kind} {action.task or '-'} {detail}")
     finally:
-        if action.kind == "finish" and ((plan.repo != "fabrig" and plan.landing != "integration")
-                                        or outcome == "done"):
-            fields = {"tip": finish_tip} if finish_tip else {}
-            log.append("call.finished", path=log_path, call=action.run,
-                       role=action.run_kind, outcome=outcome, **fields)
+        if action.kind == "finish":
+            _record_finish(action, plan, checkout, finish_events, outcome=outcome,
+                           sh=sh, log_path=log_path)
     print(f"{action.kind} {action.task or '-'} {detail}")
 
 
@@ -1588,7 +1627,8 @@ def _judge_chain(action: Action, *, log_path: Path | None) -> None:
     """Record an ended settle's strict verdict once, parking failures and user decisions.
 
     Land approves the existing branch. Amend resets its counts and carries guidance via
-    channel.answers_text. The second attempt cannot amend, even if its report asks to.
+    channel.answers_text. A LAND_HOLD forbids land (docs/design/calls.md, 2);
+    the second attempt cannot amend, even if its report asks to.
     """
     events = log.read(log_path)
     chain = call_review.chains(events)[action.task]
@@ -1606,6 +1646,7 @@ def _judge_chain(action: Action, *, log_path: Path | None) -> None:
     outcome = next((event.get("outcome") for event in events if event.get("ev") == "call.ended"
                     and event.get("call") == action.run), None)
     valid = (outcome == "done" and verdict in ("land", "amend", "user") and bool(text)
+             and not (verdict == "land" and chain.reason == call_review.LAND_HOLD)
              and not (verdict == "amend" and len(call_review.settle_calls(chain, events)) >= 2)
              and not (verdict == "user" and len(text.splitlines()) != 1))
     if valid:

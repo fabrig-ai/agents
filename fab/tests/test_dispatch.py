@@ -2015,6 +2015,12 @@ parts = []
         self.append(dict(ev="run.started", run=f"{root}-{number}", task=root, kind="review", host="builder"),
                     dict(ev="run.ended", run=f"{root}-{number}", outcome="done"), path=path)
 
+    def refuse_call(self, argv, *, step="rebase", path=None):
+        """Log fab land's refusal of the requested call branch and return its exit code."""
+        log.append("branch.rejected", path=path, task=argv[0], branch=argv[0],
+                   tip=f"tip-{self.land.call_count}", step=step, log="refusal.log")
+        return 1
+
     def test_answer_unit_uses_draft_and_no_part_argument(self):
         self.completed_call("answer", "old")
         self.append(dict(ev="call.finished", call="old", outcome="done"))
@@ -2401,6 +2407,46 @@ parts = []
         self.assertEqual(log.read()[-1]["reason"], "settle failed")
         self.assertEqual(self.tick(), [])
 
+    def test_land_hold_settle_verdicts_on_both_attempts(self):
+        for attempt in (1, 2):
+            for verdict in ("land", "amend", "user"):
+                with self.subTest(attempt=attempt, verdict=verdict):
+                    path = self.home / f"land-hold-{attempt}-{verdict}.jsonl"
+                    self.append(*chain_history("hold"), path=path)
+                    if attempt == 2:
+                        self.append(call_started("settle-1", "settle", "draft/core/settle", settles="root"),
+                                    call_ended("settle-1"),
+                                    dict(ev="chain.settled", call="root", subject="draft/core", settle="settle-1",
+                                         verdict="amend", text="Resolve the conflicts."),
+                                    dict(ev="branch.rejected", task="root", branch="calls/root", tip="reset-tip",
+                                         step="rebase", log="first.log"),
+                                    call_started("amend-2", "amend", "draft/core", amends="root"),
+                                    call_ended("amend-2"), path=path)
+                    self.append(dict(ev="branch.rejected", task="root", branch="calls/root", tip="refused-tip",
+                                     step="rebase", log="last.log"), path=path)
+                    chain = call_review.chains(log.read(path))["root"]
+                    self.assertEqual((chain.state, chain.reason), ("hold", call_review.LAND_HOLD))
+                    settle = f"settle-{attempt}"
+                    self.append(call_started(settle, "settle", "draft/core/settle", settles="root"),
+                                call_ended(settle), path=path)
+                    write(log.home() / "calls" / settle / "report.md", f"Done: {verdict}\nResolve the conflicts.\n")
+                    count = len(log.read(path))
+                    action = Action("judge-chain", task="root", run=settle)
+                    dispatch._judge_chain(action, log_path=path)
+                    gained = log.read(path)[count:]
+                    valid = verdict == "user" or (verdict == "amend" and attempt == 1)
+                    self.assertEqual([entry["ev"] for entry in gained],
+                                     ["chain.settled", "call.parked"] if verdict == "user" else
+                                     ["chain.settled"] if valid else ["call.parked"])
+                    if valid:
+                        self.assertEqual((gained[0]["settle"], gained[0]["verdict"]), (settle, verdict))
+                    if verdict == "user" or not valid:
+                        self.assertEqual(gained[-1]["reason"],
+                                         "user: Resolve the conflicts." if valid else "settle failed")
+                    dispatch._judge_chain(action, log_path=path)
+                    self.assertEqual(log.read(path)[count:], gained)
+        self.assertEqual(log.read(), [])
+
     def test_amend_unit_passes_root_and_uses_root_key(self):
         self.append(event("question.asked", text="Which?"), *chain_history("amend"),
                     dict(ev="call.started", call="old-amend", role="amend", amends="other"),
@@ -2495,6 +2541,96 @@ parts = []
                 self.tick(hosts={})
                 self.assertEqual(self.land.call_count, count)
                 self.assertNotIn("question.answered", [e["ev"] for e in log.read()])
+
+    def test_finish_rebase_refusal_amends_then_lands_or_holds(self):
+        for refused_again in (False, True):
+            with self.subTest(refused_again=refused_again):
+                path = self.home / f"rebase-{refused_again}.jsonl"
+                write(self.completed_call(identifier="root", path=path), "Done: answered\nAnswered: draft/a\n")
+                self.approve("root", path=path)
+                self.land.side_effect = lambda argv: self.refuse_call(argv, path=path)
+                finish = Action("finish", task="root", run="root", run_kind="answer", branch="calls/root")
+                self.assertEqual(self.tick(hosts={}, log_path=path), [finish])
+                self.assertFalse(any(entry["ev"] in ("call.finished", "question.answered") for entry in log.read(path)))
+                self.assertEqual(self.tick(hosts={}, log_path=path), [Action("call", task="root", run_kind="amend")])
+                self.append(call_started("amend-1", "amend", "draft", amends="root", branch="calls/root"),
+                            call_ended("amend-1"), path=path)
+                self.approve("root", number=2, path=path)
+                if not refused_again:
+                    self.land.side_effect = self.record_land
+                self.assertEqual(self.tick(hosts={}, log_path=path), [replace(finish, run="amend-1")])
+                records = log.read(path)
+                if refused_again:
+                    self.assertFalse(any(entry["ev"] in ("call.finished", "question.answered") for entry in records))
+                    chain = call_review.chains(records)["root"]
+                    self.assertEqual((chain.state, chain.reason), ("hold", call_review.LAND_HOLD))
+                    self.assertEqual(self.tick(hosts={}, log_path=path), [Action("call", task="root", run_kind="settle")])
+                else:
+                    self.assertEqual((records[-1]["ev"], records[-1]["call"], records[-1]["outcome"]),
+                                     ("call.finished", "amend-1", "done"))
+                    self.assertEqual((records[-2]["ev"], records[-2]["task"]), ("question.answered", "draft/a"))
+                    self.assertEqual(self.tick(hosts={}, log_path=path), [])
+        self.assertEqual(log.read(), [])
+
+    def test_finish_land_refusal_steps_and_terminal_exceptions(self):
+        cases = [(step, 0, False, None) for step in ("fetch", "paths", "test", "push")]
+        cases += [("fetch", 2, False, "failed"), ("fetch", 128, False, "failed"),
+                  ("fetch", 2, True, "done"), ("rebase", 0, True, "done")]
+        for number, (step, remote_code, landed, outcome) in enumerate(cases):
+            with self.subTest(step=step, remote_code=remote_code, landed=landed):
+                path = self.home / f"step-{number}.jsonl"
+                root = f"root-{number}"
+                branch = f"calls/{root}"
+                write(self.completed_call(identifier=root, path=path), "Done: answered\nAnswered: draft/a\n")
+                self.approve(root, path=path)
+                self.append(dict(ev="call.checked", call=root, tip="checked-tip"), path=path)
+                if landed:
+                    self.append(dict(ev="branch.landed", task=root, branch=branch, tip="landed-tip"), path=path)
+                query = ["git", "ls-remote", "--exit-code", "origin", f"refs/heads/{branch}"]
+                self.fake.on(query, Result(remote_code, "tip\t" + branch if remote_code == 0 else ""))
+                self.land.side_effect = lambda argv: self.refuse_call(argv, step=step, path=path)
+                action = Action("finish", task=root, run=root, run_kind="answer", branch=branch)
+                dispatch._take(action, {}, {}, self.directory, plan=make_plan(part("core")),
+                               checkout=self.home, sh=self.fake, log_path=path)
+                records = log.read(path)
+                finished = [entry for entry in records if entry["ev"] == "call.finished"]
+                self.assertEqual([entry["outcome"] for entry in finished], [] if outcome is None else [outcome])
+                if finished:
+                    self.assertEqual((finished[0]["call"], finished[0]["tip"]), (root, "checked-tip"))
+                self.assertEqual([entry["task"] for entry in records if entry["ev"] == "question.answered"],
+                                 ["draft/a"] if outcome == "done" else [])
+                notes = [entry["text"] for entry in records if entry["ev"] == "note"]
+                self.assertEqual(notes, [f"finish {root} failed: landing refused"])
+                queries = [call for call in self.fake.calls if call.argv == query]
+                self.assertEqual([call.cwd for call in queries],
+                                 [str(self.home)] if step == "fetch" and not landed else [])
+        self.assertEqual(log.read(), [])
+
+    def test_finish_refusal_matches_only_new_unqueued_records_on_its_branch(self):
+        for case in ("old", "other", "queue", "mixed"):
+            with self.subTest(case=case):
+                path = self.home / f"filter-{case}.jsonl"
+                self.completed_call(identifier="root", path=path)
+                refusal = dict(ev="branch.rejected", task="root", branch="calls/root", tip="tip",
+                               step="rebase", log="refusal.log")
+                if case == "old":
+                    self.append(refusal, path=path)
+                queued = dict(refusal, queue_ts="queue-stamp")
+                other = dict(refusal, branch="calls/other")
+                during = {"old": [], "other": [other], "queue": [queued],
+                          "mixed": [refusal, queued, other]}[case]
+
+                def landing(argv):
+                    self.append(*during, path=path)
+                    return 1
+
+                self.land.side_effect = landing
+                dispatch._take(Action("finish", task="root", run="root", run_kind="answer", branch="calls/root"),
+                               {}, {}, self.directory, plan=make_plan(part("core")), checkout=self.home,
+                               sh=self.fake, log_path=path)
+                self.assertEqual([entry["outcome"] for entry in log.read(path) if entry["ev"] == "call.finished"],
+                                 [] if case == "mixed" else ["failed"])
+        self.assertEqual(log.read(), [])
 
     def test_failed_call_launch_is_noted_and_other_role_still_starts(self):
         self.append(event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
