@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of hel8-units: docs/design/machines.md 4 built whole, the dispatcher's four
 # services as persistent user units fab writes through one new installer in fab/units.py. One

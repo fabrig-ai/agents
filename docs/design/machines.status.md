@@ -37,6 +37,30 @@
   copied. `borrow` without `--path` is refused for a kind without one. A
   lent directory is made mode 700. `check` refuses it as it does
   `chatgpt` and `github`. Tested with fake hosts and a dummy root.
+- **The dispatcher's own units** (4; plan `docs/plan/hel8-units`, retired
+  11-01; a33e9ee, 10be9c0): `fab/units.py` holds `install_units` and
+  `cli_install` beside the unchanged `Service`, `text` and `install`, and a
+  pure text function per unit (`status_service`, `timer_service`, `timer`,
+  and `status_units`, `issues_units`, `logins_check_units`,
+  `report_daily_units`). `fab serve --install`, `fab issues --install`,
+  `fab logins check --install` and `fab report daily --install` call them.
+  An install asks `show --property=Transient,ActiveState` of every unit
+  first, refuses (exit 1, nothing stopped or written) when a transient
+  timer's service is not `inactive` or `failed`, stops and resets transient
+  units timer first, keeps a pause, writes through `fab.atomic.write`,
+  reloads, enables the primary, restarts it only when its own text changed
+  and it is `fab-status.service` or a timer, and warns when linger is not
+  `yes`. `fab serve` reads its checkout's HEAD before serving and every 60
+  seconds in a daemon thread (`fab.serve.serve`, `head_of`); a change shuts
+  the server down and `main` returns 75; an unreadable HEAD is never a
+  change (the first readable one becomes the baseline). `fab report daily`
+  with no plan dir walks `fab.channel.plan_dirs()`, printing `<dir>
+  skipped` for a directory without `plan.toml` and a retired plan. Each
+  text is pinned byte for byte; the installer's argv order, refusal,
+  reruns, pause, linger, the watch and every `--install`'s usage errors are
+  tested with `FakeRunner` and a temporary HOME and FAB_HOME
+  (`test_units.py`, `test_serve.py`, `test_forge.py`, `test_logins.py`,
+  `test_report.py`).
 
 ## Gaps and departures
 
@@ -52,10 +76,15 @@
   must pass no `--path` for a fixed kind (and set the variable to
   `$HOME/.local/state/smith-live`) when live-smith returns. The comment
   above `LIVE` still says no shelf kind holds the root.
-- **The dispatcher's own units** (4, 11-01): designed; to be built by plan
-  `hel8-units`. Until it lands, `fab-status`, `fab-issues` and
-  `fab-logins-check` are transient units started by hand
-  (`FAB_HOME/bin/start-*.sh`), and `fab report daily` has no timer.
+- **The dispatcher's own units are not deployed** (4, Deployment): on main
+  since 11-01, not yet run on hel8, which is ops' after landing (the
+  request). Until ops runs the four `--install` commands there,
+  `fab-status`, `fab-issues` and `fab-logins-check` stay transient units
+  started by hand (`FAB_HOME/bin/start-*.sh`, from the hand-made clones
+  `FAB_HOME/serve-install` and `FAB_HOME/issues-install`), and `fab report
+  daily` has no timer. Adding the commands to `bin/install.sh` after `fab
+  after-landing install` is ops' too (that script is not in this
+  repository).
 
 - **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8. The
   tick's units (`fab-events.path`, `fab-backstop.timer`) are persistent,

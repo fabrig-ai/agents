@@ -9,8 +9,9 @@
   reply calls, records decisions through `channel.answer`, and closes
   answered issues. The log holds the state; a nonblocking flock serializes
   passes. Fake forge, HTTP and Claude runners cover conversations, retries,
-  paging, locking and secret-free diagnostics. Deployment is by hand:
-  provision the bot token file and a transient two-minute timer on hel8.
+  paging, locking and secret-free diagnostics. The token file is by hand;
+  the two-minute timer is `fab issues --install`'s (plan
+  `docs/plan/hel8-units`, retired 11-01; a33e9ee; machines.status.md).
 - **The page** (2): `fab/channel.py` folds the user's open questions and
   signals, renders the page and runs `fab page show|write|answer|clear`;
   the tick rewrites `FAB_HOME/user.md` each round.
@@ -31,5 +32,9 @@
 
 ## Gaps and departures
 
+- **The issue timer is not deployed** (3, Deployment; machines.md 4):
+  until ops runs `fab issues --install` on hel8, `fab issues sync` runs
+  from the transient timer started by hand in `FAB_HOME/issues-install`,
+  whose reply calls start there.
 - **Where else the user reads the page** is the user's (4): it is a file on
   hel8, and its questions are on the forge (3).
