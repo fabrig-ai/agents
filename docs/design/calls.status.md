@@ -13,8 +13,8 @@
   too) and the structure reviewer; answer, reply, triage and settle stay
   medium. A cut's sub-agents are `integration.status.md`'s. Tested with fake
   runners (`test_calls.py` `test_role_effort_keeps_designers_above_other_claude_roles`,
-  `test_cut_call_uses_xhigh_effort`). Not seen live: this plan's own retire ran
-  at high (below) and no designer call has started since.
+  `test_cut_call_uses_xhigh_effort`). This plan's own retire ran at high
+  (below); brief-guard's later retire is also recorded below.
 - **Held call chains go to settle** (2; 11-01, the user: second refusals are
   not the user's): a second refusal, failed amend or three infra reviews
   starts a report-only medium-effort `settle` call under the plan's answer
