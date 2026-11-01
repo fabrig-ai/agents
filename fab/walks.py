@@ -28,6 +28,8 @@ FINDINGS_LIMIT = 30  # findings in one walk result
 class _Finding:
     """One walker's finding before it receives a global id."""
 
+    same: str
+    evidence: tuple[str, ...]
     title: str
     severity: str
     area: str
@@ -35,8 +37,6 @@ class _Finding:
     reproduction: str
     expected: str
     seen: str
-    evidence: tuple[str, ...]
-    same: str
 
 
 @dataclass(frozen=True)
@@ -266,8 +266,7 @@ def result(walk_id: str, directory: Path | None = None, *, log_path: Path | None
         raised = {event["index"]: event for event in events if event.get("ev") == "finding.raised"
                   and event.get("walk") == walk_id}
         number = sum(event.get("ev") == "finding.raised" for event in events)
-        appended = []
-        identifiers = []
+        appended, identifiers = [], []
         for index, (entry, target) in enumerate(zip(parsed.findings, targets), 1):
             if index not in raised:
                 number += 1
