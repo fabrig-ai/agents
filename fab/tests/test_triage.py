@@ -3,7 +3,7 @@
 import copy
 import io
 import unittest
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from unittest.mock import patch
 
@@ -425,6 +425,26 @@ class TriageBacklogTest(TriageTest):
 
 
 class TriageMainTest(TriageTest):
+    def test_triage_uses_main_after_own_trunk_lands_and_shares_brief_snapshot(self):
+        root = log.home().parent
+        fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+        plan = replace(self.plan, landing="integration")
+        for landed in (False, True):
+            if landed:
+                log.append("branch.landed", task="ladder/integration", queue_ts="001")
+            events = log.read()
+            with self.subTest(landed=landed), patch.object(triage, "load_plan", return_value=plan), \
+                 patch.object(calls, "run", fake), patch.object(triage.walks, "editions", return_value={}), \
+                 patch.object(triage.log, "read", return_value=events) as read, \
+                 patch.object(triage, "brief", return_value="Triage brief.") as brief, \
+                 patch.object(calls, "start", return_value={"outcome": "done"}) as start, \
+                 redirect_stdout(io.StringIO()):
+                self.assertEqual(triage.main(["--plan", str(root / "plan")]), 0)
+            read.assert_called_once_with()
+            self.assertIs(brief.call_args.args[1], events)
+            self.assertEqual(start.call_args.kwargs["base"], "main" if landed else plan.trunk)
+            self.assertTrue(start.call_args.kwargs["report_only"])
+
     def test_tick_brief_failure_parks_with_empty_report_and_wakes(self):
         root = log.home().parent
         fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))

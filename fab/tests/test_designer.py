@@ -1118,20 +1118,24 @@ class MainTest(unittest.TestCase):
                 self.assertEqual((result, errors), (0, ""))
                 self.assertEqual(start.call_args.kwargs["base"], base)
 
-    def test_other_designer_roles_keep_trunk_after_queue_landing(self):
+    def test_other_designer_roles_use_main_after_own_queue_landing(self):
         path = self.directory / "plan.toml"
         atomic.write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
         log.append("branch.landed", task="demo/integration", queue_ts="001")
-        log.append("branch.landed", task="new/integration", queue_ts="002")
-        for role, args, directory, trunk in (
-                ("contract", ("base",), self.directory, "demo/integration"),
-                ("decision", ("probe", "--run", "demo/probe-1"), self.directory, "demo/integration"),
-                ("cut", ("--source", SOURCE), self.root / "docs/plan/new", "new/integration")):
-            with self.subTest(role=role), patch.object(calls, "start", return_value={
-                    "outcome": "done", "branch": "calls/id"}) as start:
-                result, _, errors = self.invoke(role, *args, directory=directory, brief_only=False)
-                self.assertEqual((result, errors), (0, ""))
-                self.assertEqual(start.call_args.kwargs["base"], trunk)
+        for own_landed in (False, True):
+            if own_landed:
+                log.append("branch.landed", task="new/integration", queue_ts="002")
+            for role, args, directory, base in (
+                    ("contract", ("base",), self.directory, "main"),
+                    ("decision", ("probe", "--run", "demo/probe-1"), self.directory, "main"),
+                    ("cut", ("--source", SOURCE), self.root / "docs/plan/new",
+                     "main" if own_landed else "new/integration")):
+                with self.subTest(role=role, own_landed=own_landed), patch.object(designer, "enlist"), \
+                     patch.object(calls, "start", return_value={
+                        "outcome": "done", "branch": "calls/id"}) as start:
+                    result, _, errors = self.invoke(role, *args, directory=directory, brief_only=False)
+                    self.assertEqual((result, errors), (0, ""))
+                    self.assertEqual(start.call_args.kwargs["base"], base)
 
     def test_roles_start_with_correct_subject_and_exit_status(self):
         for role, args, subject in (("contract", ("base",), "demo/base"),

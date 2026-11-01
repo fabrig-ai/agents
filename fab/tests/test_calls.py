@@ -1561,7 +1561,7 @@ class MainTest(unittest.TestCase):
                 self.assertIs(start.call_args.kwargs["sh"], fake)
                 self.assertEqual(output.getvalue(), f"{outcome} calls/id\n")
 
-    def test_main_calls_start_on_plan_trunk(self):
+    def test_main_calls_start_on_trunk_then_main_after_queue_landing(self):
         for role in ("skeleton", "answer", "review", "amend"):
             with self.subTest(role=role), tmp_home() as root:
                 fixture(root)
@@ -1570,10 +1570,14 @@ class MainTest(unittest.TestCase):
                 self.amend_chain()
                 fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
                 args = {"skeleton": ["core"], "amend": ["root"]}.get(role, [])
-                with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()), \
-                     patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/id")) as start:
-                    self.assertEqual(calls.main([role, *args, "--plan", str(path.parent)]), 0)
-                self.assertEqual(start.call_args.kwargs["base"], "demo/integration")
+                for landed in (False, True):
+                    if landed:
+                        log.append("branch.landed", task="demo/integration", queue_ts="001")
+                    with self.subTest(landed=landed), patch.object(calls, "run", fake), \
+                         redirect_stdout(io.StringIO()), patch.object(calls, "start", return_value=dict(
+                             outcome="done", branch="calls/id")) as start:
+                        self.assertEqual(calls.main([role, *args, "--plan", str(path.parent)]), 0)
+                    self.assertEqual(start.call_args.kwargs["base"], "main" if landed else "demo/integration")
 
     def amend_chain(self):
         log.append("call.started", call="root", role="answer", subject="demo", branch="calls/root")

@@ -46,6 +46,15 @@ def trunk_landed(plan: Plan, events: Sequence[dict]) -> bool:
                for event in events)
 
 
+def call_base(plan: Plan, events: Sequence[dict]) -> str:
+    """Use main for calls after an integration plan's queue landing, else its trunk.
+
+    Only this draft's trunk landing counts (docs/design/integration.md, 3,
+    Retire waits for main); queue plans always keep their configured trunk.
+    """
+    return "main" if plan.landing == "integration" and trunk_landed(plan, events) else plan.trunk
+
+
 def trunk_tip(plan: Plan, events: Sequence[dict]) -> str | None:
     """The main of the last branch.landed into this plan's trunk, or None."""
     return next((event.get("main") for event in reversed(events)

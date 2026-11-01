@@ -11,7 +11,7 @@ from dataclasses import fields
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import calls, channel, findings as qa, log, walks
+from fab import calls, channel, findings as qa, integration, log, walks
 from fab.plan import Plan, load_plan
 from fab.sh import Failed
 
@@ -306,9 +306,9 @@ def brief(plan: Plan, events: list[dict], root: Path, plan_dir: Path,
 def main(argv: list[str]) -> int:
     """Compile or run fab call triage --plan PLAN_DIR [--brief-only].
 
-    Use the plan's repository and trunk for a report-only call, print its outcome,
-    and return 0 only for done or a printed brief; refusals and failed calls return
-    1 (docs/design/qa.md, 2, Triage is a Claude call in the director's role).
+    Use the plan's repository, starting from main after its integration trunk lands,
+    for a report-only call. Print its outcome; return 0 for done or a printed brief,
+    else 1 (docs/design/qa.md, 2, Triage is a Claude call in the director's role).
     """
     parser = argparse.ArgumentParser(prog="fab call triage", description=main.__doc__)
     parser.add_argument("--plan", type=Path, required=True)
@@ -324,7 +324,8 @@ def main(argv: list[str]) -> int:
         root = Path(checkout.out.strip()).resolve()
         editions = walks.editions(plan, directory, sh=calls.run)
         try:
-            text = brief(plan, log.read(), root, directory, editions,
+            events = log.read()
+            text = brief(plan, events, root, directory, editions,
                          call_id="(assigned at start)", branch="(assigned at start)",
                          report="(assigned at start)", now=log.now())
         except (ValueError, OSError) as error:
@@ -334,7 +335,7 @@ def main(argv: list[str]) -> int:
             return 0
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
         result = calls.start(ROLE, subject(plan.draft), repo, text, sh=calls.run,
-                             base=plan.trunk, report_only=True)
+                             base=integration.call_base(plan, events), report_only=True)
         print(result["outcome"])
         return 0 if result["outcome"] == "done" else 1
     except calls.BriefError as error:

@@ -5562,18 +5562,34 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.assertEqual((landed["ev"], landed["tip"], landed["main"], landed["into"]),
                          ("branch.landed", "branch-tip", "merged-tip", self.plan.trunk))
 
-    def test_foremen_start_on_integration_trunk(self):
+    def test_task_start_uses_main_after_trunk_lands_and_keeps_fix_base(self):
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}
+        for kind in ("feature", *fix.FIX_KINDS):
+            self.tasks["draft/a"] = replace(self.tasks["draft/a"], kind=kind)
+            for landed in (False, True):
+                self.path = self.home / f"start-{kind}-{landed}.jsonl"
+                if landed:
+                    self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+                with self.subTest(kind=kind, landed=landed), patch.object(runs, "start") as start:
+                    self.take(Action("start", task="draft/a", host="builder", run_kind="implement"), hosts=hosts)
+                base = "main" if landed or kind in fix.FIX_KINDS else self.plan.trunk
+                self.assertEqual(start.call_args.kwargs["trunk"], base)
+
+    def test_foremen_start_on_trunk_then_main_after_queue_landing(self):
         hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}
         for history, kind, module in ((question_history(), "foreman", foreman),
                                        (refusal_history("a"), "examine", repairs)):
-            with self.subTest(kind=kind):
-                self.path = self.home / (kind + ".jsonl")
-                self.append(*history)
-                action, = (dispatch.foreman_actions if kind == "foreman" else dispatch.repair_actions)(
-                    self.tasks, log.read(self.path))
-                with patch.object(module, "start") as start:
-                    self.take(action, hosts=hosts)
-                self.assertEqual(start.call_args.kwargs["trunk"], self.plan.trunk)
+            for landed in (False, True):
+                with self.subTest(kind=kind, landed=landed):
+                    self.path = self.home / f"{kind}-{landed}.jsonl"
+                    self.append(*history)
+                    if landed:
+                        self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+                    action, = (dispatch.foreman_actions if kind == "foreman" else dispatch.repair_actions)(
+                        self.tasks, log.read(self.path))
+                    with patch.object(module, "start") as start:
+                        self.take(action, hosts=hosts)
+                    self.assertEqual(start.call_args.kwargs["trunk"], "main" if landed else self.plan.trunk)
 
     def test_answer_and_repair_specs_use_trunk_and_settle_only_after_merge(self):
         for kind, module, history, text, prefix, settled_ev in (
@@ -5915,6 +5931,26 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertEqual(log.read(self.path)[-1]["ev"], "note")
         self.assertIn("missing trunk", log.read(self.path)[-1]["text"])
         self.assertIn("integration draft - failed:", self.output.getvalue())
+
+    def test_landed_ready_trunk_tick_reads_no_deleted_ref_and_logs_no_failure(self):
+        self.assertTrue(self.plan.ready)
+        self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+        self.fake.on(["git", "merge-base"], Result(128, err="missing trunk"))
+        trunk_ref = ["git", "rev-parse", f"origin/{self.plan.trunk}"]
+        self.fake.rules.insert(0, (trunk_ref, Result(128, err="missing trunk")))
+        with patch.object(dispatch, "_catch_up") as catch, \
+             patch.object(dispatch, "_integration_check") as check:
+            for _ in range(2):
+                self.tick()
+        catch.assert_not_called()
+        check.assert_not_called()
+        trunk_reads = [argv for argv in self.fake.argvs()
+                       if argv[:2] in (["git", "merge-base"], ["git", "rev-parse"])
+                       and f"origin/{self.plan.trunk}" in argv]
+        self.assertEqual(trunk_reads, [])
+        self.assertFalse(any(entry["ev"] == "note" and "failed:" in entry.get("text", "")
+                             for entry in log.read(self.path)))
+        self.assertNotIn("failed:", self.output.getvalue())
 
     def test_next_step_error_before_a_step_prints_a_neutral_label(self):
         with patch.object(integration, "next_step", side_effect=ValueError("bad decision")):

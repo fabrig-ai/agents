@@ -837,7 +837,7 @@ def main(argv: list[str]) -> int:
         if args.brief_only:
             print(text)
             return 0
-        result = start(args.role, subject, repo, text, sh=run, base=plan.trunk, **options)
+        result = start(args.role, subject, repo, text, sh=run, base=integration.call_base(plan, events), **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except BriefError as error:

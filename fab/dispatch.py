@@ -1541,7 +1541,7 @@ def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host],
         try:
             runs.start(tasks[action.task], hosts[name], kind=action.run_kind,
                        events=events, sh=sh, log_path=log_path, rejection=action.rejection,
-                       trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else plan.trunk,
+                       trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else integration.call_base(plan, events),
                        checkout=checkout, early=action.early)
             return
         except ValueError as error:
@@ -1588,7 +1588,8 @@ def _foreman(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host
     question = _question(action, tasks, events, "foreman")
     host = _builder(hosts, events)
     foreman.start(question, tasks[action.task], host, log.read(log_path),
-                  sh=sh, log_path=log_path, trunk=plan.trunk)
+                  sh=sh, log_path=log_path,
+                  trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else integration.call_base(plan, events))
     return f"{question.run} {host.name}"
 
 
@@ -1666,7 +1667,7 @@ def _examine(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host
     host = _builder(hosts, events)
     repairs.start(refusal, tasks[action.task], host, log.read(log_path),
                   sh=sh, log_path=log_path,
-                  trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else plan.trunk)
+                  trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else integration.call_base(plan, events))
     return f"{refusal.step} {host.name}"
 
 
@@ -2026,6 +2027,8 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                  hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
     """Read main's ancestry after the checkout's fetch and take the trunk's next action."""
     events = _lift_catch_up(plan, log_path=log_path)
+    if integration.trunk_landed(plan, events):
+        return
     tasks = _integration_tasks(plan, tasks, events)
     subject = f"{plan.draft}/integration"
     step = None
@@ -2036,8 +2039,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
         if plan.landing == "integration" and plan.ready:
             if not _contains("origin/main", f"origin/{plan.trunk}", checkout, sh=sh):
                 main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
-            trunk = sh(["git", "rev-parse", f"origin/{plan.trunk}"],
-                       cwd=str(checkout), check=True).out.strip()
+            trunk = sh(["git", "rev-parse", f"origin/{plan.trunk}"], cwd=str(checkout), check=True).out.strip()
             if waiting:
                 caught = _contains(waiting, f"origin/{plan.trunk}", checkout, sh=sh)
         step = integration.next_step(plan, tasks, events, main=main, trunk=trunk, caught=caught)

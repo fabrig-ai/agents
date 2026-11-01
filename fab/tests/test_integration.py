@@ -45,6 +45,18 @@ class IntegrationTest(unittest.TestCase):
                     self.assertTrue(integration.trunk_landed(PLAN, [*ignored, landed, *ignored]))
                     self.assertIsNone(integration.queue_step(PLAN, [landed], "tip"))
 
+    def test_call_base_uses_main_only_after_own_integration_queue_landing(self):
+        ignored = [merged(), merged(task="demo/integration"),
+                   dict(ev="branch.landed", task="other/integration", queue_ts="001"),
+                   dict(ev="branch.landed", task="demo/a", queue_ts="002"),
+                   dict(ev="branch.ready", task="demo/integration", queue_ts="003")]
+        landed = dict(ev="branch.landed", task="demo/integration", queue_ts="004")
+        for plan in (PLAN, replace(PLAN, landing="queue")):
+            for events in ([], ignored, [*ignored, landed]):
+                with self.subTest(landing=plan.landing, events=events):
+                    expected = "main" if plan.landing == "integration" and landed in events else plan.trunk
+                    self.assertEqual(integration.call_base(plan, events), expected)
+
     def test_red_tasks_do_not_hold_the_end_check_or_appear_as_pending_work(self):
         red = replace(TASK, id="demo/red-1", kind="red", part="after-landing", path="")
         tasks = {TASK.id: TASK, red.id: red}
