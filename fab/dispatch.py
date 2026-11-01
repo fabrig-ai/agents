@@ -564,38 +564,55 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
         for entry in log.records(result.out) if result.ok else ():
             if entry.get("ev") not in ("landed", "rejected", "collateral"):
                 continue
-            branch = entry.get("branch")
-            if not isinstance(branch, str):
+            record = _queue_record(entry, tasks, owners, backlog_owners, known_branches,
+                                   known_tasks, gate_hosts[0])
+            if record is None:
                 continue
-            identifier = branch if branch in owners else land.task_of(branch)
-            owned = identifier in tasks or branch in owners
-            if owned and entry["ev"] == "collateral":
-                continue
-            if not owned and (branch in known_branches or identifier in known_tasks
-                              or branch.startswith(("calls/", "answers/", "repairs/", "ladder/"))
-                              or branch.endswith("/integration")):
-                continue
-            ev = ("branch." if owned else "queue.") + entry["ev"]
+            ev, fields = record
+            branch = entry["branch"]
             key = (entry["ts"], ev, branch, entry.get("tip"))
             if key in imported:
                 continue
-            if owned:
-                fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
-                          if field in entry}
-                fields["task"] = identifier
-                if branch in backlog_owners and entry["ev"] == "landed":
-                    fields["into"] = ""
-            else:
-                fields = {"gate": gate_hosts[0]}
-                names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
-                fields.update({field: entry[field] for field in names if field in entry})
-                if entry["ev"] != "landed":
-                    tests = entry.get("tests")
-                    fields["tests"] = ([test for test in tests if isinstance(test, str)]
-                                       if isinstance(tests, list) else [])
             events.append(log.append(ev, path=log_path, branch=branch,
                                      queue_ts=entry["ts"], **fields))
             imported.add(key)
+
+
+def _queue_record(entry: dict, tasks: Mapping[str, Task], owners: Mapping[str, str],
+                  backlog_owners: Mapping[str, str], known_branches: set[str],
+                  known_tasks: set[str], gate: str) -> tuple[str, dict] | None:
+    """Classify a queue outcome and build its fields, or return None when skipped.
+
+    Owned collateral and unloaded fab branches are skipped; backlog landings keep
+    task equal to branch and into empty (docs/design/fab.md, 13.8 and 13.15).
+    """
+    branch = entry.get("branch")
+    if not isinstance(branch, str):
+        return None
+    identifier = branch if branch in owners else land.task_of(branch)
+    owned = identifier in tasks or branch in owners
+    if owned and entry["ev"] == "collateral":
+        return None
+    if not owned and (branch in known_branches or identifier in known_tasks
+                      or branch.startswith(("calls/", "answers/", "repairs/", "ladder/"))
+                      or branch.endswith("/integration")):
+        return None
+    ev = ("branch." if owned else "queue.") + entry["ev"]
+    if owned:
+        fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
+                  if field in entry}
+        fields["task"] = identifier
+        if branch in backlog_owners and entry["ev"] == "landed":
+            fields["into"] = ""
+    else:
+        fields = {"gate": gate}
+        names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
+        fields.update({field: entry[field] for field in names if field in entry})
+        if entry["ev"] != "landed":
+            tests = entry.get("tests")
+            fields["tests"] = ([test for test in tests if isinstance(test, str)]
+                               if isinstance(tests, list) else [])
+    return ev, fields
 
 
 def _import_after_landing(events: list[dict], hosts: Mapping[str, Host], *, sh: Runner,
