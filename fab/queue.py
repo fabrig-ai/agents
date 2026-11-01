@@ -1,9 +1,9 @@
 """fabrig's merge queue (docs/design/landing.md, 2). Runs on the gate machine.
 
-Ready refs `ready/<draft>/<task>` are taken oldest first, merged on main as one batch, checked
-in the gate lane, and pushed to main; a red batch is bisected. State is re-derived from git
-on every cycle, except the tips already tried and the collateral reds each tip has had, kept in
-FAB_HOME/queue-state.json. Every outcome is recorded in FAB_HOME/queue.jsonl, which the
+Ready refs `ready/<name>` with at least two name segments are taken oldest first, merged
+on main as one batch, checked in the gate lane, and pushed to main; a red batch is bisected.
+State is re-derived from git on every cycle, except the tips already tried and the collateral
+reds each tip has had, kept in FAB_HOME/queue-state.json. Every outcome is recorded in FAB_HOME/queue.jsonl, which the
 dispatcher reads. A batch of one may land on its precheck receipt (fab.receipts), and a red is
 classed before anyone hears it (fab.reds; docs/design/landing.md, 3).
 """
@@ -28,14 +28,14 @@ DRAIN = "1h"  # how long a stop waits for the cycle in progress before interrupt
 
 @dataclass(frozen=True)
 class Branch:
-    name: str  # "<draft>/<task>": the ready ref without its "ready/" prefix
+    name: str  # two or more segments: the ready ref without its "ready/" prefix
     tip: str
     timestamp: int  # committer time of the tip
 
 
 def candidates(repo: Path, tried: dict[str, str], *, sh: Runner = run) -> list[Branch]:
-    """refs/remotes/origin/ready/<draft>/<task> after a fetch, oldest committer time first (then
-    name); a branch whose tip equals tried[name] is left out."""
+    """Ready refs after a fetch whose names have at least two segments, oldest committer
+    time first (then full name); a branch whose tip equals tried[name] is left out."""
     output = sh(["git", "for-each-ref",
                  "--format=%(refname) %(objectname) %(committerdate:unix)",
                  "refs/remotes/origin/ready/"], cwd=str(repo), check=True).out
@@ -46,7 +46,7 @@ def candidates(repo: Path, tried: dict[str, str], *, sh: Runner = run) -> list[B
         if not ref.startswith(prefix):
             continue
         name = ref.removeprefix(prefix)
-        if len(name.split("/")) == 2 and tried.get(name) != tip:
+        if len(name.split("/")) >= 2 and tried.get(name) != tip:
             branches.append(Branch(name, tip, int(timestamp)))
     return sorted(branches, key=lambda branch: (branch.timestamp, branch.name))
 

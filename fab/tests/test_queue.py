@@ -39,15 +39,25 @@ class CoreTest(unittest.TestCase):
         self.assertEqual(queue.bisect([], lambda group: self.fail('empty checked')), ([], []))
         self.assertEqual(queue.bisect(branches, lambda group: True), (branches, []))
 
-    def test_candidates_only_ready_task_refs_oldest_then_name(self):
+    def test_candidates_ready_names_of_any_depth_oldest_then_name(self):
         prefix = 'refs/remotes/origin/'
         fake = FakeRunner().on(['git', 'for-each-ref'], Result(0, '\n'.join([
             prefix + 'ready/draft/new new 30', prefix + 'ready/draft/z z 10',
             prefix + 'ready/draft/a a 10', prefix + 'ready/draft/tried same 1',
+            prefix + 'ready/ladder/v0.1.0-ladder/backlog-1 backlog 5',
+            prefix + 'ready/answers/draft/task/foreman-1 answer 20',
+            prefix + 'ready/repairs/draft/part/task/foreman-1 repair 10',
+            prefix + 'ready/answers/draft/tried/foreman-1 same 1',
             prefix + 'ready/orphan orphan 1', prefix + 'topic/unready other 0']) + '\n'))
-        self.assertEqual(queue.candidates(Path('/repo'), {'draft/tried': 'same'}, sh=fake), [
-            queue.Branch('draft/a', 'a', 10), queue.Branch('draft/z', 'z', 10),
-            queue.Branch('draft/new', 'new', 30)])
+        tried = {'draft/tried': 'same', 'answers/draft/tried/foreman-1': 'same',
+                 'ladder/v0.1.0-ladder/backlog-1': 'old'}
+        with tmp_home() as home:
+            self.assertEqual(queue.candidates(home / 'repo', tried, sh=fake), [
+                queue.Branch('ladder/v0.1.0-ladder/backlog-1', 'backlog', 5),
+                queue.Branch('draft/a', 'a', 10), queue.Branch('draft/z', 'z', 10),
+                queue.Branch('repairs/draft/part/task/foreman-1', 'repair', 10),
+                queue.Branch('answers/draft/task/foreman-1', 'answer', 20),
+                queue.Branch('draft/new', 'new', 30)])
 
 
 class GitTest(unittest.TestCase):
@@ -312,8 +322,8 @@ class GitTest(unittest.TestCase):
         self.assertEqual(self.q.state['batches_since_full'], 3)
 
     def test_candidates_and_green_batch_of_two(self):
-        a = self.branch('draft/a', {'a.txt': 'a'}, timestamp=1700000000)
-        b = self.branch('draft/b', {'b.txt': 'b'}, timestamp=1600000000)
+        a = self.branch('ladder/v0.1.0-ladder/backlog-1', {'a.txt': 'a'}, timestamp=1700000000)
+        b = self.branch('answers/draft/task/foreman-1', {'b.txt': 'b'}, timestamp=1600000000)
         git(self.repo, 'push', '-q', 'origin', f'{a.tip}:refs/heads/unready',
             f'{a.tip}:refs/heads/ready/orphan')
         git(self.repo, 'fetch', '-q', 'origin')
@@ -328,6 +338,7 @@ class GitTest(unittest.TestCase):
         batch = self.records('batch')[0]
         self.assertEqual((batch['outcome'], batch['parent'], batch['selection']), ('green', self.base, 'full'))
         self.assertEqual(batch['branches'], [b.name, a.name])
+        self.assertEqual([entry['branch'] for entry in self.records('landed')], [b.name, a.name])
         self.assertNotIn('receipt', batch)
         self.assertTrue(batch['steps'][0].startswith('fmt:0:'))
         self.assertTrue(batch['steps'][1].startswith('check:0:'))
@@ -484,7 +495,8 @@ class ShellTest(unittest.TestCase):
         self.addCleanup(context.__exit__, None, None, None)
 
     def test_collateral_attempt_still_rejects_conflict_and_starts_new_tip_count(self):
-        a, b = queue.Branch('draft/a', TIP, 0), queue.Branch('draft/b', MAIN, 0)
+        a = queue.Branch('answers/draft/task/foreman-1', TIP, 0)
+        b = queue.Branch('repairs/draft/task/foreman-1', MAIN, 0)
         fake = FakeNextest({None: [('pkg', 'unit', 'fail')],
                             alone('pkg', 'unit'): [('pkg', 'unit', 'pass')]},
                            fallback=FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')))
@@ -502,6 +514,7 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(q.state['collateral'], {a.name: {'tip': TIP, 'count': 1}})
         records = log.read(q.log_path)
         self.assertEqual([entry['ev'] for entry in records], ['collateral', 'rejected', 'batch'])
+        self.assertEqual(records[0]['branch'], a.name)
         self.assertEqual((records[1]['branch'], records[1]['step']), (b.name, 'merge'))
 
     def test_collateral_half_stops_its_split_but_next_half_still_runs(self):
@@ -625,9 +638,9 @@ class ShellTest(unittest.TestCase):
         self.assertEqual(restored.state['tried'], q.state['tried'])
 
     def test_untry_makes_the_same_tip_a_candidate_in_this_cycle(self):
-        branch = queue.Branch('draft/a', 'same', 1)
+        branch = queue.Branch('repairs/draft/task/foreman-1', 'same', 1)
         fake = FakeRunner().on(['git', 'for-each-ref'],
-                              Result(0, 'refs/remotes/origin/ready/draft/a same 1\n'))
+                              Result(0, f'refs/remotes/origin/ready/{branch.name} same 1\n'))
         q = queue.Queue(self.home / 'clone', sh=fake)
         q.state['tried'][branch.name] = branch.tip
         q._save()
@@ -778,6 +791,34 @@ class ShellTest(unittest.TestCase):
                     self.assertEqual(batch['outcome'], 'error' if fails else 'green')
                     self.assertEqual(batch['sweep_error'], 'sweep refused')
                     self.assertNotIn('freed', batch)
+
+    def test_deep_batch_lands_and_deletes_full_refs_with_leases(self):
+        branch = queue.Branch('ladder/v0.1.0-ladder/backlog-1', TIP, 1)
+        output = (f'-\t:refs/heads/ready/{branch.name}\t[deleted]\n'
+                  f'-\t:refs/heads/{branch.name}\t[deleted]\n')
+        fake = FakeRunner().on(['git', 'for-each-ref'], Result(0,
+            f'refs/remotes/origin/ready/{branch.name} {TIP} 1\n')).on(
+            ['git', 'rev-parse', '--verify'], Result(0, TIP + '\n')).on(
+            ['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+            ['git', 'push', '--porcelain'], Result(0, output))
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        with patch('fab.queue.build_batch', return_value=([branch], [])) as build, \
+                patch('fab.gate.changed_paths', return_value=['README.md']), \
+                patch('fab.gate.check_steps', return_value=[]):
+            self.assertTrue(q.cycle())
+        build.assert_called_once_with(q.repo, [branch], MAIN, sh=fake)
+        landed, batch = log.read(q.log_path)
+        self.assertEqual((landed['ev'], landed['branch'], landed['tip'], landed['main']),
+                         ('landed', branch.name, TIP, MAIN))
+        self.assertEqual((batch['outcome'], batch['branches']), ('green', [branch.name]))
+        self.assertEqual(q.state['tried'], {branch.name: TIP})
+        self.assertIn(['git', 'rev-parse', '--verify', '--quiet',
+                       f'refs/remotes/origin/{branch.name}^{{commit}}'], fake.argvs())
+        cleanup, = [argv for argv in fake.argvs() if argv[:3] == ['git', 'push', '--porcelain']]
+        self.assertEqual(cleanup, ['git', 'push', '--porcelain',
+            f'--force-with-lease=refs/heads/ready/{branch.name}:{TIP}',
+            f'--force-with-lease=refs/heads/{branch.name}:{TIP}', 'origin',
+            f':refs/heads/ready/{branch.name}', f':refs/heads/{branch.name}'])
 
     def test_retirement_source_refusal_leaves_green_landing_tried(self):
         branch = queue.Branch('ops/hand', TIP, 0)
