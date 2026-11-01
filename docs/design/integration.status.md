@@ -82,7 +82,9 @@
   and `-u`, the worktree and branch removed on any push failure, and
   `trunk.made` (draft, base, tip) last; it prints the plan directory.
   `fab plan inputs PLAN_DIR FILE... [--replace]` (`fab/inputs.py`, `add`):
-  the refusals of 3 before any commit; a temporary worktree detached at
+  the refusals of 3 before any commit; `_check_paths` refuses any output
+  of `git status --porcelain --ignored`, an ignored file included (plan
+  `docs/plan/edge-fixes`); a temporary worktree detached at
   `origin/<trunk>`, removed in a `finally`; the commit `<draft>: inputs`
   by fab; the push per checkout kind (the trunk fast-forward only, this
   repository's `inputs/<draft>` through `fab.land.main`, deleted on a

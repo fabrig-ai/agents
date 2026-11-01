@@ -63,7 +63,7 @@ def _check_paths(checkout: Path, paths: list[str], trunk: str, replace: bool, sh
         if not replace and sh(["git", "cat-file", "-e", f"origin/{trunk}:{path}"],
                               cwd=str(checkout)).ok:
             raise ValueError(f"input already exists at origin/{trunk}: {path}; use --replace")
-        status = sh(["git", "status", "--porcelain", "--", path], cwd=str(checkout), check=True)
+        status = sh(["git", "status", "--porcelain", "--ignored", "--", path], cwd=str(checkout), check=True)
         if status.out.strip():
             raise ValueError(f"input is untracked or changed in checkout: {path}")
 

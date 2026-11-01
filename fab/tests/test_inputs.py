@@ -92,6 +92,13 @@ class InputsTest(unittest.TestCase):
         git(self.clone, "push", "-q", "origin", "HEAD:main")
         self.base = git(self.clone, "rev-parse", "HEAD")
 
+    def _seed_ignore(self):
+        atomic.write(self.clone / ".gitignore", "inputs/\n")
+        git(self.clone, "add", ".gitignore")
+        git(self.clone, "commit", "-q", "-m", "Ignore local inputs")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.base = git(self.clone, "rev-parse", "HEAD")
+
     def test_trunk_file_and_directory_in_one_commit_and_printed_paths(self):
         """The trunk advances once, and its checkout follows without a local branch."""
         self._trunk()
@@ -233,6 +240,28 @@ class InputsTest(unittest.TestCase):
         atomic.write(self.clone / self.path, "untracked\n")
         self._refused("input is untracked or changed")
         self._refused("input is untracked or changed", replace=True)
+
+    def test_refuses_ignored_input_with_or_without_replace(self):
+        """An ignored local file is preserved even when replacement is requested."""
+        self._seed_ignore()
+        destination = self.clone / self.path
+        atomic.write(destination, "ignored input\n")
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                self.assertEqual(git(self.clone, "status", "--porcelain"), "")
+                self._refused("input is untracked or changed", replace=replace)
+                self.assertEqual(destination.read_bytes(), b"ignored input\n")
+
+    def test_refuses_ignored_directory_input_with_or_without_replace(self):
+        """Ignored children of a directory input survive either replacement setting."""
+        self._seed_ignore()
+        destination = self.plan / "inputs/reviews/nested/local.md"
+        atomic.write(destination, "ignored review\n")
+        for replace in (False, True):
+            with self.subTest(replace=replace):
+                self.assertEqual(git(self.clone, "status", "--porcelain"), "")
+                self._refused("input is untracked or changed", files=[self.reviews], replace=replace)
+                self.assertEqual(destination.read_bytes(), b"ignored review\n")
 
     def test_refuses_modified_and_staged_input(self):
         """Tracked modifications and staged changes both block following the trunk."""
