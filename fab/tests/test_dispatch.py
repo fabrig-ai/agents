@@ -4397,6 +4397,30 @@ class OptimisticStartTest(unittest.TestCase):
         self.assertIn("land", [action.kind for action in self.tick()])
         self.land.assert_called_once_with(["draft/a-r1", "--task", "draft/a"])
 
+    def test_integration_amendment_rebase_consumed_before_merge(self):
+        the_plan = replace(make_plan(part("core")), landing="integration")
+        tasks = {"draft/a": task("a")}
+        events = [*chain_history("review"),
+                  dict(ev="call.checked", call="root", root="root", subject="draft/core",
+                       tip="skeleton-tip", outcome="green", tasks=["draft/a"]),
+                  dict(started(), kind="implement", base="skeleton-tip"), ended(),
+                  dict(ev="call.started", call="amend", role="amend", amends="root"),
+                  dict(ev="call.ended", call="amend", outcome="done"),
+                  dict(ev="call.finished", call="amend", outcome="done", tip="amended-tip")]
+        for base in ("origin/main", f"origin/{the_plan.trunk}"):
+            with self.subTest(base=base):
+                rebased = [*events, dict(started(n=2, branch="draft/a-r1"), kind="rebase", base=base), ended(n=2)]
+                actions = dispatch.decide(the_plan, tasks, rebased, self.hosts)
+                merges = [action for action in actions if action.kind == "merge"]
+                starts = [action for action in actions if action.kind == "start"]
+                if base == f"origin/{the_plan.trunk}":
+                    self.assertEqual(merges, [Action("merge", task="draft/a", branch="draft/a-r1",
+                                                    detail="draft/a-r1")])
+                    self.assertEqual(starts, [])
+                else:
+                    self.assertEqual(merges, [])
+                    self.assertEqual([action.run_kind for action in starts], ["rebase"])
+
     def test_parked_chain_holds_started_tasks_and_resets_after_answer(self):
         self.checked()
         self.task_done()

@@ -791,6 +791,20 @@ class TaskSourceTest(unittest.TestCase):
                 events = [*self.events, self.started, _event("call.finished", call=CHAIN.root, outcome=outcome, tip=tip)]
                 self.assertIsNone(review.task_rebase(self.task, events))
 
+    def test_integration_amendment_is_consumed_only_by_a_done_rebase_onto_its_trunk(self):
+        trunk = "draft/integration"
+        for base, outcome, consumed in ((f"origin/{trunk}", "done", True),
+                                       ("origin/main", "done", False),
+                                       (f"origin/{trunk}", "infra", False),
+                                       (f"origin/{trunk}", "failed", False)):
+            with self.subTest(base=base, outcome=outcome):
+                events = [*self.events, self.started, *_amend_events(),
+                          _event("call.finished", call="amend-1", outcome="done", tip="amended-tip"),
+                          _event("run.started", task=self.task.id, run="rebase", kind="rebase", base=base),
+                          _event("run.ended", run="rebase", outcome=outcome)]
+                context = review.task_rebase(self.task, iter(events), trunk=trunk)
+                self.assertEqual(context is None, consumed)
+
     def test_amendment_rebase_consumed_only_by_a_rebase_after_landing(self):
         events = [*self.events, self.started, *_amend_events(),
                   _event("run.started", task=self.task.id, run="early-rebase", kind="rebase", base="origin/main"),

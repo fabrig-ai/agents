@@ -1888,7 +1888,7 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
             # An early start merges only after what it built on has (fab-integration.md 3).
             continue
         if view.status == "done":
-            amendment = call_review.task_rebase(tasks[identifier], events)
+            amendment = call_review.task_rebase(tasks[identifier], events, trunk=plan.trunk)
             if amendment is not None:
                 rebases.append(identifier)
                 events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]

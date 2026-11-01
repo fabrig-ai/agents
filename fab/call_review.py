@@ -525,10 +525,10 @@ def task_source(task: Task, events: Iterable[dict]) -> tuple[dict, Chain] | None
     return None
 
 
-def task_rebase(task: Task, events: Iterable[dict]) -> dict | None:
+def task_rebase(task: Task, events: Iterable[dict], *, trunk: str = "main") -> dict | None:
     """Rebase context when a task's checked skeleton landed with an amended tip.
 
-    A successful rebase run after the finish consumes the amendment once.
+    A successful rebase run from origin/<trunk> after the finish consumes the amendment once.
     The shell adds the amendment's diff to these facts before launching the run.
     """
     events = list(events)
@@ -549,7 +549,7 @@ def task_rebase(task: Task, events: Iterable[dict]) -> dict | None:
              and event.get("task") == task.id]
     completed = {event.get("run") for event in events if event.get("ev") == "run.ended"
                  and event.get("outcome") == "done"}
-    if any(event.get("kind") == "rebase" and event.get("base") == "origin/main"
+    if any(event.get("kind") == "rebase" and event.get("base") == f"origin/{trunk}"
            and event.get("run") in completed for event in later):
         return None
     return {"step": "rebase", "old_tip": checked["tip"], "tip": tip,
