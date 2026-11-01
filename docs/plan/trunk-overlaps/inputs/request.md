@@ -11,4 +11,6 @@ trunks, landing at slice boundaries) are out of scope.
 
 The user's rule for this work: dogfood. It is built by fab's loop (this
 plan's tasks, run by the tick, landed through `bin/fab land`), not by hand.
-The work is small; keep the plan small to match.
+The work is small; keep the plan small to match. The plan's landing is
+`queue` (agents tasks land one by one through `bin/fab land`): the cut is
+started with `--set 'landing="queue"'`.

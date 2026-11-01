@@ -101,6 +101,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `finding.settled` | finding, run, verdict, reason, section | the tick acted on a finding's foreman: fix or none (a repair task follows) or left (the page) |
 | `rung.passed` | draft, rung, walk, edition, commit | a rung's brief rerun unchanged and passing, its lower rungs passed (13.15) |
 | `login.checked` | id, email, plan, used, resets, error, limit_names, limit_used, limit_resets | account check and limits (13.13); the three limit lists hold scalars of equal length in the same order, with null use or reset when unknown |
+| `trunks.overlap` | drafts, tips, files, more, reason | two ready trunks, each merged with main, conflict on these paths; empty files: cleared, or `gone` (13.17) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -2582,50 +2583,88 @@ say what a task owns, and refuse nothing); it gives each draft a cheap,
 early view of the others instead, in two pieces, neither of which builds
 anything.
 
-- **The overlap probe.** Once per tick, after every plan has ticked, fab
-  looks at each pair of loaded plans that are integration plans with
-  `ready`, in the same repository, not retired, whose trunk is on origin and
-  has not landed on main (no queue `branch.landed` for task
-  `<draft>/integration`). A replay (`ready` false) sits on an old base and is
-  never probed. For each pair it runs `git merge-tree --write-tree
-  --name-only --no-messages origin/<trunk a> origin/<trunk b>` in the first
-  of the two plans' checkouts (already fetched by the tick): exit 0 is no
-  overlap, exit 1 lists the conflicting paths after the tree's id, any other
-  exit is a failure note and no event. Since both trunks catch up with main
-  (13.12), merging the two trunks is enough; main itself is their common
-  ancestor's side.
-  - It logs `trunks.overlap` (`drafts`: the two drafts in name order,
-    `tips`: their trunk tips, `files`: the conflicting paths in order, at
-    most 40, `more`: how many were left out) only when a pair's `files`
-    differ from the last `trunks.overlap` logged for that pair; an empty
-    `files` after a non-empty one says the overlap cleared. A pair whose
-    plan stops being probed (landed, retired, unlisted) logs nothing more.
-  - The fold is pure (`fab/overlaps.py`): the pairs to probe from the
-    loaded plans and the log, the parse of merge-tree's output, and whether
-    a result is news. The shell is one function the tick calls with its
-    runner.
-  - It costs a few git commands per pair per tick; with five drafts at
-    once that is ten pairs.
+- **The overlap probe** (`fab/overlaps.py`). Once per tick, after every
+  plan has ticked (`_round` in `fab/dispatch.py`), fab probes the loaded
+  plans that are integration plans with `ready`, not retired, whose trunk
+  is on origin and has not landed on main (no `branch.landed` for task
+  `<draft>/integration` carrying `queue_ts`, as `fab.integration.queue_step`
+  reads it). A replay (`ready` false) sits on an old base and is never
+  probed. Pairs are formed within one `plan.repo`; the git commands run in
+  the checkout of the pair's first plan in draft-name order, which the tick
+  has fetched.
+  - **Each trunk as if caught up.** A trunk can lag main (13.12's catch-ups
+    wait), and a trunk behind main would show main's changes it lacks as
+    overlaps with every trunk ahead of it. So for each probed trunk fab
+    first runs `git merge-tree --write-tree --no-messages origin/main
+    origin/<trunk>`: exit 0 gives the trunk's tree with main merged in.
+    Exit 1 with a tree id first means the trunk has a catch-up conflict of
+    its own (13.12 repairs it): its pairs are skipped this tick.
+  - **Each pair:** `git merge-tree --write-tree --name-only --no-messages -z
+    --merge-base=origin/main <tree a> <tree b>`. Exit 0 is no overlap. Exit
+    1 is an overlap only when stdout's first NUL-separated field is a hex
+    object id; the conflicting paths follow it (`-z`, so paths are never
+    quoted). Any other result (exit 1 with no tree id, as for a missing
+    ref, exit 128, an unreadable output) is a failure: printed in the
+    tick's output, and logged as a `note` only when it differs from that
+    pair's last failure note.
+  - **Cost:** about 0.6 s per merge-tree on fabrig (measured 11-01), so n
+    drafts cost n + n(n-1)/2 of them under the tick's lock (five drafts:
+    15, ~9 s). To keep that off ticks where nothing moved, results are
+    cached in `FAB_HOME/overlaps.json`, keyed by main's sha and the trunk
+    tips; a pair or trunk whose key is unchanged is not run again. Losing
+    the file loses only time.
+  - **The event:** `trunks.overlap` with `drafts` (the two drafts in name
+    order), `tips` (their trunk tips, in that order), `files` (the
+    conflicting paths in merge-tree's order, at most 40), `more` (how many
+    were left out) and `reason` (`probe`, or `gone` below). It is logged
+    only when a pair's (`files`, `more`) differ from its last
+    `trunks.overlap`; a pair with none counts as empty, so a clean first
+    probe logs nothing, and an empty `files` after a non-empty one says the
+    overlap cleared.
+  - **Closing pairs that leave:** in a tick where every listed plan loaded
+    (13.4's rule), a pair whose last `trunks.overlap` has files and that
+    is not among this tick's probed pairs (a trunk landed, a plan retired
+    or unlisted, `ready` turned off) gets a closing `trunks.overlap` with
+    empty `files` and `reason` `gone`. A pair skipped for a catch-up
+    conflict or a failure is still probed, not gone.
+  - The pure part (`fab/overlaps.py`): the plans to probe from the loaded
+    plans and the log, the pairs, the parse of merge-tree's output, whether
+    a result is news, and the pairs gone. The shell is one function the
+    tick calls with its runner.
 - **What it is for, for now: report only.** Nothing waits on an overlap
   and nothing is started by one: the trunk that lands second still meets
   the conflict at its catch-up and repairs it there (13.12). The status
   page (13.14) shows each pair whose last `trunks.overlap` has files: the
-  two drafts, the count and the first few paths. Whether an overlap should
-  also reorder work, or start an early repair, waits for the numbers: how
-  often pairs overlap, and how often an overlap becomes a catch-up repair.
+  two drafts by their public labels and the count of files (`files` plus
+  `more`), never a path (13.14: the page is public, the repository
+  private). Whether an overlap should also reorder work, or start an early
+  repair, waits for the numbers: how often pairs overlap, and how often an
+  overlap becomes a catch-up repair.
 - **The cut sees the drafts beside it.** A cut's brief (13.3, 13.12) gains
-  a section `Drafts beside this one`: for every other loaded plan of the
-  same repository that is not retired and has not landed (as above, or a
-  queue plan with tasks not landed), its draft and each task not yet
-  landed with its `files`, at most 200 lines in all (the rest counted). The
-  cut's role text says what to do with it, in one line: prefer task
-  boundaries and an order that keep this draft's early work off files
-  another draft is changing, and say in `plan.md` which overlaps it could
-  not avoid. It refuses nothing and asks nothing.
-- **Later** (section 14): a build of the merged trunks (a `cargo check` of
-  each overlapping pair, in an idle slot like a check along the way),
-  which would catch the semantic conflicts a textual merge misses, such as
-  the jigq/debt compile red; landing a trunk at slice boundaries, so other
+  a section `Drafts beside this one`, after `Sources` (or `The user's
+  drafts`). `fab call cut` builds it: it takes `fab.channel.plan_dirs(())`,
+  loads each plan as the tick does without fetching (retired plans and
+  failed loads skipped, the cut's own plan left out), keeps those of the
+  same `plan.repo`, and folds statuses with `fab.state.fold` over
+  `fab.log.read()`; the rendered text is passed into `cut_brief` as a new
+  argument. In the plans file's order, per plan: its draft; for an
+  integration plan whose trunk has not landed, every task with its `files`,
+  those merged into the trunk marked `merged` (they are not on main yet);
+  for a queue plan, its tasks not landed, with their `files`; a plan whose
+  cut is in flight, `cut in flight`, with the tasks its pushed plan
+  already lists. Tasks by id; at most 200 lines in all, the rest counted.
+  A cut whose options set `ready=false` (a replay) gets no such section: a
+  replay differs from its run only in who executes it (13.12). The cut's
+  role texts (`fab/roles/cut-run.md` for direct integration cuts,
+  `fab/roles/cut.md`) gain one line, which is fab's mechanics since it
+  explains a section fab adds: prefer task boundaries and an order that keep
+  this draft's early work off files another draft is changing, and say in
+  `plan.md` which overlaps it could not avoid. It refuses nothing and asks
+  nothing.
+- **Later** (section 14): a build of the merged trees (a `cargo check` of
+  each overlapping pair, in an idle slot like a check along the way), which
+  would catch the semantic conflicts a textual merge misses, such as the
+  jigq/debt compile red; landing a trunk at slice boundaries, so other
   drafts see its changes sooner; both once the probe's numbers ask for them.
 
 ## 14. Later
