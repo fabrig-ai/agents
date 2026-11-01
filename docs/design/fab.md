@@ -2643,11 +2643,11 @@ anything.
   the conflict at its catch-up and repairs it there (13.12). The status
   page (13.14) shows each pair whose last `trunks.overlap` has files, in a
   panel after Drafts, from the snapshot key `overlaps` (a list of
-  `{drafts, files}`): the two drafts by their public labels (a draft not
-  known from run starts shows as `other`, as 13.14's labels do) and the
-  count of files (`files` plus `more`), never a path (13.14: the page is public, the repository
-  private). Whether an overlap should also reorder work, or start an early
-  repair, waits for the numbers: how often pairs overlap, and how often an
+  `{drafts, count}`, `count` being `len(files) + more`): the two drafts by
+  their public labels (a draft not known from run starts shows as `other`,
+  as 13.14's labels do) and that count, never a path (13.14: the page is
+  public, the repository private). Whether an overlap should also reorder
+  work, or start an early repair, waits for the numbers: how often pairs overlap, and how often an
   overlap becomes a catch-up repair.
 - **The cut sees the drafts beside it.** A cut's brief (13.3, 13.12) gains
   a section `Drafts beside this one`, after `Sources` (or `The user's
