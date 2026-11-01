@@ -334,7 +334,18 @@ session still walks by hand; walks run by fab are the section's last part.
     in the same branch (the tree's `docs/design/` and status file;
     `temper/docs/help/` with its help tests); then the task's own checks as
     any fabrig task (precheck `--onto origin/main`): qa-ladder's
-    `tasks/TEMPLATE.md`, which every hand repair carried.
+    `tasks/TEMPLATE.md`, which every hand repair carried. It also says the
+    plan's rung briefs are not the repair's: a fault in one is a `brief`
+    decision of triage, asked of the user, never a repair's edit.
+  - **A repair leaves the briefs** (11-01, found by fabrig/qa:
+    `v0.1.0-ladder/finding-17` edited `kit.md`, which changed every rung's
+    edition and reset 13 passes). Before a finding repair is readied, code
+    compares the branch with its merge base: a path among the plan's rung
+    brief files (`plan.rungs`' `brief`, under the plan directory) refuses it
+    (`branch.rejected`, step `gate:briefs`, findings naming the paths), as
+    a failed gate refuses, and its refusal foreman and repair run drop the
+    edit. Only a finding repair (`fab.fix.FIX_KINDS`' `finding` kind) is
+    checked; a brief's own change lands by hand or from a `brief` decision.
   - **Everything after-landing.md 2 gives kind `red` holds for each of
     `fab.fix.FIX_KINDS`:** an implement run from `origin/main` in a slot;
     readied for the queue and landed as `Merge <draft>/finding-<n>`; in the
