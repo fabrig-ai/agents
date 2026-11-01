@@ -1675,8 +1675,9 @@ only as tweaks once a replay matches its run.
     catch-up, taken before a check along the way. It waits, as a check along
     the way does, while any repair is open and while the cut is in flight.
     Tasks started earlier merge into the caught-up trunk as any; those
-    started later build on main's newer code. A catch-up merge is not a task
-    merge: it does not count toward `MID_EVERY`. Once every task has merged,
+    started later build on main's newer code. The tick's own catch-up merge
+    is not a task merge: it does not count toward `MID_EVERY` (a catch-up
+    repair's merge counts, as any repair's). Once every task has merged,
     catching up happens only before a check, as above, so a readied trunk is
     not moved under the queue. A plan without `ready` (a replay) never
     catches up: it stays on its base.
@@ -1694,9 +1695,17 @@ only as tweaks once a replay matches its run.
     runs as an implement run from the trunk's tip and is merged like any
     task, which brings main in. Its questions, answers and the open-repair
     waits are a repair's; a catch-up repair is never one of the three reds
-    that stop a plan. A catch-up refusal at a main sha that already had a
-    catch-up repair merged stops the plan for judgement (that repair did not
-    bring main in); a refusal at a newer main is a new repair.
+    that stop a plan. A refusal at a newer main is a new repair, but the
+    plan stops for judgement when a catch-up refusal is at a main sha that
+    already had a catch-up repair merged (that repair did not bring main
+    in), or is the `CATCH_LIMIT`th (3) refusal since the plan's last clean
+    catch-up (its `branch.landed` for task `<draft>/integration`, branch
+    `main`), so repairs that never bring main in cannot follow a moving main
+    for ever. The stop holds until a clean catch-up is logged after it: the
+    person resolving it merges main into the trunk and pushes it, and the
+    next tick, finding the trunk containing `origin/main` while the stop
+    holds, logs that `branch.landed` (tip origin/main's sha, `main` the
+    trunk's tip, `by` `hand`), which clears the stop.
   - **A queue rejection is checked again:** the trunk is caught up and
     checked once more, then readied again (the queue asked to forget its
     tried tip when the tip is unchanged). A red check goes to repairs as
