@@ -71,3 +71,14 @@ plan from `fab/tests/ladder_plans.py` and records from
 
 The steps added and where in `_tick_loaded`, `_reconcile_reds` and
 `_round`; the end-to-end test's path.
+
+## Answers
+
+- 2026-11-01. May `_fix_steps` gain keyword-only `plan: Plan`, `directory:
+  Path` and `checkout: Path`? Yes: add them as required keyword-only
+  arguments of this private function and pass them from its sole caller,
+  `_tick_loaded`, which already holds all three. Red and finding dispatch
+  stay together in `_fix_steps`; read main's tip in `checkout` once per
+  call, only when a finding examine is in the round, and leave the red
+  branch's behaviour unchanged. Don't add a separate finding-dispatch
+  function.
