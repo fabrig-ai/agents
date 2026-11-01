@@ -892,7 +892,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     extras once. Question, refusal and red actions share a log snapshot before fresh call
     decisions. Collect unowned runs last and refresh the page.
     """
-    # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
+    # only: the given plans alone, no strays and no page (a replay's own tick beside fab's,
+    # coord/fab-replay).
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
@@ -934,7 +935,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         actions.extend(taken)
         calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
     events = log.read(log_path)
-    for record in drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events):
+    # With only, fab's own tick collects the strays: this tick's hosts may not name their builder.
+    for record in ([] if only else drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events)):
         action = Action("collect", task=record["task"], run=record["run"],
                         host=record["host"], detail=record["run"])
         actions.append(action)
@@ -1376,8 +1378,9 @@ def _since_park(task_id: str, runs: list[str], events: list[dict]) -> list[str]:
 def main(argv: list[str]) -> int:
     """`fab tick [PLAN_DIR...] [--trigger hand|event|backstop] [--dry-run] [--only]`.
 
-    Tick listed and given plans; fail on bad loads. With --only, tick the given plans alone and
-    write no page: a second tick beside fab's own, for plans kept off FAB_HOME/plans.
+    Tick listed and given plans; fail on bad loads. With --only, tick the given plans alone,
+    collect no strays and write no page: a second tick beside fab's own, for plans kept off
+    FAB_HOME/plans.
 
     Dry-run loads each plan without fetch, prints retirement, failed loads or decide's
     actions on the same log and hosts, with no calm. It neither chains plans nor acts,
