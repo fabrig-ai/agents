@@ -63,6 +63,36 @@ class ChannelTest(unittest.TestCase):
         self.fab_home = log.home()
         self.fab_home.mkdir()
 
+    def test_settlement_closes_only_earlier_parked_ask_for_subject(self):
+        events = [question(0), parked(1), parked(2, subject="other/core")]
+        settled = event(3, "chain.settled", call="root-1", subject="demo/core", settle="settle-1",
+                        verdict="land", text="Good enough.")
+        self.assertEqual([(ask.kind, ask.subject) for ask in channel.asks((), iter([*events, settled]))],
+                         [("call", "demo/core"), ("parked", "other/core")])
+        self.assertEqual([ask.kind for ask in channel.asks((), [settled, parked(4)])], ["parked"])
+
+    def test_settle_guidance_joins_user_answers_in_log_order(self):
+        events = [event(1, channel.ANSWERED, subject="demo/core", answer="Use blocks."),
+                  event(2, "chain.settled", subject="demo/core", call="root", settle="settle-1",
+                        verdict="amend", text="Include extern blocks.\nKeep the parser."),
+                  event(3, "chain.settled", subject="other", verdict="amend", text="Elsewhere."),
+                  event(4, "chain.settled", subject="demo/core", verdict="land", text="Later work.")]
+        text = channel.answers_text("demo/core", iter(events))
+        self.assertIn("Settlement (settle-1): Include extern blocks.\nKeep the parser.", text)
+        self.assertLess(text.index("Use blocks."), text.index("Include extern blocks."))
+        self.assertNotIn("Elsewhere.", text)
+        self.assertNotIn("Later work.", text)
+
+    def test_amend_and_settle_questions_wait_for_chain_judgement(self):
+        for role in ("amend", "settle"):
+            for explicit in (False, True):
+                with self.subTest(role=role, explicit=explicit):
+                    started = event(0, "call.started", call="call-1", role=role)
+                    ended = question(1, call="call-1")
+                    if explicit:
+                        ended["role"] = role
+                    self.assertEqual(channel.asks((), [started, ended]), [])
+
     def rejection(self, minute=1, branch="hand/pushed", tip="tip", **fields):
         return event(minute, "queue.rejected", branch=branch, tip=tip, step="default",
                      log="/queue/check.log", gate="gate-host", queue_ts=ts(minute), **fields)

@@ -271,6 +271,58 @@ class ChainsTest(unittest.TestCase):
                            _event("run.ended", run="wrong-task", outcome="done"))
         self.assertEqual(chain, CHAIN)
 
+    def test_settlement_land_overrides_each_hold_and_old_park(self):
+        histories = [*_review_events(), *_amend_events(), *_review_events("review-2")]
+        for verdict, state in (("land", "approved"), ("amend", "review"), ("user", "parked")):
+            with self.subTest(verdict=verdict):
+                chain = self.chain(*histories,
+                    _event("call.parked", call=CHAIN.root, reason="refused after its amendment"),
+                    _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                           settle="settle-1", verdict=verdict, text="Resolve the findings."))
+                self.assertEqual(chain.state, state)
+                self.assertEqual(chain.refusals, ("review-1", "review-2"))
+        failed = [*_amend_events(outcome="failed"),
+                  _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                         settle="settle-1", verdict="land", text="Good enough.")]
+        self.assertEqual(self.chain(*failed).state, "approved")
+        self.assertEqual(self.chain(*failed, _event("call.finished", call=CHAIN.root)).state, "finished")
+
+    def test_settlement_amend_resets_infra_and_amend_counts(self):
+        settle = _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                        settle="settle-1", verdict="amend", text="Try this.")
+        infra = [event for number in range(review.INFRA_LIMIT)
+                 for event in _review_events(f"infra-{number}", "infra")]
+        self.assertEqual(self.chain(*infra, settle, *_review_events("retry", "infra")).state, "review")
+        self.assertEqual(self.chain(*_amend_events(outcome="failed"), settle,
+                                    *_review_events()).state, "amend")
+
+    def test_old_parks_reopen_only_for_automatic_hold_reasons(self):
+        history = [*_review_events(), *_amend_events(), *_review_events("review-2")]
+        for reason in ("refused after its amendment", "the amend call ended failed",
+                       "3 review runs ended infra", "user: choose capacity", "settle failed", ""):
+            with self.subTest(reason=reason):
+                parked = _event("call.parked", call=CHAIN.root, reason=reason)
+                self.assertEqual(self.chain(*history, parked).state,
+                                 "hold" if review.hold_reason(reason) else "parked")
+                self.assertEqual(self.chain(*history, parked,
+                    _event(channel.ANSWERED, subject=CHAIN.subject)).state, "review")
+        settled = _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                         settle="settle-1", verdict="amend", text="Fix it.")
+        self.assertEqual(self.chain(*history, settled,
+            _event("call.parked", call=CHAIN.root, reason="refused after its amendment")).state, "parked")
+
+    def test_attempts_survive_settlement_amend_but_user_reset_grants_more(self):
+        first = _event("call.started", call="settle-1", role="settle", settles=CHAIN.root)
+        second = dict(first, call="settle-2")
+        settled = _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                         settle="settle-1", verdict="amend", text="Fix it.")
+        events = [first, settled, second]
+        self.assertEqual(review.settle_calls(CHAIN, iter(events)), ["settle-1", "settle-2"])
+        events += [_event("call.parked", call=CHAIN.root),
+                   _event(channel.ANSWERED, subject=CHAIN.subject), dict(first, call="settle-3")]
+        self.assertEqual(review.settle_calls(CHAIN, events), ["settle-3"])
+
+
 
 class BriefTest(unittest.TestCase):
     def brief(self, chain=CHAIN, diff="+short\n", *, designs=(), answers=""):
@@ -412,6 +464,33 @@ class BriefTest(unittest.TestCase):
             self.assertNotIn("placeholder", rebound)
             self.assertEqual(rebound.split("# The call you amend", 1)[1],
                              text.split("# The call you amend", 1)[1])
+
+    def test_settle_brief_has_chain_evidence_diff_and_restricted_second_choice(self):
+        with tmp_home() as home:
+            chain = replace(CHAIN, calls=(CHAIN.root, "amend-1"), latest="amend-1",
+                            refusals=("review-1", "review-2"), state="hold", reason="refused after its amendment")
+            atomic.write(home / "fab/calls/amend-1/report.md", "Done: amended\nCovered blocks.\n")
+            for run_id in chain.refusals:
+                atomic.write(home / "fab/runs" / run_id / "report.md", f"Failed: {run_id} findings\n")
+            fake = _review_runner()
+            options = dict(call_id="settle", branch="", report="/report", sh=fake)
+            first = review.settle_brief(chain, Path("/checkout"), [], **options)
+            attempt = _event("call.started", call="settle-1", role="settle", settles=chain.root)
+            second = review.settle_brief(chain, Path("/checkout"), [attempt], **options)
+            self.assertIn("Choose land, amend or user.", first)
+            self.assertIn("Amend is no longer an option: land or user only.", second)
+            for text in (first, second):
+                for expected in (str(home / "fab/calls/skeleton-1/brief.md"),
+                                 "- Hold: refused after its amendment", "- Base: `base-sha`", "- Tip: `tip-sha`",
+                                 "Failed: review-1 findings", "Failed: review-2 findings", "Covered blocks.",
+                                 str(home / "fab/calls/amend-1/report.md"), "+change"):
+                    self.assertIn(expected, text)
+            self.assertTrue(all(call.cwd == "/checkout" for call in fake.calls))
+            self.assertEqual(fake.argvs()[:5], [["git", "fetch", "origin"],
+                ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/skeleton-1^{commit}"],
+                ["git", "merge-base", "refs/remotes/origin/main", "tip-sha"],
+                ["git", "diff", "--stat", "base-sha", "tip-sha"], ["git", "diff", "base-sha", "tip-sha"]])
+
 
 
 class StartTest(unittest.TestCase):

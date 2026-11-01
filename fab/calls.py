@@ -32,6 +32,7 @@ ROLES = {
     "reply": Path(__file__).resolve().parent / "roles" / "reply.md",
     "triage": Path(__file__).resolve().parent / "roles" / "triager.md",
     "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
+    "settle": Path(__file__).resolve().parent / "roles" / "settle.md",
     "amend": Path(__file__).resolve().parent / "roles" / "amender.md",
     "cut": Path(__file__).resolve().parent / "roles" / "cut.md",
     "contract": Path(__file__).resolve().parent / "roles" / "contract.md",
@@ -443,9 +444,9 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
 
 
 # Each Claude role's effort, as the user's model sets it (execution-modes.md, the roles table):
-# the answerer, issue reply and triager are medium; the designer's calls, the skeleton author,
+# the answerer, settler, issue reply and triager are medium; the designer's calls, the skeleton author,
 # its amendments and the structure reviewer are high. Passed explicitly, so a user's own default never leaks in.
-EFFORTS = {"answer": "medium", "reply": "medium", "triage": "medium"}
+EFFORTS = {"answer": "medium", "reply": "medium", "triage": "medium", "settle": "medium"}
 EFFORT = "high"
 
 
@@ -640,11 +641,31 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     commands = parser.add_subparsers(dest="role", required=True)
     for role in (name for name in ROLES if name not in (*designer.ROLES, "reply", "triage")):
         command = commands.add_parser(role)
-        if role in ("skeleton", "amend"):
+        if role in ("skeleton", "amend", "settle"):
             command.add_argument("part" if role == "skeleton" else "root")
         command.add_argument("--plan", type=Path, required=True)
         command.add_argument("--brief-only", action="store_true")
     return parser.parse_args(argv)
+
+
+def _chain_call(role: str, root: str, repo: Path, events: list[dict],
+                facts: Mapping[str, str]) -> tuple[str, str, dict]:
+    """Compile an amend or settle call from its root, refusing an invalid chain state."""
+    from fab import call_review
+
+    chain = call_review.chains(events).get(root)
+    if role == "amend":
+        if chain is None or chain.state != "amend":
+            raise ValueError(f"chain {root!r} must be in state amend")
+        return (call_review.amend_brief(chain, **facts), chain.subject,
+                dict(branch=chain.branch, amends=chain.root))
+    attempts = call_review.settle_calls(chain, events) if chain else []
+    recorded = {event.get("settle") for event in events if event.get("ev") == "chain.settled"}
+    if (chain is None or chain.state != "hold" or len(attempts) >= 2
+            or (attempts and attempts[-1] not in recorded)):
+        raise ValueError(f"chain {root!r} must be held with a settle attempt left")
+    text = call_review.settle_brief(chain, repo, events, sh=run, **facts)
+    return text, chain.subject + "/settle", dict(report_only=True, fields={"settles": chain.root})
 
 
 def main(argv: list[str]) -> int:
@@ -654,9 +675,10 @@ def main(argv: list[str]) -> int:
 
     Answer briefs contain only queued questions and include any foreman report.
     Amend requires a known chain in state amend and reuses its subject and branch.
+    Settle ROOT judges a held chain in a report-only call, subject <subject>/settle.
     --brief-only prints the brief; otherwise print outcome and branch, exiting 0 for Done
     and 1 for a failed call, invalid chain or compilation error."""
-    from fab import call_review, designer, triage
+    from fab import designer, triage
 
     if argv and argv[0] == "triage":
         return triage.main(argv[1:])
@@ -673,13 +695,9 @@ def main(argv: list[str]) -> int:
         events = log.read()
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
         options = {}
-        if args.role == "amend":
-            chain = call_review.chains(events).get(args.root)
-            if chain is None or chain.state != "amend":
-                raise ValueError(f"chain {args.root!r} must be in state amend")
-            text = call_review.amend_brief(chain, **facts)
-            subject = chain.subject
-            options = dict(branch=chain.branch, amends=chain.root)
+        repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
+        if args.role in ("amend", "settle"):
+            text, subject, options = _chain_call(args.role, args.root, repo, events, facts)
         elif args.role == "skeleton":
             if args.part not in plan.parts:
                 raise ValueError(f"unknown part {args.part!r}")
@@ -700,7 +718,6 @@ def main(argv: list[str]) -> int:
         if args.brief_only:
             print(text)
             return 0
-        repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
         result = start(args.role, subject, repo, text, sh=run, base=plan.trunk, **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1

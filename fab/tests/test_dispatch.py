@@ -800,10 +800,38 @@ class CallActionsTest(unittest.TestCase):
                     "review": [Action("vet", task="root", run=latest, run_kind="skeleton", branch="calls/root")],
                     "approved": [Action("finish", task="root", run=latest, run_kind="skeleton", branch="calls/root")],
                     "amend": [Action("call", task="root", run_kind="amend")],
-                    "hold": [Action("hold", task="draft/core", run="root", detail="refused after its amendment")],
+                    "hold": [Action("call", task="root", run_kind="settle")],
                 }.get(status, [])
                 self.assertEqual(self.actions(history, ["core", "next"]),
                                  [*step, Action("call", task="next", run_kind="skeleton")])
+
+    def test_settle_shares_only_its_plans_answer_limit(self):
+        held = chain_history("hold", root="one") + chain_history("hold", root="two", subject="draft/other")
+        self.assertEqual(self.actions(held), [Action("call", task="one", run_kind="settle")])
+        for role, subject in (("settle", "draft/core/settle"), ("answer", "draft")):
+            with self.subTest(role=role):
+                history = held + [call_started("running", role, subject)]
+                self.assertEqual(self.actions(history, ["next"]), [Action("call", task="next", run_kind="skeleton")])
+        foreign = [call_started("foreign", "settle", "other/core/settle")]
+        self.assertEqual(self.actions(held + foreign), [Action("call", task="one", run_kind="settle")])
+        question = self.question(ts="2000-01-01T00:00:00.000Z")
+        self.assertEqual(self.actions(held + [question]), [Action("call", task="one", run_kind="settle")])
+        history = [call_started("running", "settle", "draft/core/settle"), question]
+        self.assertEqual(self.actions(history), [])
+        self.assertEqual(self.actions(foreign + [question]), [Action("call", task="draft", run_kind="answer")])
+
+    def test_no_third_settle_after_two_recorded_attempts(self):
+        history = chain_history("hold")
+        for number in (1, 2):
+            history += [dict(ev="call.started", call=f"settle-{number}", role="settle", settles="root"),
+                        dict(ev="call.ended", call=f"settle-{number}", outcome="done"),
+                        dict(ev="chain.settled", call="root", subject="draft/core", settle=f"settle-{number}",
+                             verdict="amend" if number == 1 else "land", text="Guidance.")]
+        history.append(dict(ev="branch.rejected", branch="calls/root", step="test", tip="third"))
+        # After the amend reset, one ordinary amendment precedes this hold.
+        history += [dict(ev="call.started", call="amend-2", role="amend", amends="root"),
+                    dict(ev="call.ended", call="amend-2", outcome="failed")]
+        self.assertEqual(self.actions(history), [Action("hold", task="draft/core", run="root", detail="settle failed")])
 
     def test_amend_call_in_flight_reserves_role_across_chains(self):
         history = chain_history("amending", root="one") + chain_history("amend", root="two")
@@ -1696,33 +1724,98 @@ parts = []
         self.assertEqual(vet.call_count, len(call_review.REVIEWED))
         self.land.assert_not_called()
 
-    def test_hold_logs_last_refusal_once_and_answer_reopens_chain(self):
+    def test_hold_launches_settle_once_and_land_delivers_the_chain(self):
         path = self.home / "custom.jsonl"
         self.append(event("question.asked", text="Which?"), *chain_history("hold"), path=path)
-        actions = self.tick(log_path=path)
-        self.assertEqual(actions, [Action("hold", task="draft/core", run="root",
-                                          detail="refused after its amendment")])
-        self.assertEqual({key: value for key, value in log.read(path)[-1].items() if key != "ts"},
-                         dict(ev="call.parked", call="root", subject="draft/core",
-                              reason="refused after its amendment", report="last-refusal.md"))
-        page = (log.home() / channel.PAGE).read_text()
-        self.assertIn("### draft/core, parked", page)
-        self.assertIn("refused after its amendment", page)
+        self.assertEqual(self.tick(log_path=path), [Action("call", task="root", run_kind="settle")])
+        self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("settle", "root/settle"),
+                       FAB, "call", "settle", "root", "--plan", str(self.directory)], self.fake.argvs())
+        self.append(dict(ev="call.started", call="settle-1", role="settle", subject="draft/core/settle",
+                         settles="root"), path=path)
         self.assertEqual(self.tick(log_path=path), [])
-        self.assertEqual(sum(entry["ev"] == "call.parked" for entry in log.read(path)), 1)
-        self.append(dict(ev=channel.ANSWERED, subject="draft/core"), path=path)
-        with patch.object(call_review, "start") as vet:
-            self.assertEqual(self.tick(log_path=path)[0].kind, "vet")
-        vet.assert_called_once()
+        write(log.home() / "calls/settle-1/report.md", "Done: land\n\nGood enough. Scanner refinements are later work.\n")
+        self.append(dict(ev="call.ended", call="settle-1", outcome="done"), path=path)
+        self.assertEqual(self.tick(log_path=path), [Action("judge-chain", task="root", run="settle-1")])
+        self.assertEqual(call_review.chains(log.read(path))["root"].state, "approved")
+        self.assertEqual(self.tick(log_path=path), [Action("finish", task="root", run="root-amend",
+                                                        run_kind="skeleton", branch="calls/root")])
+        self.land.assert_called_once_with(["calls/root"])
+        self.assertFalse(any(record["ev"] == "call.parked" for record in log.read(path)))
+        self.assertEqual(self.tick(log_path=path), [])
         self.assertEqual(log.read(), [])
 
-    def test_hold_without_refusal_report_uses_empty_path(self):
-        self.append(event("question.asked", text="Which?"), *chain_history("review"))
-        for number in range(call_review.INFRA_LIMIT):
-            self.append(dict(ev="run.started", run=f"root-{number}", task="root", kind="review", host="builder"),
-                        dict(ev="run.ended", run=f"root-{number}", outcome="infra"))
+    def test_each_hold_reason_starts_one_settle_including_old_parks(self):
+        histories = [chain_history("hold"),
+                     chain_history("amend") + [dict(ev="call.started", call="amend", role="amend", amends="root"),
+                                               dict(ev="call.ended", call="amend", outcome="failed")],
+                     chain_history("review") + [entry for number in range(call_review.INFRA_LIMIT)
+                         for entry in [dict(ev="run.started", run=f"infra-{number}", task="root", kind="review"),
+                                       dict(ev="run.ended", run=f"infra-{number}", outcome="infra")]]]
+        for number, history in enumerate(histories):
+            for old in (False, True):
+                with self.subTest(reason=number, old=old):
+                    path = self.home / f"hold-{number}-{old}.jsonl"
+                    self.append(event("question.asked", text="Which?"), *history, path=path)
+                    if old:
+                        reason = call_review.chains(log.read(path))["root"].reason
+                        self.append(dict(ev="call.parked", call="root", subject="draft/core", reason=reason), path=path)
+                        self.assertEqual(len(channel.asks((), log.read(path))), 1)
+                    self.assertEqual(self.tick(log_path=path), [Action("call", task="root", run_kind="settle")])
+                    self.append(dict(ev="call.started", call="settle", role="settle", subject="draft/core/settle",
+                                     settles="root"), path=path)
+                    self.assertEqual(self.tick(log_path=path), [])
+                    self.land.assert_not_called()
+
+    def test_settle_user_and_failures_park_once(self):
+        cases = [("done", "Done: user\nChoose whether to buy the machine.\n", "user: Choose whether to buy the machine."),
+                 ("failed", "Done: land\nLooks good.\n", "settle failed"),
+                 ("done", "Done: unknown\nAdvice.\n", "settle failed"),
+                 ("done", "Done: land\n", "settle failed"),
+                 ("question", "Question: what now?\n", "settle failed"),
+                 ("done", "Done: user\nOne reason.\nAnother.\n", "settle failed"),
+                 ("done", None, "settle failed")]
+        for number, (outcome, text, reason) in enumerate(cases):
+            with self.subTest(number=number):
+                path = self.home / f"verdict-{number}.jsonl"
+                self.append(event("question.asked", text="Which?"), *chain_history("hold"),
+                            dict(ev="call.started", call="settle-1", role="settle", subject="draft/core/settle", settles="root"),
+                            dict(ev="call.ended", call="settle-1", role="settle", subject="draft/core/settle", outcome=outcome), path=path)
+                report_path = log.home() / "calls/settle-1/report.md"
+                if text is None:
+                    report_path.unlink(missing_ok=True)
+                else:
+                    write(report_path, text)
+                self.assertEqual(self.tick(log_path=path), [Action("judge-chain", task="root", run="settle-1")])
+                parked = log.read(path)[-1]
+                self.assertEqual((parked["ev"], parked["reason"], parked["report"]),
+                                 ("call.parked", reason, str(report_path)))
+                self.assertEqual([(ask.kind, ask.subject) for ask in channel.asks((), log.read(path))],
+                                 [("parked", "draft/core")])
+                self.assertEqual(self.tick(log_path=path), [])
+                self.assertEqual(sum(record["ev"] == "chain.settled" for record in log.read(path)),
+                                 int(reason.startswith("user: ")))
+
+    def test_settle_amend_resets_then_second_hold_cannot_amend(self):
+        self.append(event("question.asked", text="Which?"), *chain_history("hold"),
+                    dict(ev="call.started", call="settle-1", role="settle", subject="draft/core/settle", settles="root"),
+                    dict(ev="call.ended", call="settle-1", outcome="done"))
+        write(log.home() / "calls/settle-1/report.md", "Done: amend\nSupport extern blocks.\n")
         self.tick()
-        self.assertEqual((log.read()[-1]["ev"], log.read()[-1]["report"]), ("call.parked", ""))
+        self.assertEqual(call_review.chains(log.read())["root"].state, "review")
+        with patch.object(call_review, "start") as vet:
+            self.assertEqual(self.tick()[0].kind, "vet")
+        vet.assert_called_once()
+        self.append(dict(ev="run.started", run="root-3", task="root", kind="review"),
+                    dict(ev="run.ended", run="root-3", outcome="failed"))
+        self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
+        self.append(dict(ev="call.started", call="amend-2", role="amend", amends="root"),
+                    dict(ev="call.ended", call="amend-2", outcome="failed"))
+        self.assertEqual(self.tick(), [Action("call", task="root", run_kind="settle")])
+        self.append(dict(ev="call.started", call="settle-2", role="settle", subject="draft/core/settle", settles="root"),
+                    dict(ev="call.ended", call="settle-2", outcome="done"))
+        write(log.home() / "calls/settle-2/report.md", "Done: amend\nTry again.\n")
+        self.tick()
+        self.assertEqual(log.read()[-1]["reason"], "settle failed")
         self.assertEqual(self.tick(), [])
 
     def test_amend_unit_passes_root_and_uses_root_key(self):
@@ -2487,7 +2580,7 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(len([event for event in log.read() if event["ev"] == "call.finished"]), 1)
         self.lands.assert_not_called()
 
-    def test_fabrig_queue_refusal_amends_once_and_second_refusal_parks(self):
+    def test_fabrig_queue_refusal_amends_once_and_second_refusal_settles(self):
         rust = self.fabrig_plan()
         self.append(*chain_history("approved"))
         self.tick(rust)
@@ -2508,11 +2601,11 @@ class MultiPlanTickTest(unittest.TestCase):
         self.tick(rust)
         self.assertEqual(len([event for event in log.read() if event["ev"] == "branch.ready"]), 2)
         self.queue_records.append(dict(first, ts="002", tip=self.tip, log="/queue/second"))
+        self.assertEqual([a.run_kind for a in self.tick(rust) if a.kind == "call"], ["settle"])
+        self.append(dict(ev="call.started", call="settle", role="settle", subject="draft/core/settle", settles="root"))
         self.tick(rust)
-        self.tick(rust)
-        parked = [event for event in log.read() if event["ev"] == "call.parked"]
-        self.assertEqual([(event["call"], event["report"]) for event in parked], [("root", "/queue/second")])
-        self.assertEqual(len(units(self.fake)), 1)
+        self.assertFalse(any(event["ev"] == "call.parked" for event in log.read()))
+        self.assertEqual(len(units(self.fake)), 2)
         self.assertFalse(any(event["ev"] == "call.finished" for event in log.read()))
         self.lands.assert_not_called()
 

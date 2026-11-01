@@ -62,7 +62,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     In-flight calls and open chains reserve answer, review and amend only within the
     draft. Fresh skeleton and contract parts share its flow target, in design order.
     Successful calls stay designed; parked subjects and open chains block their subject.
-    Reply calls and issues/ subjects reserve nothing.
+    Settle calls share the answer limit; reply calls and issues/ reserve nothing.
     Queued questions use ANSWER_AT, ANSWER_AFTER or draft-local blocking; reviews use
     REVIEW_AT or REVIEW_AFTER since this draft's last review started. Retire follows
     review once every part is done. Pure; docs/design/fab.md, 12, 13.1 and 13.4.
@@ -84,6 +84,11 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
     roles.update(chain.role for chain in open_chains if chain.role in ("answer", "review"))
+    actions = _settle_actions(actions, own, events, busy=any(
+        event["role"] in ("answer", "settle") for event in flight.values()))
+    if (any(event["role"] == "settle" for event in flight.values())
+            or any(action.run_kind == "settle" for action in actions)):
+        roles.add("answer")
     questions = [question for question in foreman.questions(tasks, events)
                  if question.state == "queued"]
     parked = _parked_subjects(events)
@@ -139,6 +144,33 @@ def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool, *,
     return actions
 
 
+def _settle_actions(actions: list[Action], chains: Mapping[str, call_review.Chain],
+                    events: list[dict], *, busy: bool) -> list[Action]:
+    """Replace holds with one answer-slot settlement, or consume an ended settlement.
+
+    A pending call reserves only its plan's answer slot. Recorded settlements keep the
+    attempt count across an amend reset; only a user's answer grants two more attempts.
+    """
+    ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
+    recorded = {event.get("settle") for event in events if event.get("ev") == "chain.settled"}
+    result = []
+    for action in actions:
+        if action.kind != "hold":
+            result.append(action)
+            continue
+        chain = chains[action.run]
+        attempts = call_review.settle_calls(chain, events)
+        if attempts and attempts[-1] not in recorded:
+            if attempts[-1] in ended:
+                result.append(Action("judge-chain", task=chain.root, run=attempts[-1]))
+        elif len(attempts) >= 2:
+            result.append(Action("hold", task=chain.subject, run=chain.root, detail="settle failed"))
+        elif not busy:
+            result.append(Action("call", task=chain.root, run_kind="settle"))
+            busy = True
+    return result
+
+
 def _parked_subjects(events: list[dict]) -> set[str]:
     """The call questions that still wait for the user, shared with the page's fold."""
     return {ask.subject for ask in channel.asks((), events) if ask.kind == "call"}
@@ -156,7 +188,7 @@ def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: 
 @dataclass(frozen=True)
 class Action:
     kind: str  # collect, land, ready, merge, start, park, design, foreman, settle, examine, remedy,
-    # examine-red, remedy-red, call, vet, hold, finish
+    # examine-red, remedy-red, call, vet, hold, judge-chain, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -769,11 +801,12 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
     Answer, review and retire take no positional argument.
     """
     role = action.run_kind
-    key = f"{draft}/{action.task}" if role in drafts.DESIGN_ROLES else action.task
+    key = (f"{draft}/{action.task}" if role in drafts.DESIGN_ROLES else
+           f"{action.task}/settle" if role == "settle" else action.task)
     # The call runs the fab that started it, not whatever `fab` is on PATH: a replay's own
     # install (coord/fab-replay) beside fab's, which follows main at each tick.
     argv = [str(Path(__file__).resolve().parent.parent / "bin/fab"), "call", role]
-    if role in ("skeleton", "contract", "amend"):
+    if role in ("skeleton", "contract", "amend", "settle"):
         argv.append(action.task)
     argv.extend(["--plan", str(plan_dir.resolve())])
     sh(["systemd-run", "--user", "--collect", "--unit",
@@ -830,6 +863,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 detail = _remedy(action, tasks, plan_dir, plan=plan, sh=sh, log_path=log_path)
             case "vet":
                 _vet(action, plan, checkout, hosts, sh=sh, log_path=log_path)
+            case "judge-chain":
+                _judge_chain(action, log_path=log_path)
             case "hold":
                 _hold(action, log_path=log_path)
             case "finish":
@@ -1345,6 +1380,39 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     log.append("refusal.settled", path=log_path, task=refusal.task, run=action.run,
                verdict=verdict, reason=reason, branch=branch or "", section=section)
     return f"{verdict} {reason}"
+
+
+def _judge_chain(action: Action, *, log_path: Path | None) -> None:
+    """Record an ended settle's strict verdict once, parking failures and user decisions.
+
+    Land approves the existing branch. Amend resets its counts and carries guidance via
+    channel.answers_text. The second attempt cannot amend, even if its report asks to.
+    """
+    events = log.read(log_path)
+    chain = call_review.chains(events)[action.task]
+    if chain.state != "hold" or any(event.get("ev") == "chain.settled"
+                                    and event.get("settle") == action.run for event in events):
+        return
+    path = log.home() / "calls" / action.run / "report.md"
+    try:
+        report = path.read_text()
+    except (OSError, UnicodeError):
+        report = ""
+    lines = report.splitlines()
+    verdict = lines[0].removeprefix("Done: ") if lines and lines[0].startswith("Done: ") else ""
+    text = "\n".join(lines[1:]).strip()
+    outcome = next((event.get("outcome") for event in events if event.get("ev") == "call.ended"
+                    and event.get("call") == action.run), None)
+    valid = (outcome == "done" and verdict in ("land", "amend", "user") and bool(text)
+             and not (verdict == "amend" and len(call_review.settle_calls(chain, events)) >= 2)
+             and not (verdict == "user" and len(text.splitlines()) != 1))
+    if valid:
+        log.append("chain.settled", path=log_path, call=chain.root, subject=chain.subject,
+                   settle=action.run, verdict=verdict, text=text)
+        if verdict != "user":
+            return
+    log.append("call.parked", path=log_path, call=chain.root, subject=chain.subject,
+               reason="user: " + text if valid else "settle failed", report=str(path))
 
 
 def _hold(action: Action, *, log_path: Path | None) -> None:

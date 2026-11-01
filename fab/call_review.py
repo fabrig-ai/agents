@@ -3,7 +3,7 @@
 Whoever designs a thing never accepts it. A skeleton, answer or structure review call that
 ends done leaves a branch; a read-only Codex run reviews it before the dispatcher lands it.
 A refusal goes back once, as an amend call on the same branch; refused again, the call's
-subject parks for the user. The calls of one branch and their review runs are a chain;
+subject goes to a settle call. The calls of one branch and their review runs are a chain;
 `chains` folds them from the log, and the tick turns each chain's state into its next step.
 """
 
@@ -29,7 +29,7 @@ AMENDER = Path(__file__).resolve().parent / "roles" / "amender.md"  # the amend 
 CONSISTENCY = Path(__file__).resolve().parent / "roles" / "consistency.md"  # a retire chain's review
 DIFF_LIMIT = 120_000  # characters of the diff a review brief quotes; the run reads the rest itself
 FINDINGS_LINES = 40  # lines of a refusing report quoted in later briefs
-INFRA_LIMIT = 3  # review runs of a chain ending infra since its reset that park it
+INFRA_LIMIT = 3  # review runs ending infra since the reset that hold the chain
 STATES = ("review", "reviewing", "approved", "amend", "amending", "hold", "parked", "finished")
 
 
@@ -43,7 +43,7 @@ class Chain:
     latest: str  # the last call of the chain that ended done: the output to review or land
     refusals: tuple[str, ...]  # review runs that refused, in log order, over the whole chain
     state: str  # one of STATES
-    reason: str = ""  # for hold: why the chain parks, one line
+    reason: str = ""  # for hold: why the chain needs settlement, one line
 
 
 def chains(events: Iterable[dict]) -> dict[str, Chain]:
@@ -57,14 +57,17 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
     unless its outcome is done or infra.
 
     The reset: a call.answered whose subject is the chain's subject, later than the chain's
-    last call.parked (call the root). A question.answered resets nothing. Amend calls, infra
+    last call.parked (call the root). A chain.settled amend also resets counts; land
+    approves the tip, user parks it. A question.answered resets nothing. Amend calls, infra
     review runs and the parked mark count only from the last reset on; `calls` and
     `refusals` keep the whole chain.
 
     The state is the first of these that holds:
     - finished: a call.finished names any call of the chain (its outcome aside; one logged by
       hand drops the chain);
-    - parked: a call.parked names the root, after the last reset;
+    - parked: a call.parked names the root, after the last reset; a legacy park with a
+      hold reason and no chain.settled is held again until settlement;
+    - approved: a land settlement follows every review and the latest call;
     - amending: an amend call since the reset has no call.ended;
     - hold, reason `the amend call ended <outcome>`: the last amend call since the reset ended
       with an outcome other than done;
@@ -88,6 +91,9 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
             owners[event["call"]]["finished"] = True
         elif kind == "call.parked" and event.get("call") in folded:
             folded[event["call"]]["parked"] = position
+            folded[event["call"]]["park_reason"] = event.get("reason", "")
+        elif kind == "chain.settled" and event.get("call") in folded:
+            _fold_settlement(event, position, folded[event["call"]])
         elif kind == channel.ANSWERED and "subject" in event:
             for chain in folded.values():
                 if chain["subject"] == event["subject"] and chain["parked"] >= 0:
@@ -141,15 +147,7 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
         sections.append("# Earlier findings\n\n" + _findings(chain.refusals))
     if answers:
         sections.append(channel.SECTION + "\n\n" + answers)
-    cut = len(diff) > DIFF_LIMIT
-    if cut:
-        newline = diff.rfind("\n", 0, DIFF_LIMIT + 1)
-        diff = diff[:newline] if newline >= 0 else ""
-    stat, diff = stat.removesuffix("\n"), diff.removesuffix("\n")
-    change = f"# The diff\n\n```text\n{stat}\n```\n\n```diff\n{diff}\n```"
-    if cut:
-        change += f"\n\nThe diff is cut at {DIFF_LIMIT} characters; read the rest with `git diff {base} {tip}`."
-    sections.append(change)
+    sections.append("# The diff\n\n" + _diff_text(base, tip, stat, diff))
     path = log.home() / "calls" / chain.root / "brief.md"
     try:
         text = path.read_text()
@@ -157,6 +155,82 @@ def brief(chain: Chain, *, run_id: str, base: str, tip: str, stat: str, diff: st
         text = f"(brief missing: {path})"
     sections.append("# The call's brief\n\nWhat the call was asked, verbatim, to the end of this brief:\n\n" + text)
     return "\n\n".join(sections) + ("" if text.endswith("\n") else "\n")
+
+
+def hold_reason(reason: str) -> bool:
+    """Whether a pre-settlement park is one of the three automatic chain holds."""
+    return (reason == "refused after its amendment"
+            or reason.startswith("the amend call ended ")
+            or reason == f"{INFRA_LIMIT} review runs ended infra")
+
+
+def settle_calls(chain: Chain, events: Iterable[dict]) -> list[str]:
+    """Settle attempts for this root since its last user reset, in start order. Pure.
+
+    A settle's amend resets review counts but keeps these attempts: the second attempt
+    permits land or user only. A user's answer after a park grants fresh attempts too.
+    """
+    attempts = []
+    parked = False
+    for event in events:
+        if event.get("ev") == "call.parked" and event.get("call") == chain.root:
+            parked = True
+        elif event.get("ev") == channel.ANSWERED and event.get("subject") == chain.subject and parked:
+            attempts = []
+        elif (event.get("ev") == "call.started" and event.get("role") == "settle"
+              and event.get("settles") == chain.root and "call" in event):
+            attempts.append(event["call"])
+    return attempts
+
+
+def _diff_text(base: str, tip: str, stat: str, diff: str) -> str:
+    """Fence a merge-base diff and its stat, bounding it as the review and settle briefs do."""
+    cut = len(diff) > DIFF_LIMIT
+    if cut:
+        newline = diff.rfind("\n", 0, DIFF_LIMIT + 1)
+        diff = diff[:newline] if newline >= 0 else ""
+    stat, diff = stat.removesuffix("\n"), diff.removesuffix("\n")
+    change = f"```text\n{stat}\n```\n\n```diff\n{diff}\n```"
+    if cut:
+        change += f"\n\nThe diff is cut at {DIFF_LIMIT} characters; read the rest with `git diff {base} {tip}`."
+    return change
+
+
+def settle_brief(chain: Chain, checkout: Path, events: Iterable[dict], *,
+                 call_id: str, branch: str, report: str, sh: Runner = run) -> str:
+    """Compile the held chain's judgement with its merge-base diff and report paths.
+
+    Fetch the branch and quote its diff with the review brief's bound. Include every
+    refusal and amend report's path and excerpt, the root brief's path and hold reason.
+    The second settle permits land or user only. Commands go through sh.
+    """
+    def git(*argv):
+        return sh(["git", *argv], cwd=str(checkout), check=True).out
+
+    git("fetch", "origin")
+    tip = git("rev-parse", "--verify", f"refs/remotes/origin/{chain.branch}^{{commit}}").strip()
+    base = git("merge-base", "refs/remotes/origin/main", tip).strip()
+    stat = git("diff", "--stat", base, tip).rstrip("\n")
+    diff = git("diff", base, tip)
+    change = _diff_text(base, tip, stat, diff)
+    directory = log.home() / "calls"
+    facts = (f"- Call: {chain.root} ({chain.role})\n- Subject: {chain.subject}\n"
+             f"- Branch: `{chain.branch}`\n- Base: `{base}`\n- Tip: `{tip}`\n"
+             f"- Its brief: `{directory / chain.root / 'brief.md'}`\n- Hold: {chain.reason}")
+    restriction = ("Amend is no longer an option: land or user only."
+                   if settle_calls(chain, events) else "Choose land, amend or user.")
+    amendments = []
+    for call in chain.calls[1:]:
+        path = directory / call / "report.md"
+        amendments.append(f"## {call}\n\n- Report: `{path}`\n\n" + channel.excerpt(path, FINDINGS_LINES))
+    refusals = "\n".join(f"- Report: `{log.home() / 'runs' / run_id / 'report.md'}`"
+                          for run_id in chain.refusals if not run_id.startswith("queue:"))
+    return calls._brief([("Role", calls.ROLES["settle"].read_text().rstrip("\n")),
+                         ("Call facts", calls._facts(call_id, branch, report)),
+                         ("The held chain", facts + "\n\n" + restriction),
+                         ("Findings", refusals + "\n\n" + _findings(chain.refusals)),
+                         ("Amend reports", "\n\n".join(amendments) or "(none)"),
+                         ("The diff", change)])
 
 
 def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
@@ -286,8 +360,24 @@ def _fold_call(event: dict, position: int, started: dict, owners: dict, folded: 
             "root": call, "role": first["role"], "subject": first["subject"],
             "branch": first["branch"], "calls": [call], "latest": call,
             "latest_position": position, "refusals": [], "amendments": [], "reviews": [],
-            "reset": -1, "parked": -1, "finished": False,
+            "reset": -1, "parked": -1, "park_reason": "", "finished": False,
+            "settled": -1, "approved": -1,
         }
+
+
+def _fold_settlement(event: dict, position: int, chain: dict) -> None:
+    """Apply a complete settlement to its root without discarding the chain's history."""
+    if (event.get("subject") != chain["subject"] or "settle" not in event or "text" not in event
+            or event.get("verdict") not in ("land", "amend", "user")):
+        return
+    chain["settled"] = position
+    if event["verdict"] == "amend":
+        chain["reset"] = position
+    elif event["verdict"] == "land":
+        chain["approved"] = position
+    else:
+        chain["parked"] = position
+        chain["park_reason"] = "user: " + event["text"]
 
 
 def _state(chain: dict) -> tuple[str, str]:
@@ -297,8 +387,14 @@ def _state(chain: dict) -> tuple[str, str]:
     reviews = chain["reviews"]
     if chain["finished"]:
         return "finished", ""
-    if chain["parked"] > reset:
+    if chain["parked"] > max(reset, chain["settled"]):
+        if chain["settled"] >= 0 or not hold_reason(chain["park_reason"]):
+            return "parked", ""
+    elif chain["parked"] > reset and chain["park_reason"].startswith("user: "):
         return "parked", ""
+    last_review = reviews[-1]["position"] if reviews else -1
+    if chain["approved"] > max(reset, chain["latest_position"], last_review):
+        return "approved", ""
     if any(call["outcome"] is None for call in amendments):
         return "amending", ""
     if amendments and amendments[-1]["outcome"] != "done":
