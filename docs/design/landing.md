@@ -125,8 +125,16 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   cleanup still runs; a start removes a stale stop file.
 - **The selection and the steps are shared** (`fab/gate.py`): the queue runs
   them in the gate lane on the batch, precheck in the build lane on the tip
-  merged with main, in the implementer's slot. Precheck writes its receipt to
-  `FAB_HOME/precheck/<tip>.json` on the builder. The gate's lists
+  merged with main, in the implementer's slot. Precheck runs its test steps
+  through the same collector as the queue (`fab/queue_cpu.py`
+  `run_steps`), so starvation stays green there too: a test cancelled by
+  nextest's global timeout or a slow-timeout termination, with nothing
+  asserting, is starved, a warning, not red (fixed 11-01, found by
+  fabrig/qa: `v0.1.0-ladder/finding-5`'s precheck went red at 17:57Z on
+  the default suite's 120 s global timeout alone, 23,338 passed, 7
+  SIGTERMed, 938 not run, under a builder load of 14). Precheck writes its
+  receipt to `FAB_HOME/precheck/<tip>.json` on the builder, with the
+  starved count beside the steps. The gate's lists
   (`always.txt`, `read-by-tests.txt`) move with the cutover from fabrig's
   `tools/queue/` to its `.config/gate/`.
 
