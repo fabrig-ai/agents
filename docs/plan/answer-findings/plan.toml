@@ -1,0 +1,29 @@
+landing = "queue"
+
+# The thin cut of answer-findings: one task set for answer calls, so the tick
+# never starts an answer call whose brief lists no question. One direct part,
+# one task, as the request asks; its spec in tasks/, the standing rules in
+# notes/common.md, the decisions and the critical path in notes/decisions.md.
+draft = "answer-findings"
+repo = "agents"
+sources = [
+  "docs/plan/answer-findings/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "answer-set"
+title = "One task set for answers, shared by the tick's answer decision and the answer call's brief; a finding repair's answer reaches its body"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[slice]]
+id = 1
+story = "A ladder plan's queued finding-repair question starts one answer call whose brief lists it, and its Answer line reaches the repair's body; with no queued question no answer call starts"
+parts = ["answer-set"]
+walk = false
