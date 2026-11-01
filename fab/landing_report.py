@@ -204,35 +204,21 @@ def _repairs(landed: list[dict], rejections: dict[str, list[str]]) -> tuple[int,
 def _red_figures(events: list[dict], window: Window) -> dict[str, Figure]:
     """Count the tick's red decisions in the window, retaining earlier opening times.
 
-    Page routes include openings, left settlements and unfixed repairs. The red fold
-    supplies each unfixed repair's covering tip; its first fault-free run at or after
-    coverage that still lists a key is the page transition, even if the red later closed.
-    Recovery uses the reports' nearest-rank median, in hours. Future records do not count.
+    Page routes use the red fold's signal_ts for openings, left settlements and unfixed
+    repairs, even after closing. Queue rejections and repair landings use queue_ts when
+    present, including records imported after the window. Other decisions use ts.
+    Recovery uses the reports' nearest-rank median, in hours. Future decisions do not count.
     """
+    queue_records = []
+    for event in events:
+        stamp = event.get("queue_ts", event.get("ts"))
+        if isinstance(stamp, str) and window.holds(stamp):
+            queue_records.append(event)
     events = [event for event in events if isinstance(event.get("ts"), str)
               and event["ts"] < window.end]
     folded = tier_reds.reds(events)
     by_id = {red.id: red for red in folded}
     opened = [red for red in folded if window.holds(red.at)]
-    page_at = {red.id: red.at for red in folded if red.route == "signal"}
-    covering = {}
-    for red in folded:
-        if red.covered and red.signal_reason.startswith("unfixed: "):
-            covering.setdefault(red.covered, []).append(red)
-    covered = {}
-    for event in events:
-        if event.get("ev") == tier_reds.SETTLED:
-            red = by_id.get(event.get("red"))
-            if red is not None and red.verdict == "left" and event.get("run") == red.foreman:
-                page_at.setdefault(red.id, event["ts"])
-        elif event.get("ev") == tier_reds.TIERS_RUN and not event.get("faults"):
-            for red in covering.pop(event.get("tip"), ()):
-                covered[red.id] = red
-            keys = set(event.get("reds", ()))
-            for identifier, red in list(covered.items()):
-                if keys.intersection(red.keys):
-                    page_at[identifier] = event["ts"]
-                    del covered[identifier]
     records = within(events, window)
     settled = Counter(event.get("verdict") for event in records
                       if event.get("ev") == tier_reds.SETTLED)
@@ -245,18 +231,18 @@ def _red_figures(events: list[dict], window: Window) -> dict[str, Figure]:
     return {
         "reds_opened": len(opened),
         "reds_foreman": sum(red.route == "foreman" for red in opened),
-        "reds_page": sum(window.holds(stamp) for stamp in page_at.values()),
+        "reds_page": sum(bool(red.signal_ts) and window.holds(red.signal_ts) for red in folded),
         "reds_fix": settled["fix"],
         "reds_none": settled["none"],
         "reds_left": settled["left"],
         "red_repairs_landed": sum(event.get("ev") == "branch.landed"
-                                  and event.get("task") in repairs for event in records),
+                                  and event.get("task") in repairs for event in queue_records),
         "reds_closed": sum(closed.values()),
         "reds_closed_recovered": closed["recovered"],
         "reds_closed_absent": closed["absent"],
         "reds_closed_cleared": closed["cleared"],
         "red_recovery_hours": quantile(recoveries, 0.5),
-        "hand_rejected": sum(event.get("ev") == "queue.rejected" for event in records),
+        "hand_rejected": sum(event.get("ev") == "queue.rejected" for event in queue_records),
     }
 
 
@@ -274,12 +260,12 @@ def _open_signals(events: list[dict], window: Window) -> list[Signal]:
         if signal.id.startswith("red-"):
             result.append(Signal(f"after-landing red {signal.id} has no owner fab knows",
                                  "a confirmed red goes to its owner with its evidence; "
-                                 f"see the user's page ({signal.id})", "the branch's owner"))
+                                 f"see the user's page {signal.id}", "the branch's owner"))
         elif signal.id.startswith("queue:"):
             result.append(Signal(f"hand-pushed rejection {signal.id.removeprefix('queue:')} "
                                  "has no owner fab knows",
                                  "the precheck learns it (a tool check), not a role's text (a rule); "
-                                 f"see the user's page ({signal.id})", "ops"))
+                                 f"see the user's page {signal.id}", "ops"))
     return result
 
 

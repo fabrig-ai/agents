@@ -287,16 +287,58 @@ class LandingReportTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assertIn(f"| {label} | {value} (prev ", rendered)
 
+    def test_landing_report_counts_queue_decisions_on_the_day_they_happened(self):
+        yesterday = "2026-10-28"
+        today = "2026-10-29"
+        tomorrow = "2026-10-30"
+        events = []
+        for identifier in ("red-1", "red-2", "red-3"):
+            events += red_decisions("22:00", identifier, "fix", ts=ts("22:00", yesterday))
+        for identifier, imported, occurred in (
+                ("red-1", ts("00:01", today), ts("23:59", yesterday)),
+                ("red-2", ts("00:01", tomorrow), ts("23:59", today)),
+                ("red-3", ts("00:00", today), None)):
+            fields = {"queue_ts": occurred} if occurred is not None else {}
+            events += [
+                {"ev": "branch.landed", "ts": imported, "task": f"demo/{identifier}", **fields},
+                {"ev": "queue.rejected", "ts": imported, "branch": f"hand/{identifier}", **fields},
+            ]
+        sources = Sources(events, [], {})
+        for day, end, count in ((yesterday, today, 1), (today, tomorrow, 2),
+                                (tomorrow, "2026-10-31", 0)):
+            with self.subTest(day=day):
+                actual = landing.figures(sources, {}, Window(ts("00:00", day), ts("00:00", end)))
+                self.assertEqual((actual["hand_rejected"], actual["red_repairs_landed"]), (count, count))
+
+    def test_landing_report_counts_all_signal_routes_by_transition_even_after_closing(self):
+        yesterday = "2026-10-28"
+        events = [red_opened("22:00", "red-1", route="signal", ts=ts("22:00", yesterday))]
+        events += red_decisions("23:00", "red-2", "left", ts=ts("23:00", yesterday))
+        events[-1]["ts"] = ts("00:01")
+        events += red_decisions("23:00", "red-3", "fix", ts=ts("23:00", yesterday))
+        events += [
+            {"ts": ts("23:30", yesterday), "ev": "branch.landed", "task": "demo/red-3"},
+            {"ts": ts("00:02"), "ev": "tiers.run", "tip": "unfixed", "faults": [],
+             "branches": ["demo/red-3-r2"], "reds": ["red-3-case"]},
+        ]
+        for identifier in ("red-1", "red-2", "red-3"):
+            events.append({"ts": ts("00:30"), "ev": "red.closed", "red": identifier, "reason": "cleared"})
+        sources = Sources(sorted(events, key=lambda event: event["ts"]), [], {})
+        previous = landing.figures(sources, {}, Window(ts("00:00", yesterday), START))
+        current = landing.figures(sources, {}, WINDOW)
+        self.assertEqual((previous["reds_page"], current["reds_page"]), (1, 2))
+        self.assertEqual(current["reds_closed_cleared"], 3)
+
     def test_landing_report_signals_show_ownerless_reds_and_rejections_at_window_end(self):
         with tmp_home():
             rendered = landing.render(red_sources(), {}, WINDOW)
         signals = rendered.split("## Signals\n", 1)[1].split("\n\n", 1)[0]
         self.assertIn("**after-landing red red-6 has no owner fab knows:** "
                       "a confirmed red goes to its owner with its evidence; "
-                      "see the user's page (red-6) (the branch's owner)", signals)
+                      "see the user's page red-6 (the branch's owner)", signals)
         self.assertIn("**hand-pushed rejection hand/open has no owner fab knows:** "
                       "the precheck learns it (a tool check), not a role's text (a rule); "
-                      "see the user's page (queue:hand/open) (ops)", signals)
+                      "see the user's page queue:hand/open (ops)", signals)
         for absent in ("red-1 ", "red-2 ", "red-3 ", "red-4 ", "red-5 ", "red-future", "hand/landed", "hand/future"):
             with self.subTest(absent=absent):
                 self.assertNotIn(absent, signals)
