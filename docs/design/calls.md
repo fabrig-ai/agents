@@ -96,8 +96,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       - **`fetch` or `push`:** no amend call, and these refusals do not
         count toward the amend. The tick tries the finish again, each try
         `LAND_AFTER` (10) minutes after the chain's last refusal at that
-        step since its reset (so an answer retries at once), up to `LAND_TRIES` (3) refusals at that step counted per
-        chain: `fab land` refusals (no `queue_ts`) at that step for the
+        step since its reset (so an answer retries at once), up to
+        `LAND_TRIES` (3) refusals at that step counted per chain: `fab land` refusals (no `queue_ts`) at that step for the
         chain's branch since the later of its latest call's `call.ended`
         and its last reset (a `call.answered` for its subject or a
         `chain.settled` amend), never by the rejection's `tip` (a rebase
@@ -406,9 +406,10 @@ before it lands (2).
   `call.finished` is recorded for a failure before the delivery runs, and
   the next tick tries again. The commit comes before the delivery in the
   same finish, so a queue plan's `_queue_branch` readies the committed
-  tip; `_queue_branch` re-readies whenever origin's tip differs from the
+  tip; `_queue_branch` also re-readies when origin's tip differs from the
   last `branch.ready`'s `tip` (which covers a branch readied before this
-  landed). The consistency pass does not check `retired`: code sets it at
+  landed), in addition to a `call.ended` on the branch after the ready,
+  as today. The consistency pass does not check `retired`: code sets it at
   the finish.
   The Codex consistency pass is its chain's review run, with its own role
   text (`fab/roles/consistency.md`) and the list of changed designs; a

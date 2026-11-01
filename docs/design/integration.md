@@ -392,14 +392,22 @@ only as tweaks once a replay matches its run.
   plan.toml holding `draft`, `repo` and `sources` (from `designer.uncut`),
   then, only when options are given, under a comment `# Plan options,
   written by fab call cut --set; keep them`, each option as `<key> =
-  <json.dumps(value)>`. The brief's `The draft` section says `- Plan:
-  \`<path>/plan.toml\` exists on your branch with \`draft\`, \`repo\`,
-  \`sources\` (and fab's plan options); add \`[buffer]\` and the tables
-  below those lines, never repeating or changing them`, replacing `- Plan:
-  write ...`; `fab/roles/cut.md` drops its `draft`, `repo`, `sources`
-  bullet (keeping `[buffer]`), `fab/roles/cut-fabrig.md` drops "set `repo
-  = \"fabrig\"`", and `fab/roles/cut-run.md`'s template drops its
-  `draft`/`repo`/`sources` lines and `# the plan options, verbatim`. The tick restores them where code may write: for an
+  <json.dumps(value)>`. The brief's `The draft` section says, replacing
+  ``- Plan: write ...``:
+
+  ```text
+  - Plan: `<path>/plan.toml` exists on your branch with `draft`, `repo`,
+    `sources` (and fab's plan options); add `[buffer]` and the tables
+    below those lines, never repeating or changing them
+  ```
+
+  `fab/roles/cut.md` drops its `draft`, `repo`, `sources` bullet
+  (keeping `[buffer]`), `fab/roles/cut-fabrig.md` drops ``set `repo =
+  "fabrig"` ``, and `fab/roles/cut-run.md`'s "What you write" first
+  bullet becomes "`plan.toml` exists on your branch with `draft`,
+  `repo`, `sources` and fab's plan options; add below them:", its
+  template dropping its `draft`/`repo`/`sources` lines and `# the plan
+  options, verbatim`. The tick restores them where code may write: for an
   integration plan, every merge of the cut's branch (`_merge_branch`, its
   early releases and its last merge) restores the options in the trunk,
   never on the cut's branch: after a clean merge and before the push, the
@@ -408,11 +416,12 @@ only as tweaks once a replay matches its run.
   `<draft>: plan options restored` on the trunk; for a queue plan, the
   restore is a commit on the cut's branch before `_deliver`, the call
   having ended by then, with retire's guards and open finish (calls.md 3),
-  worktree `FAB_HOME/options/<root>`. Code never writes a branch while a call on it is
-  in flight. Options compare by parsed value (a different spelling of the
+  worktree `FAB_HOME/options/<root>` (a missing plan.toml makes no restore
+  and raises nothing; only retire's edit raises). Code never writes a
+  branch while a call on it is in flight. Options compare by parsed value (a different spelling of the
   same value makes no commit); a restore removes every top-level line
   assigning one of the keys and writes them under the comment, putting
-  the comment back at the top when the cut removed it; a branch with no
+  the comment back before the first table line when the cut removed it; a branch with no
   plan.toml gets none. Its
   `call.started` carries them (`options`), so the tick reads `landing` and
   `reviews` for the cut's own chain before plan.toml exists. For a replay

@@ -17,8 +17,8 @@ options` text).
      worktree=FAB_HOME/retire/<root>)`. The guards, the edit and the retry are as the design says.
      A failure before the delivery logs a note and records no `call.finished` (`_take`'s
      `finally` → `_record_finish`).
-   - Re-ready a queue plan's branch when origin's tip differs from its last `branch.ready`'s
-     `tip` (`_queue_branch`).
+   - `_queue_branch` also re-readies a branch when origin's tip differs from its last
+     `branch.ready`'s `tip`, in addition to today's `call.ended` rule.
    - Role texts:
      - remove the `retired = true` bullet from `fab/roles/retire.md` and say there that fab sets it;
      - remove "The plan not retired" and "and marked the plan retired" from
@@ -36,13 +36,16 @@ options` text).
        the design's "- Plan: `<path>/plan.toml` exists on your branch ..." line; the `Plan
        options` text says the same of the options. `fab/roles/cut.md` drops its `draft`, `repo`,
        `sources` bullet (keeping `[buffer]`), `fab/roles/cut-fabrig.md` drops "set `repo =
-       \"fabrig\"`", and `fab/roles/cut-run.md`'s template drops its `draft`/`repo`/`sources`
+       \"fabrig\"`", `fab/roles/cut-run.md`'s "What you write" first bullet becomes "`plan.toml`
+       exists on your branch with `draft`, `repo`, `sources` and fab's plan options; add below
+       them:", and its template drops its `draft`/`repo`/`sources`
        lines and `# the plan options, verbatim`.
      - The restore:
        - for an integration plan, in the trunk after each clean merge of the cut's branch in
          `_merge_branch`, never on the cut's branch;
        - for a queue plan, on the cut's branch before `_deliver`, once the call has ended, with
-         retire's guards and open finish (worktree `FAB_HOME/options/<root>`);
+         retire's guards and open finish (worktree `FAB_HOME/options/<root>`); a missing
+         plan.toml makes no restore and raises nothing;
        - comparing by parsed value, against the root cut's `call.started` `options`.
 3. **`fab land` refusals: code first** (`docs/design/calls.md` 2, "A `fab land` refusal counts as
    a refusal of the chain").
