@@ -9,7 +9,7 @@ import time
 import unittest
 from pathlib import Path
 
-BUDGET_SECONDS = 30.0
+BUDGET_SECONDS = 45.0
 SLOW_SECONDS = 0.5
 ROOT = Path(__file__).resolve().parent.parent
 

@@ -35,22 +35,22 @@ class TestrunTests(unittest.TestCase):
         return status, stderr.getvalue()
 
     def test_cpu_over_budget_fails_with_short_wall_time(self):
-        """CPU use exceeding 30 seconds fails even when wall time is short."""
-        status, output = self._run((31, 0, 0, 0, 0), 1)
+        """CPU use exceeding 45 seconds fails even when wall time is short."""
+        status, output = self._run((46, 0, 0, 0, 0), 1)
         self.assertEqual(status, 1)
         self.assertIn("over budget", output)
 
     def test_wall_over_budget_passes_with_short_cpu_time(self):
         """Waiting or machine load cannot exhaust the CPU budget."""
-        status, output = self._run((11, 22, 33, 44, 9000), 31, cpu_start=(10, 20, 30, 40, 1000))
+        status, output = self._run((11, 22, 33, 44, 9000), 46, cpu_start=(10, 20, 30, 40, 1000))
         self.assertEqual(status, 0)
         self.assertNotIn("over budget", output)
 
     def test_cpu_delta_includes_all_four_fields(self):
         """Subtract a nonzero start and include both children's CPU fields."""
-        status, output = self._run((14, 25, 40, 52, 9000), 1, cpu_start=(10, 20, 30, 40, 1000))
+        status, output = self._run((18, 29, 45, 56, 9000), 1, cpu_start=(10, 20, 30, 40, 1000))
         self.assertEqual(status, 1)
-        self.assertIn("31.0 s CPU", output)
+        self.assertIn("48.0 s CPU", output)
         self.assertIn("over budget", output)
 
     def test_summary_prints_wall_and_cpu_seconds(self):
@@ -58,7 +58,7 @@ class TestrunTests(unittest.TestCase):
         status, output = self._run((4, 3, 6, 4.8, 9000), 19.5)
         self.assertEqual(status, 0)
         summaries = [line for line in output.splitlines() if line.startswith("fab test:")]
-        self.assertEqual(summaries, ["fab test: 0 tests in 19.5 s wall, 17.8 s CPU (budget 30 s CPU)"])
+        self.assertEqual(summaries, ["fab test: 0 tests in 19.5 s wall, 17.8 s CPU (budget 45 s CPU)"])
 
     def test_filtered_suite_is_exempt_from_cpu_budget(self):
         """A name-filtered run keeps its budget exemption."""

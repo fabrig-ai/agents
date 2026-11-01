@@ -7,14 +7,14 @@ subsystem's design has its own status file, section 6). Plan:
 ## Present
 
 - **Package and tests:** `bin/fab`, the runner seam, the test runner with its
-  30 s CPU budget, the test helpers; 2231 tests in 23.1 s of CPU and 22.6 s
+  45 s CPU budget, the test helpers; 2231 tests in 23.1 s of CPU and 22.6 s
   of wall on main 21b50d6 (11-01, load 0.8).
 - **The suite's budget is CPU time** (4; plan `docs/plan/test-budget`,
   retired 11-01; 21b50d6): `fab/testrun.py` takes the delta of `os.times()`'s
   user, system and both children's fields from before discovery, so a child
   counts only once waited for, and fails past `BUDGET_SECONDS`, still 30.0.
   The summary reads `fab test: 2231 tests in 22.6 s wall, 23.1 s CPU (budget
-  30 s CPU)`. `TimedResult`'s per-test wall times still name the slow tests,
+  45 s CPU)`. `TimedResult`'s per-test wall times still name the slow tests,
   and a `-k` run stays exempt. No reader parses the line; `fab/cli.py`'s help
   says CPU. Tested with patched `os.times` and clocks (`test_testrun.py`),
   not on a loaded machine (slice 1 has no walk). Each checkout runs its own

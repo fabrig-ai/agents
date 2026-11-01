@@ -9,7 +9,7 @@
 - `old/` is reference only: never modify it or depend on it.
 - `fab/` is the pipelines' code (`docs/design/fab.md`). Main moves only
   through `bin/fab land`, which runs `bin/fab test`, the whole suite in under
-  30 s. A commit requiring machine action must say what action is needed.
+  45 s. A commit requiring machine action must say what action is needed.
 - Every machine gives passwordless sudo; use it where a task truly needs root, never to get round a rule (heavy's units and state, another's checkout, credentials and keys).
 - The design is the contract: `docs/design/`, cited by repository-root path and
   section. Code must be rebuildable from it at a high level. Every design has a

@@ -21,8 +21,8 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   the log. The shell runs git, ssh, codex-run and cargo through one injected
   runner (`fab/sh.py`). Tests check the core directly and the shell against a
   fake runner.
-- **The whole suite runs in under 30 s.** `bin/fab test` runs every test and
-  fails past 30 s of CPU time (section 4).
+- **The whole suite runs in under 45 s.** `bin/fab test` runs every test and
+  fails past 45 s of CPU time (section 4).
 - **Builders own their disk.** A sweep bounds each slot's footprint at the end
   of every task. A build short of disk waits while the builder reclaims idle
   slots. No implementer stops or asks because of disk (machines.md 2).
@@ -115,8 +115,10 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 
 ## 4. Tests
 
-- **Under 30 s for everything,** measured by `bin/fab test`, which fails past
-  it. The budget is the process's CPU time, user and system, children
+- **Under 45 s for everything,** measured by `bin/fab test`, which fails past
+  it (30 s until 11-01, when the suite at 2,233 tests took 34 s of CPU on an
+  idle hetzner6 and 23 s on hel8, and every agents run on hetzner6 ended
+  `Infra:`). The budget is the process's CPU time, user and system, children
   included, not wall time: a busy machine must not fail a suite that is
   fast (11-01: under QA's load, a run ended `Infra:` and two hand runs
   failed on wall time with every test passing). The wall time is printed
