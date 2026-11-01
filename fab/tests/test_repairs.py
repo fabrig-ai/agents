@@ -330,6 +330,16 @@ class BriefTest(RepairsTestCase):
 
 
 class StartTest(RepairsTestCase):
+    def test_specless_refusal_reads_the_body_without_opening_a_spec(self):
+        task = replace(TASK, path="", body="# Generated repair\n\nFix the check.\n", repo="fabrig", kind="repair")
+        with tmp_home() as home:
+            fake = starter()
+            run_id = repairs.start(refusal(), task, HOST, [], sh=fake, log_path=home / "events")
+            text = (log.home() / "runs" / run_id / "brief.md").read_text()
+            self.assertIn("# The task\n\n# Generated repair\n\nFix the check.", text)
+            self.assertNotIn("# The task spec", text)
+            self.assertNotIn("spec ``", text)
+
     def test_detached_branch_launch_and_event_after_question_foreman(self):
         with tmp_home() as home:
             spec = home / "task.md"

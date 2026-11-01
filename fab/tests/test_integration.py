@@ -28,6 +28,22 @@ def checked(n=1, outcome="done", tip="tip"):
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_red_tasks_do_not_hold_the_end_check_or_appear_as_pending_work(self):
+        red = replace(TASK, id="demo/red-1", kind="red", part="after-landing", path="")
+        tasks = {TASK.id: TASK, red.id: red}
+        self.assertEqual(integration.next_step(PLAN, tasks, [merged()]), integration.Step("check", "tip", "tip"))
+        events = [dict(merged(), ts="2026-11-01T00:00:00Z")]
+        events += [dict(record, mid=True, ts="2026-11-01T00:01:00Z") for record in checked(outcome="failed")]
+        repair, = integration.repair_tasks(PLAN, events, {}, tasks).values()
+        self.assertNotIn("demo/red-1", repair.body)
+        self.assertNotIn("## Not merged yet", repair.body)
+
+    def test_refusal_fix_appends_to_a_specless_integrations_repair(self):
+        events = [merged(), *checked(outcome="failed"),
+                  dict(ev="refusal.settled", task="demo/repair-1", verdict="fix", section="## Repair\n\nFix the test.\n")]
+        body = integration.repair_tasks(PLAN, events, {})["demo/repair-1"].body
+        self.assertTrue(body.endswith("## Repair\n\nFix the test.\n"))
+
     def test_trunk_tip_uses_only_last_merge_into_own_trunk(self):
         self.assertIsNone(integration.trunk_tip(PLAN, []))
         events = [merged(), merged("new"), {**merged("foreign"), "into": "other/integration"},

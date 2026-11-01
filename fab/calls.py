@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, channel, foreman, integration, log, state, wake
+from fab import atomic, channel, foreman, integration, log, state, tier_reds, wake
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -390,8 +390,10 @@ def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: P
             except FileNotFoundError:
                 pass
         records.append(f"## {record['task']} (`{record['branch']}`, main `{record['main'][:12]}`)\n\n{digest}")
-        citation = plan.parts[tasks[record["task"]].part].design
-        designs.setdefault(citation.split(",", 1)[0].strip(), citation)
+        part = plan.parts.get(tasks[record["task"]].part)
+        citation = part.design if part is not None else ""
+        if citation:
+            designs.setdefault(citation.split(",", 1)[0].strip(), citation)
     statuses = {key: view.status for key, view in fold(tasks, events).items()}
     return _brief([
         ("Role", ROLES["review"].read_text(encoding="utf-8")),
@@ -667,6 +669,7 @@ def main(argv: list[str]) -> int:
         else:
             # An integration plan's repairs have no spec file; their questions come too.
             tasks = integration.with_repairs(plan, tasks, events) if plan.landing == "integration" else tasks
+            tasks = {**tasks, **tier_reds.tasks(plan, events)}
             questions = [dict(task=item.task, run=item.run, text=item.text, foreman=item.report)
                          for item in foreman.questions(tasks, events) if item.state == "queued"]
             text = answer_brief(questions, tasks, root, plan=plan, **facts)

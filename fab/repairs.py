@@ -134,7 +134,8 @@ def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
     4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim.
 
     Pure: the caller reads the files and the log."""
-    facts = [f"- Run: {run_id}", f"- Task: {task.id} (spec `{task.path}`)",
+    task_fact = f"- Task: {task.id}" + (f" (spec `{task.path}`)" if task.path else " (no spec file)")
+    facts = [f"- Run: {run_id}", task_fact,
              f"- Branch: `{refusal.branch}` at `{refusal.tip or '-'}`",
              f"- Step: `{refusal.step}`", f"- Next run: {refusal.kind}",
              "- Retried unchanged since its last run: " + ("yes" if refusal.retried else "no"),
@@ -142,7 +143,7 @@ def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
              f"Your checkout is the task's repository at origin/{refusal.branch}, read-only."]
     sections = [role.rstrip("\n"), "# The refusal\n\n" + "\n".join(facts),
                 "# The failing step's log\n\n```text\n" + text.rstrip("\n") + "\n```",
-                "# The task spec\n\n" + spec]
+                ("# The task spec\n\n" + spec if task.path else "# The task\n\n" + task.body)]
     return "\n\n".join(sections) + ("" if spec.endswith("\n") else "\n")
 
 
@@ -164,7 +165,7 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
     fab.run.collect ends the run as any other: its run.ended carries the outcome refusals
     reads, and frees the worktree."""
     run_id = runs.next_run(foreman.task_field(task.id), events)
-    spec, role = Path(task.path).read_text(), ROLE.read_text()
+    spec, role = Path(task.path).read_text() if task.path else task.body, ROLE.read_text()
     record = {"step": refusal.step, "log": refusal.log, "tip": refusal.tip}
     if refusal.findings:
         record["findings"] = refusal.findings

@@ -87,7 +87,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
             landed = {event.get("task") for event in events if event.get("ev") == "branch.landed"
                       and event.get("ts", "") <= check.get("ts", "")}
             pending = [task for name, task in plan_tasks.items()
-                       if name not in landed and task.kind != "repair"]
+                       if name not in landed and task.kind not in ("repair", "red")]
             if pending:
                 body += ("\n## Not merged yet\n\nThis was a check along the way: these tasks had not "
                          "merged. Leave a red that lies in what one of them owns, or that one of them "
@@ -98,6 +98,10 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
                    and event.get("task") == identifier and event.get("answer")]
         if answers:
             body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers) + "\n"
+        sections = [event["section"] for event in events if event.get("ev") == "refusal.settled"
+                    and event.get("task") == identifier and event.get("verdict") == "fix" and event.get("section")]
+        for section in sections:
+            body += "\n" + section.rstrip("\n") + "\n"
         repairs[identifier] = Task(identifier, "integration", "repair", plan.repo, (),
                                  ("**",), "high", 20, body, "")
     return repairs
@@ -124,6 +128,7 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
     main conflicted at its tip (branch.rejected, step catch-up) stops for judgement. Pure."""
     if plan.landing != "integration":
         return None
+    tasks = {identifier: task for identifier, task in tasks.items() if task.kind != "red"}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
     if any(event.get("ev") == "call.started" and event.get("role") == "cut"
            and event.get("subject") == f"{plan.draft}/cut" and event["call"] not in ended

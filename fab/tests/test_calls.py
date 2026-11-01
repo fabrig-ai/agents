@@ -182,6 +182,15 @@ class ReviewHistoryTest(unittest.TestCase):
 
 
 class BriefTest(unittest.TestCase):
+    def test_review_accepts_a_landed_red_task_without_a_plan_part(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            red = replace(tasks["demo/one"], id="demo/red-1", kind="red", part="after-landing", path="")
+            tasks[red.id] = red
+            events = [dict(ev="branch.landed", task=red.id, branch=red.id, tip="tip", main="main", ts="now")]
+            text = calls.review_brief(plan, tasks, events, root, call_id="c", branch="b", report="r")
+            self.assertIn("## demo/red-1", text)
+
     def test_skeleton_sections_one_spec_and_part_statuses(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)
@@ -883,6 +892,27 @@ class StartTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_answer_includes_red_task_questions_for_both_landing_modes(self):
+        from fab.tests.test_tier_reds import repair_events
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing), tmp_home() as root:
+                fixture(root)
+                directory = root / "docs/plan/demo"
+                path = directory / "plan.toml"
+                write(path, path.read_text().replace('landing = "queue"', f'landing = "{landing}"'))
+                for record in repair_events():
+                    log.append(**record)
+                log.append("run.started", task="demo/red-1", run="demo/red-1-1", kind="implement")
+                log.append("run.ended", task="demo/red-1", run="demo/red-1-1", outcome="question")
+                log.append("question.asked", task="demo/red-1", run="demo/red-1-1", text="Which red fix?")
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                output = io.StringIO()
+                with patch.object(calls, "run", fake), redirect_stdout(output):
+                    self.assertEqual(calls.main(["answer", "--plan", str(directory), "--brief-only"]), 0)
+                self.assertIn("Which red fix?", output.getvalue())
+                self.assertIn("# Repair a red after landing", output.getvalue())
+                self.assertIn("## Task spec (none: its body)", output.getvalue())
+
     def test_brief_only_for_all_roles_through_cli(self):
         for role in ("skeleton", "answer", "review"):
             with self.subTest(role=role), tmp_home() as root:
