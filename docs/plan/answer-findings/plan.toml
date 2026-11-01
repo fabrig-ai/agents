@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of answer-findings: one task set for answer calls, so the tick
 # never starts an answer call whose brief lists no question. One direct part,

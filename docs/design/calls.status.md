@@ -48,6 +48,23 @@
   red foreman's form through `fab/fix.py`; its fix makes the specless
   `<draft>/finding-<n>`, whose questions skip the foreman and queue for
   the answerer as a red task's do.
+- **One task set for answers** (2; plan `docs/plan/answer-findings`,
+  retired 11-01; d4c2145): `fab.calls.answer_tasks(plan, tasks, events, *,
+  folded=None)` is `integration.with_repairs` (for any plan; it adds
+  nothing without check runs), the loaded `fix.FIX_KINDS` tasks dropped,
+  then `tier_reds.tasks` (reusing the round's `folded` reds) and
+  `fixes.tasks`. Its callers: `fab/dispatch.py` `_tick_loaded` (over
+  `specs.checked_tasks`), `main`'s dry run, and `fab/calls.py` `main`'s
+  answer brief. Until then the brief's set lacked `fixes.tasks`, and on
+  fabrig's `v0.1.0-ladder` (11-01, from 15:26Z) the tick started an answer
+  call about once a minute, each ending `Done: 0` with an empty brief,
+  while finding-4's and finding-5's questions waited. The answer's path
+  needed no change: `_finish` logs `Answer <draft>/finding-<n>:` as its
+  `question.answered` and `fixes.tasks` folds it under `## Answers`.
+  Tested with temporary homes and fake runners (`test_calls.py`
+  `test_answer_tasks_*`, `test_answer_includes_ladder_finding_question_and_repair_body`;
+  `test_dispatch.py` `test_finding_answer_*`); not yet seen live on the
+  ladder plan.
 - **A `fab land` refusal counts as a refusal of the chain** (2; plan
   `docs/plan/call-rebase`, retired 11-01; baaf496, ab3a6d5; its acceptance
   fixes by plan `docs/plan/call-rebase-fixes`, retired 11-01; bb8b86b,

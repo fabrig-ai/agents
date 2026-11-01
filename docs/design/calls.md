@@ -276,6 +276,21 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     `question.answered` (by the foreman run); a landing that fails is tried
     again next tick. Any other outcome, infra too, queues the question: a
     foreman runs once per question.
+- **One task set for answers** (plan `docs/plan/answer-findings`, 11-01):
+  the tasks whose questions an answer call takes are
+  `fab.calls.answer_tasks`: the plan's tasks with an integration plan's
+  repairs (`fab.integration.with_repairs`), its loaded tasks of
+  `fab.fix.FIX_KINDS` replaced by those the log folds (`fab.tier_reds.tasks`
+  for reds, `fab.fixes.tasks` for QA findings). The tick's round, whose
+  `call_actions` decides on an answer call, and the answer call's brief both
+  read it, so the tick never starts an answer call whose brief lists no
+  question (fabrig's `v0.1.0-ladder`, 11-01: the brief's set lacked
+  `fixes.tasks`, and more than 80 answer calls answered nothing while two
+  finding questions waited). An integration stop's question comes through
+  `fab.foreman.questions` over this set, with no task (integration.md 3).
+  An answer call's `Answer <task>: <text>` for a specless repair (a red's or
+  a finding's) is logged as that question's `question.answered` and folded
+  into the repair's body under Answers, which its next run reads.
 - **The structure review stays its own call** (gates.md 2), never the
   skeleton author's.
 
