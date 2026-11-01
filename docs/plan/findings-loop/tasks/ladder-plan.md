@@ -93,3 +93,16 @@ write the registered plan with `write_ladder` and keep its `[[question]]`
 `budget` (append it, or pass it through, without widening `write_ladder`'s
 signature beyond what the test needs), so the test still asserts actions
 `["start"]` and both questions on the page. Touch no other dispatcher test.
+
+## Repair (2026-11-01, step gate:shape, foreman findings-loop/ladder-plan/foreman-2)
+
+extract rung validation from problems; resolve the task kind conflict with its required signature.
+Both findings belong to this branch; retrying unchanged will fail.
+`fab/plan.py:340`: `problems` is 71 lines, exceeding the 60-line cap.
+Extract ladder/rung checks into a private function accepting `plan` and `plan_dir`.
+Keep `problems`’ final sorting and all existing diagnostics; keep both functions within 60 lines.
+The shape finding is a task metadata conflict: the spec requires the added `plan_dir` parameter, but declares `kind = "feature"`.
+`docs/design/fab.md`, section 12, permits signature changes only for `interface` or `migration`; `fab/gates.py:EXEMPT` implements that rule.
+Coordinator action is required to classify this task as `interface` before landing; that metadata change is outside the repair’s allowed files.
+Preserve the specified signature and `load` passing `plan_dir`; do not bypass the gate or change its exemptions.
+No files changed, builds run, or report file written: this run is read-only.
