@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, fix, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -191,11 +191,11 @@ def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: 
 @dataclass(frozen=True)
 class Action:
     kind: str  # collect, land, ready, merge, start, park, design, foreman, settle, examine, remedy,
-    # examine-red, remedy-red, call, vet, hold, judge-chain, finish
+    # examine-fix, remedy-fix, call, vet, hold, judge-chain, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
-    run_kind: str | None = None  # for start: implement, repair or rebase
+    run_kind: str | None = None  # start: implement, repair or rebase; fix actions: red or finding
     branch: str | None = None
     detail: str = ""
     rejection: dict | None = None
@@ -239,8 +239,8 @@ def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action
 
 def red_actions(plan: Plan, folded: Sequence[tier_reds.Red]) -> list[Action]:
     """Start or settle this plan's reds in opening order; closed reds take no action."""
-    return [Action("examine-red", task=red.task, detail=red.id) if red.state == "foreman"
-            else Action("remedy-red", task=red.task, run=red.foreman, detail=red.id)
+    return [Action("examine-fix", task=red.task, detail=red.id, run_kind="red") if red.state == "foreman"
+            else Action("remedy-fix", task=red.task, run=red.foreman, detail=red.id, run_kind="red")
             for red in folded if red.draft == plan.draft and red.state in ("foreman", "decided")]
 
 
@@ -266,36 +266,35 @@ def retire_ready(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict],
         for branch in event.get("branches", ())) for event in events)
 
 
-def _red_steps(plan: Plan, tasks: Mapping[str, Task], folded: Sequence[tier_reds.Red],
+def _fix_steps(actions: list[Action], tasks: Mapping[str, Task], folded: Sequence[tier_reds.Red],
                hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> list[Action]:
-    """Launch and settle reds against the same snapshot, logging failures for a later tick."""
-    actions = red_actions(plan, folded)
+    """Dispatch the round's fix actions by run_kind, noting failures for a later tick
+    (docs/design/fab-qa.md, 2). Return the actions, printing one line for each.
+    """
     by_id = {red.id: red for red in folded}
     for action in actions:
-        red = by_id[action.detail]
         detail = action.detail
         try:
-            if action.kind == "examine-red":
-                host = _builder(hosts, log.read(log_path))
-                tier_reds.start(red, host, log.read(log_path), plan_tasks=tasks, sh=sh, log_path=log_path)
-                detail += " " + host.name
+            if action.run_kind == "red":
+                red = by_id[action.detail]
+                if action.kind == "examine-fix":
+                    host = _builder(hosts, log.read(log_path))
+                    tier_reds.start(red, host, log.read(log_path), plan_tasks=tasks, sh=sh, log_path=log_path)
+                    detail += " " + host.name
+                else:
+                    try:
+                        report = Path(red.report).read_text()
+                    except (OSError, UnicodeError):
+                        report = ""
+                    record = tier_reds.settle(red, report, plan_tasks=tasks, log_path=log_path)
+                    detail = f"{record['verdict']} {record['reason']}"
             else:
-                detail = _remedy_red(red, tasks, log_path=log_path)
+                raise ValueError(f"unknown fix kind: {action.run_kind}")
         except (OSError, ValueError, Failed) as error:
             detail = "failed: " + " ".join(str(error).splitlines())
             log.append("note", path=log_path, text=f"{action.kind} {action.task} {detail}")
         print(f"{action.kind} {action.task} {detail}")
     return actions
-
-
-def _remedy_red(red: tier_reds.Red, tasks: Mapping[str, Task], *, log_path: Path | None) -> str:
-    """Settle a red's collected foreman report; unreadable reports give the repair the red alone."""
-    try:
-        report = Path(red.report).read_text()
-    except (OSError, UnicodeError):
-        report = ""
-    record = tier_reds.settle(red, report, plan_tasks=tasks, log_path=log_path)
-    return f"{record['verdict']} {record['reason']}"
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:
@@ -340,8 +339,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        free place by places(hosts, flight, calm) (the builder with most free places first;
        ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
-       last run ended infra. A task that already has MAX_RUNS runs (tier_reds.RED_RUNS
-       for kind red) gets park instead of start, whatever the target and the places. An open refusal permits neither start nor park
+       last run ended infra. A task that already has MAX_RUNS runs (fix.RUNS
+       for kinds in fix.FIX_KINDS) gets park instead of start, whatever the target and the places. An open refusal permits neither start nor park
        until settled fix or none, or fallback. Settled fixes add their section to the start's
        rejection; settled retries fold as done and go through step 2.
     4. design: when fewer tasks are runnable or rejected than plan.low times the flow's
@@ -376,13 +375,13 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
                 if refusal.task not in rebases}
     actions.extend(_failed_asks(views, events))
     step = integration.next_step(plan, tasks, events)
-    startable = ([identifier for identifier in candidates if tasks[identifier].kind == tier_reds.KIND]
+    startable = ([identifier for identifier in candidates if tasks[identifier].kind in fix.FIX_KINDS]
                  if step is not None and step.kind == "stop" else candidates)
     if startable:
         actions.extend(replace(action, early=early.get(action.task, ())) if action.kind == "start" else action
                        for action in _run_starts(startable, views, events, free, limit - occupied, refusals,
-                                                 {identifier: tier_reds.RED_RUNS for identifier, task in tasks.items()
-                                                  if task.kind == tier_reds.KIND}))
+                                                 {identifier: fix.RUNS for identifier, task in tasks.items()
+                                                  if task.kind in fix.FIX_KINDS}))
 
     if len(candidates) < plan.low * limit:
         design = _design_action(plan, tasks, views, hosts, len(candidates))
@@ -1123,7 +1122,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
         _ready_backlog(plan, log.read(log_path), checkout, sh=sh, log_path=log_path)
         events = log.read(log_path)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
-    tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind != tier_reds.KIND},
+    tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind not in fix.FIX_KINDS},
              **tier_reds.tasks(plan, events, folded=folded)}
     actions = decide(plan, tasks, events, hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
@@ -1137,7 +1136,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     for action in settlements:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     actions.extend(settlements)
-    actions.extend(_red_steps(plan, {**plan_tasks, **tasks}, folded, hosts, sh=sh, log_path=log_path))
+    actions.extend(_fix_steps(red_actions(plan, folded), {**plan_tasks, **tasks}, folded, hosts, sh=sh, log_path=log_path))
     design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
     followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
     followups = [action for action in followups if action.run_kind != "retire" or only
@@ -1348,7 +1347,7 @@ def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host],
         try:
             runs.start(tasks[action.task], hosts[name], kind=action.run_kind,
                        events=events, sh=sh, log_path=log_path, rejection=action.rejection,
-                       trunk="main" if tasks[action.task].kind == tier_reds.KIND else plan.trunk,
+                       trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else plan.trunk,
                        checkout=checkout, early=action.early)
             return
         except ValueError as error:
@@ -1473,7 +1472,7 @@ def _examine(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host
     host = _builder(hosts, events)
     repairs.start(refusal, tasks[action.task], host, log.read(log_path),
                   sh=sh, log_path=log_path,
-                  trunk="main" if tasks[action.task].kind == tier_reds.KIND else plan.trunk)
+                  trunk="main" if tasks[action.task].kind in fix.FIX_KINDS else plan.trunk)
     return f"{refusal.step} {host.name}"
 
 
@@ -1786,7 +1785,7 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
                 rebases.append(identifier)
                 events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]
                 continue
-            kind = "merge" if plan.landing == "integration" and tasks[identifier].kind != tier_reds.KIND else (
+            kind = "merge" if plan.landing == "integration" and tasks[identifier].kind not in fix.FIX_KINDS else (
                 "land" if tasks[identifier].repo == "agents" else "ready")
             actions.append(Action(kind, task=identifier, branch=view.branch, detail=view.branch or ""))
 
