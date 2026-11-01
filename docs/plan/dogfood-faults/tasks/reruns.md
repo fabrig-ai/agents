@@ -71,3 +71,17 @@ Keep that assertion and change nothing else in this file, as the spec’s Answer
 The inspected checkout already contains this guard at lines 4266–4267; retain it and verify before making further changes.
 Run the failing test and `bin/fab test` with Python `-B`.
 The behavior follows `docs/design/tick.md`, section 3.
+
+## Repair (2026-11-01, step test, foreman dogfood-faults/reruns/foreman-4)
+
+ensure the tested branch includes the absent-branch fixture response
+The failure is `OptimisticStartTest.test_green_tip_starts_before_review_ends_and_specs_count_for_status_needs_and_buffer`.
+In `fab/tests/test_dispatch.py`, `OptimisticStartTest.remote` must return `Result(1)` for `rev-parse -q --verify`.
+Otherwise the fake reports `origin/draft/a` present and implementation starts there instead of `skeleton-tip`.
+Keep the skeleton-base assertion; change nothing else in this file, as Answers authorizes.
+The inspected HEAD is `ca5c92e735fa222969650d1bc4d87481f1748bce`, and already contains that guard.
+The reported refused commit `d74f981f1861147e5380e00b575255a342456072` is unavailable in this checkout.
+Reconcile the repair tip with the tip tested by landing before repeating the previous repair.
+Retain the existing guard if present; inspect the recorded launch commands if the assertion still fails.
+Validate the failing test and `bin/fab test` using Python `-B`.
+The required fallback follows `docs/design/tick.md`, section 3.
