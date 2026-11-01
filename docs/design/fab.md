@@ -1141,8 +1141,9 @@ before it lands (13.1).
     title, rung and the first 12 lines of its reproduction. `fab page
     answer <subject> TEXT` logs `call.answered` as for any subject, which
     closes the ask (as it closes the call and parked kinds) and makes the
-    finding new again, dropped (`brief`) or no longer holding (`; user:`),
-    its answer in the next triage call's or repair run's brief.
+    finding new again or dropped (`brief`), its answer in the next triage
+    call's brief; a `; user:` answer only releases the rung, and the next
+    triage call's brief carries it.
   A task's questions are the foreman's and the answerer's and never reach
   the page; an answer call that cannot settle one ends `Question:` itself.
 - **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
@@ -1211,7 +1212,8 @@ before it lands (13.1).
   rerun showed it was not the code's) or by hand, which drops the finding,
   the clear's text its reason; `backlog:<draft>` clears when the render
   changes, when a backlog branch of the draft lands, or by hand (the tick
-  then readies it once more); `fault:<profile>` clears only when a run
+  then readies it once more, and the count of two rejections restarts at
+  the clear, so one further rejection raises it again); `fault:<profile>` clears only when a run
   does not fault the pair. `fab page clear ID TEXT` on hel8 logs
   `signal.cleared` (signal, by `user` or `--by`, text) and rewrites the
   page; it refuses an id that is not an open signal, and a fault. Clearing a
@@ -2090,7 +2092,8 @@ session still walks by hand; walks run by fab are the section's last part.
     (`fab.spec_edit.commit_path`, `fab.spec_edit.commit` taking a repository
     path instead of a task) on `ladder/<draft>/backlog-<n>`, n counting the
     plan's earlier ones, and readies it as a call's branch is
-    (`fab.dispatch._queue_branch`, no receipt).
+    (`fab.dispatch._queue_branch`, no receipt; it gains a `**fields`
+    passthrough to `branch.ready`, which carries `render`).
   - **Its landing comes home:** `fab.dispatch._import_queue`'s owners
     include each `ladder/<draft>/backlog-<n>` that has a `branch.ready`,
     mapped to its draft, so its queue records become `branch.landed` and
@@ -2122,8 +2125,9 @@ session still walks by hand; walks run by fab are the section's last part.
     - `fab.fix.parse(report, *, skip=None)`: `tier_reds.remedy`'s parse of
       the first line (`Done: fix: <line>` or `Done: retry: <line>`) and the
       next `SECTION_LINES` lines, returning (verdict `fix`, `left` or
-      `none`, reason, lines); red passes `skip`, its `Owner:` line taken
-      out before the lines are kept, and keeps its owner check;
+      `none`, reason, lines, skipped); red passes `skip`, its `Owner:` line
+      taken out before the lines are kept and returned as `skipped`, whose
+      value red's owner check reads;
     - `fab.fix.section(heading, reason, lines)`: the section, trailing blanks
       dropped, as `tier_reds.remedy` builds it;
     - `fab.fix.settle(ev, fields, *, log_path)`: `tier_reds.settle`'s stamp
