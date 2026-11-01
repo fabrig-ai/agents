@@ -2779,7 +2779,6 @@ class MultiPlanTickTest(unittest.TestCase):
         self.queue_records = [dict(ev="rejected", ts="001", branch=f"{draft}/a-r2", tip="tip",
                                    step="default", log="/queue/red.log") for draft in ("one", "two")]
         with patch.object(flow, "measure", side_effect=AssertionError("measured")), \
-                patch.object(dispatch, "_import_after_landing", side_effect=AssertionError("imported")), \
                 patch.object(dispatch, "decide", side_effect=AssertionError("decided")):
             actions = self.tick(one, two)
         self.assertEqual([action.kind for action in actions], ["load", "load"])
@@ -4181,6 +4180,88 @@ class AfterLandingImportTest(unittest.TestCase):
         failing = FakeRunner().on(["ssh"], Result(255, err="no route"))
         dispatch._import_after_landing([], self.hosts, sh=failing, log_path=self.path)
         self.assertEqual(log.read(self.path)[-1]["text"], "after-landing import failed: no route")
+
+
+class NoPlanRedTickTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        write(log.home() / "plans", "")
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",)),
+                      "gate": Host("gate", "fake@gate", ("gate",)),
+                      "tiers": Host("tiers", "fake@tiers", ("after-landing",))}
+        self.key = '["default","pkg::bin","case"]'
+        self.records = [dict(ev="test", ts="001", state="new", key=self.key, tip="tip",
+                             profile="default", binary="pkg::bin", test="case", error="failed",
+                             branches=["hand/pushed"], log="/al/test.log", rerun="/al/rerun.log"),
+                        dict(ev="run", ts="002", tip="tip", verdict="red", reds=[self.key],
+                             branches=["hand/pushed"], faults=["live-temper: exit 4"], log="/al/run.log")]
+        self.prefix = ssh("fake@tiers", ["fab", "after-landing", "log"])[:-1]
+        self.fake = FakeRunner().on(ssh("fake@tiers", ["tail", "-n", "40", "--", "/al/rerun.log"]),
+                                    Result(0, "rerun failed\n"))
+        self.fake.on(self.prefix, lambda call: Result(
+            0, "\n".join(json.dumps(record) for record in self.records)))
+        self.starts = self.enterContext(patch.object(runs, "start"))
+        self.collects = self.enterContext(patch.object(runs, "collect"))
+        self.enterContext(patch.object(flow, "measure", side_effect=AssertionError("measured")))
+        self.enterContext(patch.object(dispatch, "decide", side_effect=AssertionError("decided")))
+        self.enterContext(patch.object(drafts, "strays", side_effect=AssertionError("collected strays")))
+        self.enterContext(redirect_stdout(io.StringIO()))
+
+    def tick(self):
+        actions = dispatch.tick(sh=self.fake, hosts=self.hosts)
+        self.starts.assert_not_called()
+        self.collects.assert_not_called()
+        self.assertEqual(units(self.fake), [])
+        self.assertFalse(any(record["ev"] in ("run.started", "call.started") for record in log.read()))
+        return actions
+
+    def test_no_plan_red_imports_open_signals_once_and_show_faults_on_page(self):
+        self.assertEqual(self.tick(), [])
+        first = log.read()
+        self.assertEqual([record["ev"] for record in first], ["tiers.red", "tiers.run", "red.opened"])
+        opened = first[-1]
+        self.assertEqual((opened["route"], opened["draft"], opened["tasks"], opened["suspects"]),
+                         ("signal", "", [], ["hand/pushed"]))
+        self.assertEqual(opened["reason"], "no fab task among the suspects")
+        self.assertIn("rerun failed", tier_reds.evidence_path(opened["red"]).read_text())
+        self.assertEqual({signal.id for signal in channel.signals(first)}, {"red-1", "fault:live-temper"})
+        page = (log.home() / channel.PAGE).read_text()
+        for fact in ("### red-1,", "hand/pushed (hand-pushed)", "default pkg::bin case",
+                     "### fault:live-temper,", "live-temper: exit 4", "tiers:/al/run.log"):
+            self.assertIn(fact, page)
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(log.read(), first)
+        queries = [argv for argv in self.fake.argvs() if argv[:len(self.prefix)] == self.prefix
+                   and "after-landing" in argv[-1]]
+        self.assertEqual(queries, [ssh("fake@tiers", ["fab", "after-landing", "log", "--since", stamp])
+                                   for stamp in ("", "002")])
+
+    def test_no_plan_red_recovery_closes_and_refreshes_page_without_starting_work(self):
+        self.tick()
+        self.records += [dict(ev="test", ts="003", state="recovered", key=self.key, tip="green"),
+                         dict(ev="run", ts="004", tip="green", reds=[], faults=[])]
+        self.assertEqual(self.tick(), [])
+        closed, = [record for record in log.read() if record["ev"] == "red.closed"]
+        self.assertEqual((closed["red"], closed["reason"], closed["tip"]), ("red-1", "recovered", "green"))
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+
+    def test_no_plan_red_failed_listed_fetch_imports_and_closes_but_defers_opening(self):
+        directory = write_plan(self.home / "plan", "draft", tasks=("a",), repo="fabrig")
+        write(log.home() / "plans", str(directory) + "\n")
+        self.fake.on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home) + "\n"))
+        self.fake.on(["git", "fetch", "origin"], Result(1, err="fetch failed"))
+        log.append("red.opened", red="red-1", tip="old", keys=["old-key"], suspects=[],
+                   tasks=[], draft="", route="signal")
+        self.records.insert(0, dict(ev="test", ts="000", state="recovered", key="old-key", tip="tip"))
+        actions = self.tick()
+        self.assertEqual([action.kind for action in actions], ["load"])
+        self.assertIn("fetch failed", actions[0].detail)
+        events = log.read()
+        self.assertEqual([record["ev"] for record in events],
+                         ["red.opened", "tiers.recovered", "tiers.red", "tiers.run", "red.closed"])
+        self.assertEqual(tier_reds.reds(events)[0].state, "closed")
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["fault:live-temper"])
+        self.assertFalse(tier_reds.evidence_path("red-2").exists())
 
 
 class CatchUpTest(unittest.TestCase):

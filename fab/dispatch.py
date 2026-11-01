@@ -883,13 +883,13 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
            log_path: Path | None, only: bool = False) -> list[Action]:
     """Load and run listed then given plans, sharing imports and builder measurements.
 
-    Fetch each checkout once; print load failures and skip retired plans. With no loaded
-    plan, import unowned queue records and refresh the page, without measuring. Otherwise
-    close recovered reds, then open new reds against all loaded owners, unless any plan
-    failed to load; fabrig retirement waits in that round too. Decide each plan on fresh
-    events and spend calm extras once. Question, refusal and red actions share a log
-    snapshot before fresh call decisions. Collect
-    unowned runs last and refresh the page.
+    Fetch each checkout once; print load failures and skip retired plans. Import queue
+    and after-landing records, close recovered reds, then open new reds against all loaded
+    owners, unless any plan failed to load; fabrig retirement waits in that round too.
+    With no loaded plan, refresh the page and return without measuring or starting work.
+    With no owners, new reds are signals. Decide each plan on fresh events and spend calm
+    extras once. Question, refusal and red actions share a log snapshot before fresh call
+    decisions. Collect unowned runs last and refresh the page.
     """
     # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
@@ -905,10 +905,6 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     imported_from = len(events)
     _import_queue(tasks, events, hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
-    if not loaded:
-        if not only:
-            _page(plan_dirs, log_path)
-        return actions
     _import_after_landing(events, hosts, sh=sh, log_path=log_path)
     events = log.read(log_path)
     # Queue imports and after-landing runs can advance repairs before their verdicts arrive.
@@ -924,6 +920,10 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
         folded = [*folded, *tier_reds.reds(opened)] if opened else folded
+    if not loaded:
+        if not only:
+            _page(plan_dirs, log_path)
+        return actions
     plan_tasks = {key: task for plan, tasks, _, _ in loaded
                   for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
     calm = flow.measure(hosts, log.now(), sh=sh)
