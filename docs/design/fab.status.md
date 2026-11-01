@@ -95,7 +95,25 @@
   slot 7, since 11-01 (hetzner10 until it retired, 11-01); the tick imports its verdicts onto the user's page.
   The old `tools/after-landing` (hetzner7, slot 4) stopped with hetzner7,
   which no longer answers. A new red reaches no task yet: the page is where
-  it is heard.
+  it is heard (the next bullet).
+- **Reds reach their owners: the design leads the code** (the user, 11-01,
+  after the night of 10-31, when every after-landing red and a hand-pushed
+  rejection were handled by sessions noticing them by chance). Designed,
+  not built: after-landing reds opened by tip and suspects, sent to a red
+  foreman (`fab/roles/foreman-red.md`, not written) and repaired by a
+  log-folded task `<draft>/red-<n>` from main through the queue, closed by
+  recovery (11, 13.1); the specless refusal foreman (13.1); open signals on
+  the user's page and `fab page clear` (13.6); hand-pushed rejections
+  imported as `queue.rejected` (13.8); the after-landing wake (13.9); a
+  fabrig plan's retire waiting for its verdict (11, 13.12); the landing
+  report's red figures (10). Today `fab.after_landing.imported` drops
+  recovered and unattributed tests and the run's red keys, the queue
+  import drops every record that is no task's, and `fab/tier_reds.py`
+  does not exist. The queue's retire fix (6: a refused source delete left
+  alone, `--porcelain` read per ref) is designed too; until it lands a
+  hand-pushed branch whose source moved records `outcome: error` though it
+  landed. A specless repair's refusal foreman still reads its spec from
+  `task.path` (`fab.repairs.start`), which a specless task does not have.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
   `fab.calls.review_brief`, `last_review` and `landed_after` the review

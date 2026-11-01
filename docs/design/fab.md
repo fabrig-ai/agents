@@ -51,6 +51,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `FAB_HOME/repos/<repo>` on each machine | fab's own clones; `FAB_HOME/wt/<run>` worktrees for runs that build nothing |
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 | `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
+| `FAB_HOME/reds/<red>.md` on hel8 | an after-landing red's evidence, written when it opens (section 11) |
 | `~/src/fabrig/logins/shelf/` on hel8 | every login at rest or its placeholder while lent (13.13) |
 
 - **hel8** runs the dispatcher, Claude calls and `fab land` for this
@@ -70,7 +71,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman; check is an integration branch's full check (13.12) |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman; check is an integration branch's full check (13.12); a foreman's carries `asked`, `refused` or `red` (13.1) |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main, into | on main; with into, merged into an integration plan's trunk, main being its new tip (13.12) |
@@ -82,6 +83,12 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
+| `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time (section 11) |
+| `red.opened` | red, tip, keys, suspects, tasks, draft, route, reason | an after-landing red's tests, grouped, sent to a foreman or to the page (section 11) |
+| `red.settled` | red, run, verdict, reason, owner, section | the tick acted on a red's foreman: fix or none (a repair task follows) or left (the page) (13.1) |
+| `red.closed` | red, reason, tip | every test of the red recovered or is no longer red in a run without faults, or its signal was cleared (section 11) |
+| `queue.rejected` / `queue.landed` / `queue.collateral` | branch, tip, step, log, tests; branch, tip, main; branch, tip, step, tests, log | the queue's record of a branch no fab task owns, `queue_ts` its time (13.8) |
+| `signal.cleared` | signal, by, text | a signal taken off the user's page by hand (13.6) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -162,7 +169,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   that expects main's parent, ready and task branches deleted. Its record is
   `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
   `collateral`), which the dispatcher reads; the tips it has tried and
-  their collateral reds (13.8) are its only other state.
+  their collateral reds (13.8) are its only other state. A `rejected` at
+  a test step carries `tests`: the failed tests of the step's derived
+  `gate-junit.xml`, `<binary> <test>`, at most 20 ([] at any other step), so
+  whoever hears it (a foreman, the user's page, 13.8) reads them without
+  the log.
 - **Queue CPU, report only:** `fab/queue_cpu.py` runs the queue's `default`
   and `fuzzy` steps through the shared `fab/cpu.py` collector (section 11),
   keeping `check_steps`' package selection and `heavy --gate` lane. A static
@@ -206,8 +217,31 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   in the batch and detail log, without rejecting it. Receipt reuse (13.8)
   still runs only its existing fmt checks, without new CPU measurements.
 - **Retiring a landed branch:** `ready/<name>` is deleted with a lease on
-  its tip, and `<name>` only when it is still that tip; a branch readied by
-  hand (its ready ref alone, or a task ref that moved on) lands cleanly.
+  its tip, and `<name>` only when its fetched tracking ref is that tip; a
+  branch readied by hand (its ready ref alone, or a task ref that moved on)
+  lands cleanly.
+  - **A refused source delete is left alone, not an error** (11-01: on
+    hetzner8 batches of hand-pushed branches landed and were recorded
+    `outcome: error`, `cleanup: ... - [deleted] ready/ops/component-kit-draft
+    ! [rejected] (delete) -> ops/component-kit-draft (stale info)`). The
+    deletes go in one non-atomic push; the source `<name>` had moved on the
+    remote after the cycle's fetch while its tracking ref still named the
+    tip, so its lease failed. The ready ref was deleted and `landed` logged,
+    but the push's exit made the batch an error.
+  - The push runs with `--porcelain` and is read per ref (`-` deleted, `!`
+    refused with its reason). A source `<name>` refused for any reason is
+    left alone: one line `left <name>: <reason>` in the batch's detail log.
+    A refused `ready/<name>`, or one the output does not name, is read back
+    with `git ls-remote origin refs/heads/ready/<name>`: gone, or at another
+    tip (readied again meanwhile, a candidate next cycle), it is left alone
+    too; still at the landed tip, it is the batch's error, `cleanup:
+    ready/<name> <reason>` per such ref, joined by `; `.
+  - `landed` is recorded for every branch of the batch either way (main
+    holds it), and each is marked tried unless its ready ref is in the
+    error. Tests (fake runner): a push exiting 1 with the ready ref deleted
+    and the source refused `(stale info)` gives outcome green, `landed`, the
+    tip tried and the `left` line; a refused ready ref that ls-remote still
+    shows at the tip gives outcome error naming it.
 - **Short of disk is the gate's fault:** a check step that exits 75 (heavy
   waited out its disk cap) is an error, not a red: nothing is rejected or
   marked tried, and the batch goes again.
@@ -347,12 +381,19 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   landed latency (from the log's `branch.ready`), branches waiting and the
   oldest wait; bisection runs and minutes; repair rounds; each step's
   durations, failures and timeouts; batches in error; heavy's waits on the
-  gate.
+  gate. From the log, cheaply (section 11, 13.8): after-landing reds opened,
+  sent to a foreman and sent to the page; settled fix, none and left (not
+  the suspects'); red repairs landed; reds closed, by reason (recovered,
+  absent, cleared), with the median hours from opened to recovered (the
+  draft's "time to the confirmed fix"); hand-pushed rejections
+  (`queue.rejected`). These are decisions the tick records anyway, not
+  records kept for the report.
 - **Signals without targets:** a report raises only the drafts' signals that
   need no number of the user's: idle gaps, rising rejections, Infra runs,
   collateral rejections, queue errors, a ready branch waiting over an hour and
-  longer than the day before, disk waits and unread sources, each with the
-  draft's first action and owner. Thresholds come with targets.
+  longer than the day before, disk waits and unread sources, an after-landing
+  red or a hand-pushed rejection with no owner fab knows (13.6's open
+  signals), each with the draft's first action and owner. Thresholds come with targets.
 - **Where they go:** `FAB_HOME/reports/<draft>/<day>.md` and
   `FAB_HOME/reports/landing/<day>.md` on hel8, written to a sibling and
   renamed. `fab report daily PLAN_DIR...` writes yesterday's that do not
@@ -400,7 +441,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   confirmed red; passing is a **flake**. Against the test's own history, a
   confirmed red is **new** (it last passed), **standing** (it was last red)
   or **unattributed** (never executed before); a pass after a red is
-  **recovered**. A new red names the branches merged since its last pass.
+  **recovered**. A new red names the branches merged since its last pass;
+  an unattributed red names the run's suspects' branches (a test that
+  never ran before and fails is most often new in one of them).
 - **CPU measured on every pair:** `fab/cpu.py` loads the checkout's
   `tools/tiers/cpu.py` with `runpy`, as `tools/tiers/design.md`, 7.1 permits.
   It builds that tip's static `cpu-wrapper.c` once through heavy in the run
@@ -460,25 +503,209 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   possible-hang flag), then one `run` record (tip, suspects' branches,
   verdict, counts including starved and unobserved, total CPU and wall,
   optional budget, named budget excesses, possible hangs, pairs, faults,
-  logs). Fields remain scalars or lists of scalars: budgets are `key=value`
+  logs, and `reds`: the key of every confirmed red of the run, new, standing
+  or unattributed, a test's key being `fab.nextest.Case.key`, the JSON
+  string `["<profile>","<binary>","<test>"]`). Fields remain scalars or lists of scalars: budgets are `key=value`
   strings, `cpu_pairs` entries are `profile:cpu_s:wall_s` alongside the
   existing pair status summaries. `fab after-landing log --since` serves
   them over ssh, as `fab queue log` does. The state (cursor,
   last run, each test's last executed result) is
   `FAB_HOME/after-landing/state.json`, saved after the records; a run cut
   short is redone whole.
-- **The user hears the verdict:** each tick imports the after-landing
-  machine's `run` records and its new reds into the log, as `tiers.run` and
-  `tiers.red` (`al_ts` the record's time, read from the newest imported), and
-  the user's page shows the newest run's verdict, counts, total CPU, test
-  wall, starved count, possible hangs, any configured budget and excesses,
-  faults and its new reds with their suspects' branches, under `## After landing`.
+- **The verdict comes home:** each tick imports the after-landing
+  machine's records into the log (`al_ts` the record's time, read from the
+  newest imported): a `run` as `tiers.run` (its `reds` too), a `test` whose
+  state is new or unattributed as `tiers.red` (tip, key, state, profile,
+  binary, test, error, branches, log, rerun), and one whose state is
+  recovered as `tiers.recovered` (tip, key, profile, binary, test). Standing
+  reds are not imported one by one: the run's `reds` says which are still
+  red. The user's page shows the newest run's verdict, counts, total CPU,
+  test wall, starved count, possible hangs, any configured budget and
+  excesses, faults and its new reds with their suspects' branches, then
+  one line per open red that is not a signal, `red-<n> (<draft>/red-<n>):
+  <state>, <k> tests at \`<tip[:12]>\`, since <ts>` (below), under `##
+  After landing`.
 - **The slot stays bounded:** a run ends by sweeping the slot's target as the
   queue sweeps its own (section 7).
-- **Left out from the old tool:** posts to coordinators and its resolver,
-  bisection to a culprit commit, hourly coverage posts, the records writer and
-  its detail files, heavy token cancellation, the guardian and replay of a
-  half-run pair. Each attaches to the records above when numbers show it is needed (section 14).
+- **Left out from the old tool:** posts to coordinators and its resolver
+  (the tick routes reds instead, below), bisection to a culprit commit,
+  hourly coverage posts, the records writer and its detail files, heavy
+  token cancellation, the guardian and replay of a half-run pair. Each
+  attaches to the records above when numbers show it is needed (section 14).
+
+**Reds reach their owners.** At the user's word (11-01, after the night of 10-31): fab found reds in two
+places and acted on one. A red the queue found on a task's branch went to
+its foreman and its repair; an after-landing red was classed and shown on
+the page, and nobody acted. That night every such red was handled by a
+session noticing it by chance: three runs red on live-smith's unset
+`SMITH_LIVE`, live-temper faulting while every ChatGPT login was lent. The
+landing draft's words are the rule: "a confirmed red goes to its owner with
+its evidence; a fixed red is confirmed green by the same checks"
+(`docs/design/draft/landing-pipeline.md`, 2). Built in `fab/tier_reds.py`,
+which folds where each red stands, and the tick.
+
+- **A red opens once, by tip and suspects.** After the import, the tick
+  takes each `tiers.red` that no `red.opened` already holds (by tip and
+  key), whose key the newest `tiers.run` lists in `reds` (still red; a red
+  of an older run that has since passed opens nothing, and records from
+  before `reds` existed open nothing), and whose key is in no open red. It
+  groups them by tip and suspects (their `branches`, as a list), in log
+  order, and opens one red per group: it writes the evidence file, then
+  logs `red.opened`:
+  - `red` is `red-<n>`, n counting `red.opened` in the whole log from 1;
+    `keys` the group's keys; `suspects` its branches; `tasks` the fab tasks
+    among them; `draft` the plan that holds it (the newest fab suspect's,
+    the last in suspects order), "" when none; `route` foreman or signal;
+    `reason` why a signal (`no suspects`, `no fab task among the suspects`).
+  - **The unit is a tip's reds with one suspect set,** so a run that turns
+    twelve tests red behind one merge starts one foreman, not twelve; the
+    reds keep their own keys, so "one open repair per red" holds by key.
+  - **The evidence** (`FAB_HOME/reds/<red>.md` on hel8, written to a
+    sibling and renamed): the tip, the suspects (each branch, its task or
+    `hand-pushed`, and the count of commits that are no branch's), then up
+    to 20 reds, `- <profile> <binary> <test> (<state>): <error>` with
+    `<machine>:<log>` and `<machine>:<rerun>`, then the last 40 lines of the
+    first three reds' rerun logs, each in a `text` fence, read over ssh from
+    the after-landing machine (`(log unreadable: <why>)` when it cannot be).
+    A write that fails is a note and opens nothing; the next tick tries
+    again. The foreman's brief and the repair's body quote it, since a
+    builder cannot read the after-landing machine's files.
+- **Which suspects are fab's:** a branch whose task (`fab.land.task_of`) is
+  a task of a loaded plan, its red repairs included, or a loaded
+  integration plan's trunk, `<draft>/integration` (its owner the plan,
+  whose tasks the foreman reads). Any other named branch was readied by
+  hand; a retired plan is not loaded, so its branches count as hand-pushed.
+- **A red with a fab suspect goes to a foreman** (13.1, `fab/roles/
+  foreman-red.md`): it reads the red, its evidence and the suspects' specs
+  on main at the red's tip, and decides as a refusal's foreman does. The
+  red is a suspect's: it writes what failed, where and what to change, and
+  a repair task fixes it on a new branch from main. Not the suspects' (a
+  flake that failed its rerun too, the tier or its environment, a
+  hand-pushed suspect's change): no run starts, the decision is recorded,
+  and the red goes to the page. A foreman that cannot say leaves the repair
+  to start with the red alone, as a refusal's fallback does.
+- **The repair is a task of its own, `<draft>/red-<n>`,** not the landed
+  task reopened: the task's branch is gone, its dependents have started on
+  its landing, and a landed status that went back would unsettle both. Its
+  n is the red's, so ids never collide across drafts or with 13.12's
+  `<draft>/repair-<n>`.
+  - Folded from the log (`fab.tier_reds.tasks(plan, events)`, joined to the
+    plan's tasks as 13.12's repairs are, `fab.integration.with_repairs`
+    included), never a spec file: kind `red`, part `after-landing`, repo
+    fabrig, no needs, files `**`, effort high, minutes 20. It exists from
+    the red's `red.settled` with verdict fix or none, or its foreman's
+    fallback; its draft is the red's `draft`. A red that closes before the
+    task's first run.started drops the task.
+  - Its body: `# Repair a red after landing (red-<n>)`, `- Tip: \`<tip>\``
+    (main), the suspects and the owner when named, the evidence, the
+    foreman's section when there is one, then `## Acceptance`: reproduce
+    first, in the lowest tier that shows it (a unit test in the default
+    profile when one can, failing on main before the change; else the red
+    tests alone in their profile, through heavy), then fix; the
+    reproduction and every red test pass with the change, then the task's
+    own checks as any fabrig task (precheck `--onto origin/main`). A red of
+    a live pair cannot be reproduced without logins: its section is the
+    guide and the next after-landing run the check. Answers to its
+    questions fold into the body under `## Answers`, as 13.12's.
+  - It runs as an implement run from `origin/main`, in a slot, whatever
+    the plan's landing: everything 13.12 reads as the trunk is main for it.
+    Done, it is readied for the queue like any fabrig task (`ready/<draft>/
+    red-<n>`, `branch.ready`, its precheck receipt) and lands as `Merge
+    <draft>/red-<n>`; an integration plan never merges it into its trunk,
+    and its end check, checks along the way and repairs leave kind `red`
+    out. After-landing runs only fabrig, so no red task lands through `fab
+    land`. The queue import's tasks include every loaded plan's red tasks,
+    so its `landed` and `rejected` become `branch.landed` and
+    `branch.rejected`; a queue refusal goes to its refusal foreman as any
+    task's (13.1, specless).
+  - **Two runs, then Claude:** its run limit is `RED_RUNS` (2), not
+    `MAX_RUNS`: Fix mode wakes Claude after two failed tries
+    (`execution-modes.md`). A park at the limit queues for the answerer at
+    once, as any park; a question of its runs skips the foreman (no spec,
+    no options) and queues, as a specless repair's does (13.12).
+- **One open repair per red, until it recovers.** A red is open from its
+  `red.opened`; it closes when every one of its keys has closed, and the
+  tick logs `red.closed` (reason `recovered`, `absent` or `cleared`, tip the
+  run that closed the last key, "" for a clear). A key closes on a later
+  `tiers.recovered` for it, in any run, or on a later `tiers.run` without
+  faults and not wall-starved that does not list it in `reds` (`absent`:
+  it passed as a flake, or was removed, ignored or renamed); a hand clear
+  of the red's signal (13.6) closes them all. A red closes on its last
+  key's reason, `recovered` when every key recovered. Its state (`fab.tier_reds.reds(events)`, from the log and in log
+  order): foreman, deciding, decided, repairing (its task exists and has
+  not landed), landed (waiting for a run that covers it), signal or
+  closed.
+  - Standing reds start nothing: a standing red is not a `tiers.red`, and a
+    key already in an open red opens no other.
+  - **A fixed red is confirmed green by the same checks:** once the red
+    task lands, its keys' recoveries close it as any red's. The first
+    `tiers.run` without faults whose `branches` name `<draft>/red-<n>` and
+    that still lists one of its keys in `reds` makes it **unfixed**: the
+    red becomes a signal, saying the repair landed and the test is still
+    red. A second repair round is left for later (14).
+- **Reds no task owns are signals, on the user's page** (13.6): a red
+  routed to the page at its opening, one its foreman left (verdict left),
+  and an unfixed one. Each stays open until the red closes or its signal
+  is cleared by hand. The page names the red, its tip, its tests (at most
+  10, then the count), its suspects (the hand-pushed ones named), the
+  reason (the foreman's line for a left red) and what to read (the
+  evidence file and the foreman's report). Telling the session that pushed
+  a hand-pushed suspect is left for later: a ready ref carries no pusher
+  fab can read reliably (every session commits as the user), 14.
+- **Faults are signals, not repairs:** a pair that cannot run says nothing
+  about any task's code (live-temper's exit 4, a login every lender held).
+  A pair the newest `tiers.run` lists in `faults` is an open signal,
+  `fault:<profile>`, since the first of the unbroken run of `tiers.run`s
+  that faulted it, with the fault's text, the count of runs and the run's
+  log; it clears when the newest run does not fault that pair, never by
+  hand.
+- **Several suspects:** a red whose suspects span several fab tasks, of one
+  plan or several, still opens one red and one foreman. The foreman names
+  the owner among them (its report's `Owner:` line, 13.1), for the record
+  and the report; one repair task, in the newest fab suspect's plan, fixes
+  the group whoever the owner. Bisection to a culprit (the red tests run at
+  each suspect's merge) stays left out: the foreman reads the suspects'
+  diffs on main, and numbers will say whether it guesses wrong.
+- **The after-landing machine wakes the tick** (13.9): at the end of a run
+  that recorded a test new, unattributed or recovered, `fab after-landing
+  run` wakes the dispatcher once, `after-landing <tip[:12]> new <n>
+  unattributed <n> recovered <n>`, as the queue does at the end of a cycle;
+  a wake that fails is printed and never fails the run.
+- **The tick, each round** (`fab.dispatch._round`, after the imports and
+  before the plans): it closes the reds whose keys have all closed
+  (`red.closed`), then opens the new ones against every loaded plan's tasks
+  (evidence, then `red.opened`). Then each plan, after its refusal actions,
+  takes its reds' (`fab.dispatch.red_actions`, pure, the reds whose `draft`
+  is the plan's): state foreman, `Action("examine-red", task=<draft>/red-<n>,
+  detail=<red>)`, which starts the foreman; decided, `Action("remedy-red",
+  run=<foreman run>)`, which settles it (13.1). A closed red takes no
+  action: a foreman still deciding ends and is collected, and nothing
+  settles it. A red task that exists is one of the plan's tasks, so
+  `decide` starts, readies and parks it as any.
+- **A fabrig plan retires after its verdict:** its retire call starts only
+  once a `tiers.run` names its last branch to land on main among its
+  `branches` (the trunk for an integration plan, its last task's for a
+  queue plan) and none of its reds (`draft` the plan's) is in state
+  foreman, deciding, decided, repairing or landed; a red that is a signal
+  does not hold it. Otherwise an integration plan, retired as soon as its trunk
+  lands (13.12), would be unloaded before its reds arrive and every one
+  would read as hand-pushed. Without a machine with the role
+  `after-landing`, the first condition does not apply.
+- **Tests** (fake runner, records and log): `fab.after_landing.imported`
+  makes a recovered test `tiers.recovered` and an unattributed one
+  `tiers.red` with the run's branches, and the `run` record carries `reds`;
+  a run with a new red wakes once, a run without new reds or recoveries
+  not at all; a new red behind a queue merge
+  of a loaded task opens one red with route foreman, and twelve such reds
+  at one tip still open one; the next run's standing reds open none; a
+  red behind a hand-pushed branch alone opens route signal and is on the
+  page; a foreman's fix makes a `<draft>/red-<n>` task that starts as an
+  implement run from main and is readied, its left puts the red on the page
+  and starts nothing, its failure starts the task with the red alone; the
+  red closes on `tiers.recovered`, or as absent on a fault-free run without
+  it; a landed repair whose covering run still lists the key makes it
+  unfixed; a faulted pair is a signal until a run does not fault it; a red
+  task parks after two runs and its question skips the foreman.
 
 ## 12. Gates and the structure review
 
@@ -629,6 +856,61 @@ it, and the flow grows from a small start rather than to a fixed cap.
   - The repair or rebase run's brief carries the section before the
     refusal, since its checkout is the branch and not main. The run limit
     counts it as before.
+  - **A specless task's refusal** (13.12's `<draft>/repair-<n>`, a red
+    task, section 11): its foreman's brief quotes the task's body under
+    `# The task` in place of `# The task spec` (no spec file is read), and
+    a fix is written to no spec: `refusal.settled` carries the section with
+    branch "", nothing lands, and the fold appends the section to the
+    task's body, as its answers are, so the next run reads it.
+- **The foreman reads a red after landing too** (the user, 11-01; section
+  11): the model's foreman "writes rebase and mechanical repair tasks"
+  (`execution-modes.md`), and a confirmed red with a fab suspect is the
+  same decision as a refusal, made after the branch has landed. The same
+  machinery, a role text of its own (`fab/roles/foreman-red.md`): the
+  branch is gone, the checkout is main at the red's tip, the suspects are
+  listed, and a fix is a new task rather than the next run of the old.
+  - A red's foreman is a foreman run (Codex, medium, kind `foreman`, read
+    only) whose task is `<draft>/red-<n>/foreman` (run
+    `<draft>/red-<n>/foreman-1`, `fab.foreman.task_field` of the red task's
+    id) and whose run.started carries `red` (the red's id) and `tip`
+    instead of `asked` or `refused`, so neither questions nor refusals
+    count it. It takes the builder with most free places, even at none,
+    and reads a worktree of fabrig detached at the red's tip
+    (`fab.run.launch_detached(host, run, "fabrig", <tip>)`, base the tip).
+  - Its brief (`fab.tier_reds.brief`): the role text; `# The red`: `- Run`,
+    `- Red: <red> at \`<tip>\` on main`, one line per suspect (`<branch>:
+    task <id>, spec \`<path>\``, `<branch>: the trunk of plan <draft>`, or
+    `<branch>: hand-pushed, no fab task`), `- Report: write it to
+    \`<path>\``, and `Your checkout is fabrig at <tip>, read-only.`; `# The
+    evidence`: the red's evidence file; `# The suspects' specs`: each fab
+    suspect task's spec, newest first, at most five whole (the rest by id),
+    and for a trunk the plan's tasks with their files. An evidence file it
+    cannot read is quoted as `(evidence unreadable: <why>)`.
+  - Its report keeps the refusal foreman's form: `Done: fix: <line>`, then
+    optionally `Owner: <task id>` (one of the fab suspects, or a task of a
+    suspect trunk's plan), then at most thirty lines: what failed, where
+    on main and what to change; `Done: retry: <line>`, read here as **not
+    the suspects'** (a flake that failed its rerun too, the tier, its
+    environment or a login, a hand-pushed suspect's change, a commit that
+    is no branch's), then at most ten lines of evidence; or `Failed: <why>`.
+    When unsure, the red is the suspects': a repair that finds nothing to
+    change says so.
+  - The tick settles it (`fab.tier_reds.remedy`, pure, then
+    `fab.dispatch._remedy_red`) with `red.settled`: verdict `fix` (reason
+    the line, owner the `Owner:` task when it names a suspect's, else "",
+    section `## Repair (<day>, after landing <red>, foreman <run>)` and the
+    lines), `left` (from retry: reason the line; the red becomes a signal)
+    or `none` (no verdict, reason as the refusal's). A foreman ending in any
+    outcome but done is the fallback: the red task starts with the red
+    alone, no `red.settled` needed. A foreman runs once per red.
+  - **The section goes into the red task's body, not the owner's spec:**
+    13.1 appends a refusal's section to the spec because the task's next
+    run reads it there. A landed task has no next run; its repair is the
+    red task, whose body carries the section. Appending to the owner's spec
+    as well would cost a queue batch per red (fabrig's specs land through
+    the queue) or a change to a trunk that has already landed (integration
+    plans), for history the log (`red.settled`'s section) and the repair's
+    commit already hold.
 - **The foreman settles what the options settle.** A run ending with a
   question first goes to a foreman run (Codex, medium, kind `foreman`,
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
@@ -817,10 +1099,27 @@ before it lands (13.1).
 - **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
   - the open questions, the plans' first, then the log's in the order they
     were asked, each with what to read and how to answer it;
+  - then `## Open signals` (`(none)` when there are none): each open
+    signal folded from the log
+    (`fab.channel.signals(events)`, pure), oldest first, as a block
+    `### <id>, <what>, since <ts>`, its facts, `- Read: ...` and, but for a
+    fault, `- Clear: \`fab page clear <id> TEXT\``. Three kinds:
+    - `queue:<branch>`, a hand-pushed rejection (13.8): `- Tip`, `- Step`,
+      `- Tests` (the record's, `(see the log)` when []), `- Read:
+      \`<gate>:<log>\``;
+    - `red-<n>`, an after-landing red no task owns (section 11): `- Tip`,
+      `- Why` (`no fab task among the suspects`, `no suspects`, `not the
+      suspects': <the foreman's line>` or `unfixed: <draft>/red-<n> landed,
+      still red at <tip>`), `- Tests` (at most 10, then `and <k> more`),
+      `- Suspects` (hand-pushed ones marked), `- Read:` the evidence file
+      and the foreman's report when there is one;
+    - `fault:<profile>`, a pair that cannot run: `- Fault` (its text),
+      `- Runs` (how many in a row), `- Read: \`<machine>:<run log>\``;
   - then, from each standing report's latest day (section 10), its path and
     only the Signals lines whose owner is the user (the drafts' signal
     tables: targets, capacity, a usage limit, a budget the three questions
-    could not settle); the rest of each report is the director's.
+    could not settle); the rest of each report is the director's;
+  - then `## After landing` (section 11) and `## Unread`, as today.
   The tick rewrites it at its end; `fab page show|write [PLAN_DIR...]`
   makes it on demand. Its plans are those in `FAB_HOME/plans` (13.4) and
   those named. The drafts send the reports to the director, who passes the
@@ -834,6 +1133,24 @@ before it lands (13.1).
 - **Subjects are named apart from tasks:** `question.answered` names a task
   and `call.answered` a subject. A part and a task of the same name never
   unpark each other.
+- **Signals with no other owner come to the page too** (the user, 11-01),
+  a departure from "nothing else goes to the user" above: a red no fab task
+  owns and a hand-pushed branch's rejection have no owner fab knows (no
+  task, no plan, no session it can name), and the director, who passes the
+  user what needs the user, reads the same page. The page's first line
+  says so: `Only what is the user's (budgets, machines, what is hard to
+  reverse) and what has no owner fab knows.`
+- **A signal opens and clears from the log:** `queue:<branch>` opens at a
+  `queue.rejected` and clears at a later `queue.landed` of the branch, at
+  a later `queue.rejected` or `queue.collateral` of it at another tip (a
+  newer tip was tried; a newer rejection opens its own), or by hand;
+  `red-<n>` opens when the red becomes a signal and clears when the red
+  closes (section 11) or by hand; `fault:<profile>` clears only when a run
+  does not fault the pair. `fab page clear ID TEXT` on hel8 logs
+  `signal.cleared` (signal, by `user` or `--by`, text) and rewrites the
+  page; it refuses an id that is not an open signal, and a fault. Clearing a
+  red's signal closes the red (`red.closed`, reason `cleared`). A signal
+  open again after its clear (a later raise) shows again.
 
 ### 13.7 Probes
 
@@ -880,6 +1197,30 @@ before it lands (13.1).
   - The landing report counts the branches retried and the batches landed
     on a receipt, and raises a signal for each collateral red: a flake goes
     to its owner.
+- **A rejection no task owns is heard** (the user, 11-01: a hand-pushed
+  qa-ladder batch was rejected on a port flake and nobody was told; its
+  `rejected` sat in `queue.jsonl`). The tick's queue import
+  (`fab.dispatch._import_queue`) keeps, besides its tasks' records, the
+  records of a branch that is no loaded task's and no fab branch's (not a
+  call's, answer's, repair section's or trunk): `rejected` as
+  `queue.rejected` (branch, tip, step, log, tests), `landed` as
+  `queue.landed` (branch, tip, main) and `collateral` as `queue.collateral`
+  (branch, tip, step, tests, log), each with `queue_ts`, deduplicated by
+  the same key as its tasks' records; its cursor stays the tasks'.
+  - A `queue.rejected` opens the signal `queue:<branch>` on the user's page
+    (13.6): branch, tip, step, failing tests and the log on the gate. It
+    clears when the branch lands, when a newer tip of it is tried, or by
+    hand. Telling the session that readied it is left for later (14): a
+    ready ref carries no pusher fab can read reliably.
+  - A `collateral` alone is no signal: the branch goes again by itself, and
+    the report already signals collateral reds. A red that stands after
+    its collateral bound ends as a `rejected`, which is heard.
+  - The queue already wakes the tick on every `rejected` (13.9).
+  - Tests: a fake queue log with a rejected hand-pushed branch gives one
+    `queue.rejected` and the page's signal; a later `landed`, or a
+    `rejected` at another tip, clears it (the latter opening its own);
+    `fab page clear` clears it; a task's rejection still becomes
+    `branch.rejected` and no signal.
 
 ### 13.9 Events drive the tick
 
@@ -891,8 +1232,11 @@ only the backstop.
   `FAB_HOME/tick.want` on hel8, beside the log: a Codex run's unit when it
   stops (its ExecStopPost runs `fab wake codex <id>`, over ssh from the
   builder), a Claude call when it logs `call.ended`, the queue at the end of
-  a cycle that recorded `landed` or `rejected` (one wake per cycle), `fab
-  land` when it lands or refuses, and the user's answer (`fab page answer`).
+  a cycle that recorded `landed` or `rejected` (one wake per cycle), the
+  after-landing machine at the end of a run that recorded a red new or
+  unattributed or a recovery (one wake per run, section 11), `fab land`
+  when it lands or refuses, and the user's answer or clear (`fab page
+  answer`, `fab page clear`).
   On hel8 a wake is one appended line; elsewhere it is one ssh to the host
   with the role dispatcher. A wake that fails is not retried: the backstop
   finds its work.
@@ -908,7 +1252,8 @@ only the backstop.
   for a lost event or a host that could not reach hel8. In normal operation
   every change of state arrives as an event, so the backstop finds nothing
   to do. A backstop tick that took a want, collected an ended run or
-  imported a queue record found a lost event, and logs a note saying so
+  imported a queue record, a `tiers.red` or a `tiers.recovered` found a
+  lost event, and logs a note saying so
   (`lost event: ...`); its other work (an answer due after 30 minutes, a
   review after 4 hours, a builder become calm, a retried failure) is the
   timer's by nature and is not noted. `fab wake --install [PLAN_DIR...]`
@@ -918,8 +1263,10 @@ only the backstop.
 - **A tick that wants another starts one:** when the log gained, during a
   tick, a record the next decision depends on (`run.ended`, `branch.landed`,
   `branch.rejected`, `question.asked`, `question.answered`,
-  `refusal.settled`, `call.finished`, `call.parked`, `call.answered`), the
-  tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
+  `refusal.settled`, `call.finished`, `call.parked`, `call.answered`,
+  `red.settled`, which makes a red task, and `red.closed`, which may let a
+  retire start; `red.opened` needs none, since the same round's plans take
+  it), the tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
   row with no outside wake between them stop the chain with a note: a chain
   that long is a fault, and the next tick waits for an event or the
   backstop.
@@ -1293,7 +1640,7 @@ only as tweaks once a replay matches its run.
 - **Retire waits for main.** An integration plan's parts are done when
   their tasks have merged, but its retire call starts only once the trunk
   has landed on main (`branch.landed` for task `<draft>/integration` from
-  the queue's record).
+  the queue's record), and after its verdict after landing (section 11).
 - **Departures from the user's drafts, at the user's word** (10-31;
   `execution-modes.md`): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
@@ -1447,16 +1794,27 @@ login that still works reused across them before more are signed in.
   posted to the director rather than read from FAB_HOME.
 - Report metrics the records do not hold yet: lines changed per landed
   branch, questions by kind, continuity, CPU per step against its budget,
-  after-landing verdicts; targets and their signals once the user sets them.
+  after-landing verdicts by outcome, lag and coverage (its reds are counted,
+  10); targets and their signals once the user sets them.
 - The landing checks' next steps (13.8): a collateral red sent to the
-  failing test's owner, not only signalled; receipts reused for batches of
-  more than one, once numbers show how often a set's receipts all name its
-  main; receipts on the gate pruned.
-- after-landing live: its unit on a builder and its slot, the old tool
-  stopped, fabrig's package map moved to `.config/tiers/`; then new reds
-  reaching their tasks through the dispatcher, bisection when several
-  branches are suspects, and the landing report's after-landing figures.
-  CPU accounting is present (11); the user sets the one total CPU budget
+  failing test's owner, not only signalled (fab knows a test's owner only
+  as a red's suspects after landing, 11, which a collateral red at the gate
+  does not have); receipts reused for batches of more than one, once
+  numbers show how often a set's receipts all name its main; receipts on
+  the gate pruned.
+- after-landing live: its unit on a builder and its slot (done, 11-01), the
+  old tool stopped, fabrig's package map moved to `.config/tiers/`. New
+  reds reaching their tasks through the dispatcher are designed (11, 13.1),
+  and the landing report's after-landing figures (10). Next, from their
+  numbers: bisection when several branches are suspects (the red tests run
+  at each suspect's merge in the lowest tier), if foremen name the wrong
+  owner; a second repair round for an unfixed red instead of the page; the
+  owner's spec gaining the red's section, if its history is wanted there;
+  the session that readied a hand-pushed branch told of its rejection or
+  red, once a ready records its pusher (`fab queue ready`, or a trailer);
+  reds standing from before `reds` existed, which open nothing; Fix mode's
+  gate waking Claude when a red's fix touches a public item (with the api
+  gate, above). CPU accounting is present (11); the user sets the one total CPU budget
   from measurements after re-tiering lands. Default/fuzzy queue CPU now
   reuses the collector (6); making its report-only excesses red awaits the
   user's decision and budget figures. QA walks as a run kind.
