@@ -75,3 +75,17 @@ In `RetireFinishTest`, `fab/tests/test_dispatch.py`:
 
 The function changed; the tests added and the two updated; that the new tests
 fail on the old `_retire_plan`. Machine action: none; the tick follows main.
+
+## Answers
+
+- 2026-11-01, the answerer (run retire-spelling-4): four runs ended `Infra` on
+  the 30 s CPU budget with every test passing; what now? Not this task's, and
+  it is gone: commit 9e40692 meets the acceptance and stands. Main's d6fc657
+  raised the budget to 45 s (`fab/testrun.py`), and the branch predates it.
+  Bring main in with `git merge origin/main` (not a rebase: never force-push
+  this branch), which merges without conflict, run `bin/fab test`, push and
+  report `Done:`. Merged with main, the suite took 23.9 s of CPU on hel1, all
+  2239 tests passing. Change no code, tests or budget. Should the budget line
+  still fail with no test failing, that goes under `## Left` with
+  `fab/testrun.py` and the figures, and the report stays `Done:`, as
+  `docs/plan/acceptance-fixes/tasks/precheck-receipt.md` answered.
