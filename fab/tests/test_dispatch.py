@@ -4582,6 +4582,16 @@ class EarlyStartTest(unittest.TestCase):
         landed = events + [ended("a"), event("branch.landed", "a", tip="t", main="m", into="draft/integration")]
         self.assertEqual(state.fold(self.tasks, landed)["draft/b"].status, "runnable")
 
+    def test_a_failed_early_run_reruns_once_its_needs_merge(self):
+        events = [started(branch="draft/a"), dict(started("b", branch="draft/b"), early=["draft/a"]),
+                  ended("b", outcome="failed")]
+        self.assertEqual(state.fold(self.tasks, events)["draft/b"].status, "waiting")
+        landed = events + [ended("a"), event("branch.landed", "a", tip="t", main="m", into="draft/integration")]
+        self.assertEqual(state.fold(self.tasks, landed)["draft/b"].status, "runnable")
+        # A failed run that did not start early still parks for judgement.
+        plain = landed + [started("b", n=2, branch="draft/b"), ended("b", n=2, outcome="failed")]
+        self.assertEqual(state.fold(self.tasks, plain)["draft/b"].status, "parked")
+
     def test_one_level_only(self):
         # b runs early on a; c may not start on b while b still waits for a.
         events = [started(branch="draft/a"), started("b", branch="draft/b")]

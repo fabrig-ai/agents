@@ -1617,7 +1617,9 @@ only as tweaks once a replay matches its run.
   task). A task starts early once at most: after a question, an answered
   task whose needs are not all merged waits for them (r6: fe-playground-forge
   started early on fe-remove and asked four times for the same unfinished
-  removal before it parked). Its brief gains `# Started early`, naming those branches and saying
+  removal before it parked). A run that started early and ended `Failed:`
+  (its needs' work unfinished) waits for them likewise and then runs again
+  (r6: fe-world-remove), rather than parking with nobody to answer it. Its brief gains `# Started early`, naming those branches and saying
   to merge them again before it pushes; `run.started` carries `early`. A
   done task of an integration plan merges only after every need has merged.
   The tick reads origin's branches of the draft from the plan checkout after

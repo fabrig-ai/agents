@@ -32,7 +32,8 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     Events for tasks not in `tasks`, and event types not listed here, are ignored.
     - run.started: running; the run id is appended to runs; branch is taken from the event.
     - run.ended: outcome done -> done; question -> parked; failed -> parked, question is
-      "Failed: " plus the event's report path; infra -> runnable.
+      "Failed: " plus the event's report path, but a failed run that started early waits for
+      its needs and then runs again; infra -> runnable.
     - question.asked: parked, question = text. question.answered: a parked task becomes
       runnable (waiting while a need is not landed), or done when the answer has accept (keeping
       branch); every task's question = None.
@@ -42,6 +43,7 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     """
     events = list(events)
     views = {identifier: TaskView(identifier) for identifier in tasks}
+    early = set()  # runs that started early (on needs not merged yet)
     for event in events:
         view = views.get(event.get("task"))
         if view is None:
@@ -51,10 +53,16 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                 view.status = "running"
                 view.runs.append(event["run"])
                 view.branch = event.get("branch")
+                if event.get("early"):
+                    early.add(event["run"])
             case "run.ended":
                 outcome = event.get("outcome")
                 if outcome == "done":
                     view.status = "done"
+                elif outcome == "failed" and event.get("run") in early:
+                    # An early start that failed on its needs' unfinished work runs again once
+                    # they have merged (the playground replay, 11-01: fe-world-remove).
+                    view.status = "answered"
                 elif outcome in ("question", "failed"):
                     view.status = "parked"
                     if outcome == "failed":
