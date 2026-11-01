@@ -5,6 +5,14 @@
 
 ## Present
 
+- **The queue's retire fix and `rejected`'s tests** (11-01, section 6):
+  the retire push runs with `--porcelain` and is read per ref; a refused
+  source delete is left alone (a `left` line in the detail log); a refused
+  ready ref is read back with `git ls-remote`, an error only when still at
+  the landed tip or when the read-back fails; `landed` is recorded for
+  every branch. A test step's `rejected` carries `tests`. Tested against a
+  fake runner; the lead deploys it after landing.
+
 - **Queue CPU and starvation** (11-01): default/fuzzy reuse `fab/cpu.py`
   with the queue's package scope and gate lane, one wrapper per batch, and
   separate collector directories per step. Batch records and logs report
@@ -109,10 +117,7 @@
   report's red figures (10). Today `fab.after_landing.imported` drops
   recovered and unattributed tests and the run's red keys, the queue
   import drops every record that is no task's, and `fab/tier_reds.py`
-  does not exist. The queue's retire fix (6: a refused source delete left
-  alone, `--porcelain` read per ref) is designed too; until it lands a
-  hand-pushed branch whose source moved records `outcome: error` though it
-  landed. A specless repair's refusal foreman still reads its spec from
+  does not exist. A specless repair's refusal foreman still reads its spec from
   `task.path` (`fab.repairs.start`), which a specless task does not have.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
