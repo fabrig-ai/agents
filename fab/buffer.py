@@ -20,13 +20,14 @@ def group(plan: Plan, task: Task, refused: bool) -> str:
 
     - "consolidation": task.consolidation is true (a structure review wrote it, section 12),
       whatever else holds of it;
-    - "repair": refused is true (its next run is a repair or rebase run on a refusal);
+    - "repair": kind red (an after-landing repair), or refused is true (its next run
+      is a repair or rebase run on a refusal);
     - "contract": its part is in plan.parts with contract true;
     - "slice": anything else, a task whose part is not in plan.parts among them.
     """
     if task.consolidation:
         return "consolidation"
-    if refused:
+    if task.kind == "red" or refused:
         return "repair"
     part = plan.parts.get(task.part)
     if part is not None and part.contract:
