@@ -37,7 +37,7 @@ p{margin:6px 0}
 .meta,.muted,.empty{color:var(--ink2)}
 .empty{font-style:italic}
 code{background:var(--code);padding:0 4px;border-radius:4px;font-size:12.5px;overflow-wrap:anywhere}
-.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px}
 .tile,.card,.panel{background:var(--surface);border:1px solid var(--ring);border-radius:10px}
 .tile{padding:12px 14px}
 .tile .label{color:var(--ink2);font-size:12.5px}
