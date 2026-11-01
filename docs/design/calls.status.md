@@ -65,10 +65,10 @@
   lists the designs changed at `origin/main` and not at `origin/<branch>`.
   The hold's reason is `LAND_HOLD`; its settle brief allows amend or user,
   then user only, and `_judge_chain` parks a land verdict on it with
-  `settle failed`. Any other `ls-remote` code (128 for network or auth, 1)
-  leaves the refusal open for its amend; `test_dispatch.py`'s
-  `test_finish_land_refusal_steps_and_terminal_exceptions` holds 2, 128
-  and 1. `fab/roles/settle.md` says land is not an option when the brief
+  `settle failed`. Any other `ls-remote` code (0, 1, or 128 for network
+  or auth) leaves the refusal open for its amend; `test_dispatch.py`'s
+  `test_finish_land_refusal_steps_and_terminal_exceptions` holds 0, 1, 2
+  and 128. `fab/roles/settle.md` says land is not an option when the brief
   says it would land a tip `fab land` refused; `fab/roles/amender.md`
   rebases onto `origin/main` at `test` as at `rebase` before it reproduces
   and fixes what the log names, then force-pushes with lease. Tested with
@@ -78,9 +78,10 @@
 
 - **A `fab land` refusal amended from its own heading** (2, 11-01): the
   amender's rebase at `rebase` and `test`, its `--force-with-lease` push
-  and a retire's listed designs are role text (`fab/roles/amender.md`), as
-  settle's refusal to land a refused tip is (`fab/roles/settle.md`, which
-  `_judge_chain`'s park on a land verdict backs), not checked by code; a
+  and a retire's listed designs are role text (`fab/roles/amender.md`), not
+  checked by code; settle's refusal to land a refused tip is role text too
+  (`fab/roles/settle.md`), which `_judge_chain` enforces by parking a land
+  verdict with `settle failed`; a
   failing `git fetch` in `_retire_designs` fails the amend's start like
   any brief that cannot be compiled (5, its first bullet).
 - **Retire's changed designs are main's window, not the plan's** (3,
