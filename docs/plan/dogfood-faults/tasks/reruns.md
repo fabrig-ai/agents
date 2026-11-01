@@ -85,3 +85,24 @@ Reconcile the repair tip with the tip tested by landing before repeating the pre
 Retain the existing guard if present; inspect the recorded launch commands if the assertion still fails.
 Validate the failing test and `bin/fab test` using Python `-B`.
 The required fallback follows `docs/design/tick.md`, section 3.
+
+## Answers
+
+2026-11-01. Why does the landing keep failing on a fixture guard the branch
+already has? The branch is not linear: `origin/dogfood-faults/reruns`
+(`ca5c92e`) is a merge of the first run's commit `cf47d8c` with main, and
+the guard and the later `fab/run.py` edits live only in that merge. `fab
+land` rebases onto main (`docs/design/landing.md`), and `git rebase` drops
+merge commits, so every landing tested `cf47d8c` alone (`7751332`,
+`bb9b2e3`, `d74f981`: `fab/run.py` and `fab/tests/test_run.py`, no
+`fab/tests/test_dispatch.py`). The code is right; its history is what to
+change. Next run: `git fetch origin`, merge `origin/main` into the branch if
+it is behind, then `git reset --soft origin/main` and commit the task's whole
+change as one commit (no merge commit left: `git log --merges
+origin/main..HEAD` prints nothing), and push it with `git push
+--force-with-lease origin HEAD`. Check before pushing that `git diff
+--stat origin/main HEAD` lists only this task's three files and includes
+the `OptimisticStartTest.remote` guard, and that `bin/fab test` passes on
+that commit. Change no code otherwise. How the landing should treat merge
+commits is not this task's to fix (it belongs to `fab/land.py` and
+`docs/design/landing.md`).
