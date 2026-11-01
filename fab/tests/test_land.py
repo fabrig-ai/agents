@@ -14,9 +14,11 @@ from fab.tests.wakes import WakeTestCase
 class LandPureTest(unittest.TestCase):
     def test_outside_obeys_directory_and_exact_boundaries(self):
         allowed = ["fab/a.py", "fab/tests/a.py", "bin/fab", "docs/design/fab.md",
-                   "docs/design/fab.status.md", "docs/plan/a/tasks/b.md"]
+                   "docs/design/fab.status.md", "docs/plan/a/tasks/b.md",
+                   "docs/design/fab-tick.md", "docs/design/fab-after-landing.status.md"]
         forbidden = ["fab", "fabric/a.py", "bin/fab-extra", "docs/design/fab.md.bak",
-                     "docs/plan", "README.md"]
+                     "docs/plan", "README.md", "docs/design/fab-tick.md.bak",
+                     "docs/design/fab-x/y.md", "docs/design/fabx.md", "docs/design/fab-.md"]
         self.assertEqual(landing.outside(iter(allowed + forbidden)), sorted(forbidden))
         self.assertEqual(landing.outside([]), [])
 

@@ -1,4 +1,4 @@
-"""`fab land`: land a branch of this repository on main (docs/design/fab.md, 6)."""
+"""`fab land`: land a branch of this repository on main (docs/design/fab-landing.md, 2)."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from fab.sh import Runner, run
 
 # What fab land may land; anything else still goes through tools/land.
 ALLOWED = ("fab/", "bin/fab", "docs/design/fab.md", "docs/design/fab.status.md", "docs/plan/")
+DESIGNS = re.compile(r"docs/design/fab-[a-z0-9-]+(\.status)?\.md")  # fab's subsystem designs
 REMOTE = "git@github.com:fabrig-ai/agents.git"
 TEST = ("bin/fab", "test")
 
@@ -28,8 +29,9 @@ class Outcome:
 
 
 def outside(paths: Iterable[str]) -> list[str]:
-    """The paths fab land may not land, sorted: an ALLOWED entry ending in / covers a directory, others match exactly."""
-    return sorted(path for path in paths if not any(
+    """The paths fab land may not land, sorted: an ALLOWED entry ending in / covers a directory,
+    others match exactly, and fab's subsystem designs (DESIGNS) are allowed too."""
+    return sorted(path for path in paths if not DESIGNS.fullmatch(path) and not any(
         path.startswith(allowed) if allowed.endswith("/") else path == allowed
         for allowed in ALLOWED
     ))
