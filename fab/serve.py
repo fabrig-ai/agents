@@ -11,7 +11,7 @@ from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fab import accounting, calls, hosts as machines, log
+from fab import accounting, calls, channel, hosts as machines, log
 
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
@@ -28,38 +28,43 @@ def _stamp(value: object) -> datetime | None:
 
 
 def _draft(event: dict) -> str:
-    task = event.get("task")
-    name = task.split("/", 1)[0] if isinstance(task, str) and "/" in task else ""
-    return name if DRAFT.fullmatch(name) else "other"
+    task = event.get("into" if event.get("ev") == "branch.landed" and "into" in event else "task")
+    return task.split("/", 1)[0] if isinstance(task, str) and "/" in task else ""
 
 
 def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     """Public counts and ages at now, in UTC, with only known hosts, call roles and safe
     draft names. Skip invalid timestamps and future events; pair ids across the log,
-    fold questions and parked subjects in log order, and bound in-flight starts to 24 h.
-    Today runs from UTC midnight through now. No event fields leave the fold."""
+    fold the user's log asks through channel.asks, and bound runs to 24 h and calls to
+    calls.TIMEOUT. Separate main landings from trunk merges; only drafts named by run
+    starts appear. Today runs from UTC midnight through now. No event fields leave the fold."""
     now = now.astimezone(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     recent = now - timedelta(hours=24)
+    call_cutoff = now - timedelta(seconds=calls.TIMEOUT)
+    dated = [(event, stamp) for event in events
+             if (stamp := _stamp(event.get("ts"))) is not None and stamp <= now]
+    known_drafts = {_draft(event) for event, _ in dated if event.get("ev") == "run.started"}
     hour = now - timedelta(hours=1)
     runs, call_starts = {}, {}
     runs_ended, calls_ended = set(), set()
-    questions, parked = {}, {}
     by_host, by_role = Counter(), Counter()
     drafts = {}
     landed = {"last_hour": 0, "today": 0}
+    merged = {"last_hour": 0, "today": 0}
     outcomes = dict.fromkeys(OUTCOMES, 0)
     rejected = 0
     codex = claude = 0.0
     last = None
 
-    def draft_counts(event: dict) -> dict:
-        return drafts.setdefault(_draft(event), {"runs_in_flight": 0, "landed_today": 0})
+    def count_draft(event: dict, figure: str) -> None:
+        name = _draft(event)
+        if name in known_drafts:
+            public = name if DRAFT.fullmatch(name) else "other"
+            counts = drafts.setdefault(public, {"runs_in_flight": 0, "landed_today": 0, "merged_today": 0})
+            counts[figure] += 1
 
-    for event in events:
-        stamp = _stamp(event.get("ts"))
-        if stamp is None or stamp > now:
-            continue
+    for event, stamp in dated:
         last = stamp
         kind = event.get("ev")
         run_id, call_id = event.get("run"), event.get("call")
@@ -74,7 +79,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                 weight = accounting.run_weight(event)
                 if weight is not None:
                     codex += weight
-        elif kind == "call.started" and isinstance(call_id, str) and recent <= stamp:
+        elif kind == "call.started" and isinstance(call_id, str) and call_cutoff <= stamp:
             call_starts[call_id] = event
         elif kind == "call.ended":
             if isinstance(call_id, str):
@@ -83,20 +88,13 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                 weight = accounting.call_weight(event)
                 if weight is not None:
                     claude += weight
-        elif kind in ("question.asked", "question.answered", "call.parked", "call.answered"):
-            waiting = questions if kind.startswith("question.") else parked
-            subject = event.get("task" if kind.startswith("question.") else "subject")
-            if isinstance(subject, str) and subject:
-                if kind in ("question.asked", "call.parked"):
-                    waiting[subject] = stamp
-                else:
-                    waiting.pop(subject, None)
         elif kind == "branch.landed":
+            counts = merged if "into" in event else landed
             if stamp >= hour:
-                landed["last_hour"] += 1
+                counts["last_hour"] += 1
             if stamp >= today:
-                landed["today"] += 1
-                draft_counts(event)["landed_today"] += 1
+                counts["today"] += 1
+                count_draft(event, "merged_today" if "into" in event else "landed_today")
         elif kind == "branch.rejected" and stamp >= today:
             rejected += 1
 
@@ -105,13 +103,15 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
             continue
         host = event.get("host")
         by_host[host if isinstance(host, str) and host in hosts else "other"] += 1
-        draft_counts(event)["runs_in_flight"] += 1
+        count_draft(event, "runs_in_flight")
     for call_id, event in call_starts.items():
         if call_id in calls_ended:
             continue
         role = event.get("role")
         by_role[role if isinstance(role, str) and role in calls.ROLES else "other"] += 1
-    waiting_since = [*questions.values(), *parked.values()]
+    asks = channel.asks((), [event for event, _ in dated])
+    by_kind = Counter(ask.kind for ask in asks)
+    waiting_since = [_stamp(ask.since) for ask in asks]
     return {
         "updated": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "log": "ok",
@@ -119,10 +119,11 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
         "runs_in_flight": {"total": sum(by_host.values()), "by_host": dict(sorted(by_host.items()))},
         "calls_in_flight": {"total": sum(by_role.values()), "by_role": dict(sorted(by_role.items()))},
         "waiting_on_user": {
-            "questions": len(questions), "parked_calls": len(parked),
+            "asks": len(asks), "by_kind": {kind: by_kind[kind] for kind in ("call", "parked")},
             "oldest_age_s": int((now - min(waiting_since)).total_seconds()) if waiting_since else None,
         },
         "landed": landed,
+        "merged": merged,
         "rejected_today": rejected,
         "runs_ended_today": outcomes,
         "weight_today": {"codex_m": round(codex / accounting.MILLION, 1),
@@ -164,12 +165,15 @@ def render(snapshot: dict) -> str:
             ("Calls in flight", active_calls["total"]), *active_calls["by_role"].items(),
         ]))
         content += section("Waiting on the user", rows([
-            ("Questions", waiting["questions"]), ("Parked calls", waiting["parked_calls"]),
+            ("Open asks", waiting["asks"]),
+            ("Calls", waiting["by_kind"]["call"]), ("Parked calls", waiting["by_kind"]["parked"]),
             ("Oldest", _age(waiting["oldest_age_s"])),
         ]))
         content += section("Today", rows([
-            ("Landed in the last hour", snapshot["landed"]["last_hour"]),
-            ("Landed today", snapshot["landed"]["today"]),
+            ("Landed on main: last hour", snapshot["landed"]["last_hour"]),
+            ("Landed on main: today", snapshot["landed"]["today"]),
+            ("Merged into a trunk: last hour", snapshot["merged"]["last_hour"]),
+            ("Merged into a trunk: today", snapshot["merged"]["today"]),
             ("Rejected", snapshot["rejected_today"]),
             *((f"Runs ended: {outcome}", snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES),
             ("Codex weight (millions)", f'{snapshot["weight_today"]["codex_m"]:.1f}'),
@@ -177,7 +181,8 @@ def render(snapshot: dict) -> str:
         ]))
         content += section("Drafts", "".join(
             f"<h3>{text(name)}</h3>" + rows([("Runs in flight", counts["runs_in_flight"]),
-                                            ("Landed today", counts["landed_today"])])
+                                            ("Landed today", counts["landed_today"]),
+                                            ("Merged today", counts["merged_today"])])
             for name, counts in snapshot["drafts"].items()) or "<p>none</p>")
     return """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

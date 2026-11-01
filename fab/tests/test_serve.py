@@ -12,7 +12,7 @@ from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import cli, log, serve
+from fab import calls, channel, cli, log, serve
 
 NOW = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)
 
@@ -33,7 +33,9 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(empty["updated"], "2026-11-01T00:30:00.000Z")
         self.assertEqual(empty["log"], "ok")
         self.assertIsNone(empty["last_event_age_s"])
-        self.assertIsNone(empty["waiting_on_user"]["oldest_age_s"])
+        self.assertEqual(empty["waiting_on_user"], {
+            "asks": 0, "by_kind": {"call": 0, "parked": 0}, "oldest_age_s": None,
+        })
         self.assertEqual(empty["runs_in_flight"], {"total": 0, "by_host": {}})
         self.assertEqual(empty["calls_in_flight"], {"total": 0, "by_role": {}})
         self.assertEqual(empty["drafts"], {})
@@ -43,7 +45,7 @@ class SnapshotTest(unittest.TestCase):
                 self.assertEqual(serve.snapshot([{"ev": "branch.landed", "ts": stamp}], NOW, []), empty)
         self.assertEqual(serve.snapshot([event("branch.landed", -1)], NOW, []), empty)
 
-    def test_serve_pairs_ids_and_bounds_starts_to_24_hours(self):
+    def test_serve_pairs_ids_and_bounds_runs_to_24_hours_calls_to_timeout(self):
         events = [
             event("run.started", 86401, run="stale", task="stale/t", host="builder"),
             event("run.started", 86400, run="edge", task="edge/t", host="builder"),
@@ -54,8 +56,8 @@ class SnapshotTest(unittest.TestCase):
             event("run.started", 20, run="active", task="active/t", host="private-host"),
             event("run.started", 20, run="active", task="active/t", host="private-host"),
             event("run.started", 15, task="missing/t", host="builder"),
-            event("call.started", 86401, call="stale", role="review"),
-            event("call.started", 86400, call="edge", role="review"),
+            event("call.started", calls.TIMEOUT + 1, call="stale", role="review"),
+            event("call.started", calls.TIMEOUT, call="edge", role="review"),
             event("call.started", 500, call="ended", role="answer"),
             event("call.ended", 400, call="ended"),
             event("call.ended", 300, call="before"),
@@ -70,41 +72,46 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(current["runs_in_flight"], {"total": 2, "by_host": {"builder": 1, "other": 1}})
         self.assertEqual(current["calls_in_flight"], {"total": 2, "by_role": {"review": 1, "other": 1}})
         self.assertEqual(current["drafts"], {
-            "active": {"runs_in_flight": 1, "landed_today": 0},
-            "edge": {"runs_in_flight": 1, "landed_today": 0},
+            "active": {"runs_in_flight": 1, "landed_today": 0, "merged_today": 0},
+            "edge": {"runs_in_flight": 1, "landed_today": 0, "merged_today": 0},
         })
 
-    def test_serve_waiting_uses_latest_question_and_subject_in_log_order(self):
+    def test_serve_waiting_matches_the_user_channel_log_asks(self):
         events = [
-            event("question.asked", 90000, task="reasked/t"),
-            event("question.asked", 80000, task="closed/t"),
-            event("question.answered", 70000, task="closed/t"),
-            event("call.parked", 60000, subject="closed", call="old"),
-            event("call.answered", 50000, subject="closed", call="different"),
-            event("call.parked", 40000, subject="open", call="first"),
-            event("call.parked", 30000, subject="open", call="second"),
-            event("question.asked", 20000, task="reasked/t"),
-            event("question.asked", 10000, task="another/t"),
-            event("call.answered", 9000, subject="another/t"),
-            event("question.answered", 8000, task="open"),
-            event("question.asked", 7000),
+            event("question.asked", 90000, task="foreman/t"),
+            event("call.ended", 80000, call="answered", subject="closed", outcome="question"),
+            event("call.parked", 70000, call="parked-closed", subject="closed", reason="review"),
+            event("call.answered", 60000, subject="closed"),
+            event("call.ended", 50000, call="designed", subject="designed", outcome="question"),
+            event("call.ended", 40000, call="design", subject="designed", outcome="done"),
+            event("call.parked", 30000, call="finished", subject="finished", reason="review"),
+            event("call.finished", 20000, call="finished"),
+            event("call.ended", 10000, call="first", subject="open", outcome="question"),
+            event("call.ended", 9000, call="second", subject="open", outcome="question"),
+            event("call.parked", 8000, call="parked-open", subject="open", reason="review"),
+            event("question.answered", 7000, task="open"),
             event("call.parked", 6000),
-            {"ev": "question.answered", "ts": "bad", "task": "another/t"},
+            event("call.ended", 5000, outcome="question"),
+            {"ev": "call.answered", "ts": "bad", "subject": "open"},
+            event("call.answered", -1, subject="open"),
         ]
-        self.assertEqual(serve.snapshot(events, NOW, [])["waiting_on_user"], {
-            "questions": 2, "parked_calls": 1, "oldest_age_s": 30000,
+        before = copy.deepcopy(events)
+        current = serve.snapshot(events, NOW, [])
+        self.assertEqual(events, before)
+        self.assertEqual(current["waiting_on_user"], {
+            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 9000,
         })
-        events.extend([event("question.answered", task="reasked/t"),
-                       event("question.answered", task="another/t"),
-                       event("call.answered", subject="open")])
+        asks = channel.asks((), events[:-2])
+        self.assertEqual(current["waiting_on_user"]["asks"], len(asks))
+        events.append(event("call.answered", subject="open"))
         self.assertEqual(serve.snapshot(events, NOW, [])["waiting_on_user"], {
-            "questions": 0, "parked_calls": 0, "oldest_age_s": None,
+            "asks": 0, "by_kind": {"call": 0, "parked": 0}, "oldest_age_s": None,
         })
 
     def test_serve_waiting_has_no_expiry_and_invalid_endings_do_not_pair(self):
         events = [
-            event("question.asked", 172800, task="old/t"),
-            event("call.parked", 90000, subject="older-call"),
+            event("call.ended", 172800, call="old", subject="old", outcome="question"),
+            event("call.parked", 90000, call="older", subject="older-call", reason="review"),
             event("run.started", 100, run="r", task="draft/t", host="builder"),
             event("call.started", 100, call="c", role="cut"),
             {"ev": "run.ended", "ts": "bad", "run": "r"},
@@ -112,13 +119,14 @@ class SnapshotTest(unittest.TestCase):
         ]
         current = serve.snapshot(events, NOW, ["builder"])
         self.assertEqual(current["waiting_on_user"], {
-            "questions": 1, "parked_calls": 1, "oldest_age_s": 172800,
+            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 172800,
         })
         self.assertEqual(current["runs_in_flight"]["total"], 1)
         self.assertEqual(current["calls_in_flight"]["by_role"], {"cut": 1})
 
     def test_serve_today_hour_outcomes_and_weights(self):
         events = [
+            event("run.started", 90000, run="old", task="today/old"),
             event("branch.landed", 3601, task="old/t"),
             event("branch.landed", 3600, task="hour/t"),
             event("branch.landed", 1801, task="yesterday/t"),
@@ -147,24 +155,65 @@ class SnapshotTest(unittest.TestCase):
             "done": 1, "question": 1, "infra": 1, "failed": 1, "other": 2,
         })
         self.assertEqual(current["weight_today"], {"codex_m": 1.9, "claude_m": 2.1})
-        self.assertEqual(current["drafts"], {"today": {"runs_in_flight": 0, "landed_today": 2}})
+        self.assertEqual(current["merged"], {"last_hour": 0, "today": 0})
+        self.assertEqual(current["drafts"], {
+            "today": {"runs_in_flight": 0, "landed_today": 2, "merged_today": 0},
+        })
+
+    def test_serve_merges_belong_to_trunks_and_only_run_drafts_appear(self):
+        events = [
+            event("branch.landed", 3601, task="calls/old", into="draft/integration"),
+            event("branch.landed", 3600, task="answers/hour", into="draft/integration"),
+            event("branch.landed", 1801, task="repairs/yesterday", into="draft/integration"),
+            event("branch.landed", 1800, task="calls/today", into="draft/integration"),
+            event("branch.landed", 0, task="answers/now", into="draft/integration"),
+            event("branch.landed", -1, task="calls/future", into="draft/integration"),
+            event("branch.landed", task="repairs/today", into="unknown/integration"),
+            event("branch.landed", task="draft/main"),
+            event("branch.landed", task="never-run/main"),
+            event("run.started", 90000, run="old", task="draft/old"),
+            event("run.started", 100, run="active", task="draft/active"),
+            event("run.started", 90000, run="inactive", task="inactive/old"),
+            event("run.started", -1, run="future", task="never-run/future"),
+            {"ev": "run.started", "ts": "bad", "task": "unknown/t"},
+        ]
+        current = serve.snapshot(events, NOW, [])
+        self.assertEqual(current["landed"], {"last_hour": 2, "today": 2})
+        self.assertEqual(current["merged"], {"last_hour": 5, "today": 3})
+        self.assertEqual(current["drafts"], {
+            "draft": {"runs_in_flight": 1, "landed_today": 1, "merged_today": 2},
+        })
+        page = serve.render(current)
+        self.assertIn("Landed on main: today</dt><dd>2", page)
+        self.assertIn("Merged into a trunk: today</dt><dd>3", page)
+        self.assertIn("Merged today</dt><dd>2", page)
 
     def test_serve_drafts_are_bounded_public_names(self):
-        valid = ["a", "release-1.2", "a" * 64]
+        valid = ["a", "release-1.2", "a" * 64, "other"]
         invalid = ["a" * 65, "Upper", "-dash", "path<secret>", "", "../hidden"]
-        events = [event("branch.landed", task=name + "/private-task") for name in valid + invalid]
+        events = [event("run.started", 90000, run=str(index), task=name + "/private-task")
+                  for index, name in enumerate(valid + invalid)]
+        events += [event("branch.landed", task=name + "/private-task") for name in valid + invalid]
+        events += [event("branch.landed", task="calls/private", into=name + "/integration")
+                   for name in valid + invalid]
         events += [event("branch.landed"), event("branch.landed", task=["bad"]),
-                   event("branch.landed", task="private-call-id")]
+                   event("branch.landed", task="private-call-id"),
+                   event("branch.landed", task="unseen<secret>/private")]
         current = serve.snapshot(events, NOW, [])
-        self.assertEqual(current["drafts"]["other"], {"runs_in_flight": 0, "landed_today": 9})
-        for name in valid:
-            self.assertEqual(current["drafts"][name], {"runs_in_flight": 0, "landed_today": 1})
+        self.assertEqual(current["drafts"]["other"], {
+            "runs_in_flight": 0, "landed_today": 10, "merged_today": 7,
+        })
+        for name in valid[:-1]:
+            self.assertEqual(current["drafts"][name], {
+                "runs_in_flight": 0, "landed_today": 1, "merged_today": 1,
+            })
 
     def test_serve_privacy_in_json_and_html(self):
         private = {
             "run": "secret-run-id", "call": "secret-call-id", "login": "secret-login-id",
             "task": "<secret-draft>/secret-task-id", "branch": "secret-branch", "sha": "secret-sha",
             "path": "/secret/path", "text": "secret question text", "answer": "secret answer text",
+            "reason": "secret reason", "into": "<secret-draft>/secret-integration",
             "notes": "secret notes", "report": "/secret/report", "holder": "secret holder",
             "subject": "secret-subject", "host": "secret-host", "role": "secret-role",
             "outcome": "secret-outcome",
@@ -173,6 +222,7 @@ class SnapshotTest(unittest.TestCase):
             "run.started", "call.started", "question.asked", "call.parked", "branch.landed",
             "branch.rejected", "note",
         )]
+        events.append(event("call.ended", **{**private, "call": "another-secret-call", "outcome": "question"}))
         events.append(event("run.ended", **{**private, "run": "another-secret-run"}))
         events.append(event("run.started", run="review-run", task="private-call-id"))
         current = serve.snapshot(events, NOW, ["builder"])
@@ -180,11 +230,15 @@ class SnapshotTest(unittest.TestCase):
             for secret in private.values():
                 self.assertNotIn(secret, output)
             self.assertNotIn("another-secret-run", output)
+            self.assertNotIn("another-secret-call", output)
             self.assertNotIn("private-call-id", output)
             self.assertNotIn("review-run", output)
         self.assertEqual(current["runs_in_flight"]["by_host"], {"other": 2})
         self.assertEqual(current["calls_in_flight"]["by_role"], {"other": 1})
         self.assertEqual(current["runs_ended_today"]["other"], 1)
+        self.assertEqual(current["waiting_on_user"], {
+            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 0,
+        })
 
     def test_serve_render_escapes_text_and_formats_ages(self):
         label = '<host & "name">'

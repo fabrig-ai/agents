@@ -1402,23 +1402,33 @@ login that still works reused across them before more are signed in.
   `fab.hosts.load`. No lock, writes, cache, ssh or plan files. An unreadable
   log still returns 200, with `log: "unreadable"` and no figures; failures
   show fixed classifications, never exception text.
-- **Now and waiting.** The last event's age; runs and calls started within
-  24 hours without a matching end, by host and role. A task's latest
-  `question.asked` waits until a later `question.answered` names that task;
-  a subject's latest `call.parked` waits until `call.answered` names it.
-  Waiting counts include the oldest open item's age, without a 24-hour cut.
-- **Today is UTC.** Landings in the last hour and since midnight, rejected
-  branches and ended runs by done, question, infra, failed or other.
+- **Now and waiting.** The last event's age; runs started within 24 hours
+  and calls within `fab.calls.TIMEOUT` seconds without a matching end, by
+  host and role. Waiting uses `fab.channel.asks((), events)`: only the log's
+  open user asks, without plans or the foreman's task questions. The
+  `waiting_on_user` snapshot has `asks`, `by_kind` (`call`, `parked`) and
+  `oldest_age_s` from the asks' `since`, null when none. Waiting has no age
+  cut; answers, completed designs and finished chains close asks as on the
+  user's page (13.6).
+- **Today is UTC.** `landed` counts `branch.landed` without `into` (on main);
+  `merged` counts those with `into` (into a trunk). Each has `last_hour` and
+  `today` counts; the page labels both under Today. Rejected branches and
+  ended runs by done, question, infra, failed or other are today's.
   `fab.accounting.run_weight` and `call_weight` sum today's measured endings
-  in millions, to one decimal; missing weights are skipped. Drafts with a
-  run in flight or a landing today show those two counts. Invalid timestamps
+  in millions, to one decimal; missing weights are skipped. Invalid timestamps
   and future events are skipped; today ends at the snapshot's time.
+- **Drafts come from run starts.** Only prefixes of `run.started` tasks in
+  the log qualify. Those with a run in flight, a main landing or a trunk
+  merge today show `runs_in_flight`, `landed_today` and `merged_today`.
+  A main landing belongs to its task's prefix; a trunk merge to the prefix
+  of `into` (`<draft>/integration`). Call branches do not create drafts.
 - **Only public labels leave the fold.** Known host names, call roles from
   `fab.calls.ROLES` (others become `other`), and draft names matching
-  `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A draft is the task up
-  to its first `/`; a task without `/` becomes `other`. No task, run, call
-  or login ids, branches, shas, paths,
-  question or answer text, notes, reports or holders in HTML or JSON.
+  `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A prefix ends at the
+  first `/`; a task without `/` becomes `other`. Draft qualification uses
+  the prefix before this public classification. No task, run, call or login
+  ids, branches, shas, paths, question or answer text, notes, reports or
+  holders in HTML or JSON.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
   refresh every 30 seconds, phone width and light and dark colours. Now,
   Waiting on the user, Today and Drafts; ages in seconds, minutes or hours.
