@@ -3,3 +3,27 @@ repo = "agents"
 sources = ["docs/plan/edge-fixes/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of edge-fixes: the two edge cases the acceptance review refused
+# start-commands and mechanisms-out on; the designs stand. One direct part of
+# two independent tasks on disjoint files, as the request says: `fab plan
+# inputs` refuses an ignored destination, and `_retire_plan` finds the key
+# however it is spelled. Specs in tasks/, the standing rules in
+# notes/common.md, the decisions and the critical path in notes/decisions.md.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "edge-cases"
+title = "An ignored input is refused, and retiring a plan handles every spelling of the retired key"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3; docs/design/calls.md, 3"
+
+[[slice]]
+id = 1
+story = "fab plan inputs refuses a local input a .gitignore hides, leaving its bytes, remote refs, HEAD and worktrees as they were, and retiring a plan that spells the key \"retired\" publishes a plan that still loads"
+parts = ["edge-cases"]
+walk = false
