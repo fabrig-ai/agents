@@ -11,6 +11,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from fab import atomic, calls, channel, cli, forge, log, wake
 from fab.sh import Failed, Result
+from fab.tests import qa_records as qa
 from fab.tests.support import FakeRunner, tmp_home
 
 
@@ -116,6 +117,46 @@ class ForgeTest(unittest.TestCase):
         self.ask("draft/long", name="long", text="Question: " + "x" * 300)
         self.sync()
         self.assertEqual(len(self.api.issues[2]["title"]), 200)
+
+    def test_finding_issue_answers_closes_and_reopens_for_a_later_question(self):
+        subject = "ladder/triage/finding-1"
+        report = log.home() / "walks/walk-1/report.md"
+        atomic.write(report, "Failed: Connect stalled\nThe walk's context.\n")
+        events = [qa.walk_started("walk-1", "b0"),
+                  qa.finding_raised("finding-1", "walk-1", "b0"),
+                  qa.walk_ended("walk-1", "fail", ("finding-1",)),
+                  qa.finding_triaged("finding-1", "user", question="Which account?")]
+        for record in events:
+            log.append(**record)
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(len(self.api.issues), 1)
+        self.assertEqual(self.api.issues[1]["title"], f"{subject}: Which account?")
+        self.assertIn(f"Which account?\n\nFailed: Connect stalled\nThe walk's context.\n\nRead: {report}",
+                      self.api.issues[1]["body"])
+        self.assertEqual(self.records("issue.opened")[0]["kind"], "finding")
+        self.api.comment(1, "Use the team account.")
+        self.report = "Done: answer\n\nUse the team account.\n"
+        self.assertEqual(self.sync(), 0)
+        answered, = self.records("call.answered")
+        self.assertEqual((answered["subject"], answered["call"], answered["question"], answered["answer"]),
+                         (subject, "triage-1", "Which account?", "Use the team account."))
+        self.assertIn("Which account?", self.briefs[0])
+        self.assertIn(str(report), self.briefs[0])
+        self.assertEqual(self.api.issues[1]["state"], "closed")
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(len(self.api.issues), 1)
+        closed = self.records("issue.closed")[-1]
+        log.append(**qa.finding_triaged("finding-1", "brief", call="triage-2",
+                                       question="Change the brief?", ts=closed["ts"]))
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(len(self.api.issues), 2)
+        self.assertEqual(self.api.issues[2]["state"], "open")
+        self.assertEqual(self.api.issues[2]["title"], f"{subject}: Change the brief?")
+        channel.answer(subject, "Yes, change the gate", log.read())
+        self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.api.issues[2]["state"], "closed")
+        self.assertEqual(len(self.records("issue.closed")), 2)
 
     def test_no_plans_or_asks_means_no_forge_requests(self):
         self.assertEqual(self.sync(), 0)

@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fab import calls, channel, cli, log, serve
+from fab.tests import qa_records as qa
 from fab.tests.support import tmp_home
 
 NOW = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)
@@ -36,7 +37,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(empty["log"], "ok")
         self.assertIsNone(empty["last_event_age_s"])
         self.assertEqual(empty["waiting_on_user"], {
-            "asks": 0, "by_kind": {"call": 0, "parked": 0}, "oldest_age_s": None,
+            "asks": 0, "by_kind": {"call": 0, "parked": 0, "finding": 0}, "oldest_age_s": None,
         })
         self.assertEqual(empty["runs_in_flight"], {"total": 0, "by_host": {}})
         self.assertEqual(empty["calls_in_flight"], {"total": 0, "by_role": {}})
@@ -102,14 +103,35 @@ class SnapshotTest(unittest.TestCase):
         current = serve.snapshot(events, NOW, [])
         self.assertEqual(events, before)
         self.assertEqual(current["waiting_on_user"], {
-            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 9000,
+            "asks": 2, "by_kind": {"call": 1, "parked": 1, "finding": 0}, "oldest_age_s": 9000,
         })
         asks = channel.asks((), events[:-2])
         self.assertEqual(current["waiting_on_user"]["asks"], len(asks))
         events.append(event("call.answered", subject="open"))
         self.assertEqual(serve.snapshot(events, NOW, [])["waiting_on_user"], {
-            "asks": 0, "by_kind": {"call": 0, "parked": 0}, "oldest_age_s": None,
+            "asks": 0, "by_kind": {"call": 0, "parked": 0, "finding": 0}, "oldest_age_s": None,
         })
+
+    def test_serve_finding_waits_are_counted_without_exposing_context(self):
+        with tmp_home():
+            events = [qa.walk_started("walk-1", "b0", ts=event("", 90000)["ts"]),
+                      qa.finding_raised("finding-1", "walk-1", "b0", title="Private finding title",
+                                        reproduction="Private reproduction", ts=event("", 90000)["ts"]),
+                      qa.walk_ended("walk-1", "fail", ("finding-1",), ts=event("", 90000)["ts"]),
+                      qa.finding_triaged("finding-1", "user", question="Private question",
+                                         ts=event("", 80000)["ts"])]
+            current = serve.snapshot(events, NOW, [])
+            self.assertEqual(current["waiting_on_user"], {
+                "asks": 1, "by_kind": {"call": 0, "parked": 0, "finding": 1}, "oldest_age_s": 80000,
+            })
+            page = serve.render(current)
+            self.assertIn('Finding questions</a></td><td class="num">1</td>', page)
+            for text in ("Private", "finding-1", "walk-1", "triage-1", "ladder/triage"):
+                self.assertNotIn(text, json.dumps(current) + page)
+            events.append(event("call.answered", subject="ladder/triage/finding-1"))
+            self.assertEqual(serve.snapshot(events, NOW, [])["waiting_on_user"], {
+                "asks": 0, "by_kind": {"call": 0, "parked": 0, "finding": 0}, "oldest_age_s": None,
+            })
 
     def test_serve_waiting_has_no_expiry_and_invalid_endings_do_not_pair(self):
         events = [
@@ -122,7 +144,7 @@ class SnapshotTest(unittest.TestCase):
         ]
         current = serve.snapshot(events, NOW, ["builder"])
         self.assertEqual(current["waiting_on_user"], {
-            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 172800,
+            "asks": 2, "by_kind": {"call": 1, "parked": 1, "finding": 0}, "oldest_age_s": 172800,
         })
         self.assertEqual(current["runs_in_flight"]["total"], 1)
         self.assertEqual(current["calls_in_flight"]["by_role"], {"cut": 1})
@@ -293,7 +315,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(current["calls_in_flight"]["by_role"], {"other": 1})
         self.assertEqual(current["runs_ended_today"]["other"], 1)
         self.assertEqual(current["waiting_on_user"], {
-            "asks": 2, "by_kind": {"call": 1, "parked": 1}, "oldest_age_s": 0,
+            "asks": 2, "by_kind": {"call": 1, "parked": 1, "finding": 0}, "oldest_age_s": 0,
         })
 
     def test_serve_render_escapes_text_and_formats_ages(self):
@@ -705,7 +727,7 @@ class RenderTest(unittest.TestCase):
             "last_event_age_s": 420,
             "runs_in_flight": {"total": 5, "by_host": {"hetzner6": 2, "hetzner9": 3}},
             "calls_in_flight": {"total": 4, "by_role": {"answer": 1, "review": 3}},
-            "waiting_on_user": {"asks": 3, "by_kind": {"call": 1, "parked": 2}, "oldest_age_s": 10800},
+            "waiting_on_user": {"asks": 3, "by_kind": {"call": 1, "parked": 2, "finding": 0}, "oldest_age_s": 10800},
             "landed": {"last_hour": 2, "today": 7},
             "merged": {"last_hour": 3, "today": 9},
             "rejected_today": 4,
@@ -773,13 +795,14 @@ class RenderTest(unittest.TestCase):
                 self.assertIn(f'<a class="tile" href="{issues}"><div class="label">'
                               'Waiting on the user</div>'
                               f'<div class="value">{current["waiting_on_user"]["asks"]}</div>', page)
-                for label, kind in (("Call questions", "call"), ("Parked chains", "parked")):
+                for label, kind in (("Call questions", "call"), ("Parked chains", "parked"),
+                                    ("Finding questions", "finding")):
                     count = current["waiting_on_user"]["by_kind"][kind]
                     self.assertIn(f'<tr><td><a href="{issues}">{label}</a></td>'
                                   f'<td class="num">{count}</td></tr>', page)
                 self.assertIn(f'</p><p><a href="{issues}">Open the questions</a></p></div>'
                               '<h2>Subscriptions</h2>', page)
-                self.assertEqual(page.count(f'href="{issues}"'), 4)
+                self.assertEqual(page.count(f'href="{issues}"'), 5)
                 self.assertIn('a{color:var(--info)}', page)
                 self.assertIn('a.tile{color:inherit;text-decoration:none;display:block}', page)
 

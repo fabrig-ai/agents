@@ -6,9 +6,12 @@ from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import channel, cli, code_report, landing_report, log, report, tier_reds
+from fab import channel, cli, code_report, findings, landing_report, log, report, tier_reds, triage, walks
 from fab.plan import Plan, Question
-from fab.tests.support import tmp_home
+from fab.sh import Result
+from fab.tests import qa_records as qa
+from fab.tests.ladder_plans import write_ladder
+from fab.tests.support import FakeRunner, tmp_home
 
 
 def ts(minute):
@@ -45,6 +48,13 @@ def parked(minute, subject="demo/core", call="root-1", **fields):
                  reason="Choose capacity", **fields)
 
 
+def finding_events(decision="user", question="Which account?", **fields):
+    return [qa.walk_started("walk-1", "b0", ts=ts(0)),
+            qa.finding_raised("finding-1", "walk-1", "b0", ts=ts(0), **fields),
+            qa.walk_ended("walk-1", "fail", ("finding-1",), ts=ts(1)),
+            qa.finding_triaged("finding-1", decision, question=question, ts=ts(2))]
+
+
 def plan(draft="demo", questions=()):
     return Plan(draft, "agents", (), 1.0, 2.0, {}, (), questions=questions)
 
@@ -66,6 +76,148 @@ class ChannelTest(unittest.TestCase):
     def rejection(self, minute=1, branch="hand/pushed", tip="tip", **fields):
         return event(minute, "queue.rejected", branch=branch, tip=tip, step="default",
                      log="/queue/check.log", gate="gate-host", queue_ts=ts(minute), **fields)
+
+    def test_finding_questions_show_context_and_answer_closes_each_decision(self):
+        reproduction = "\n".join(f"step {n}" for n in range(channel.QUESTION_LINES + 2))
+        subject = "ladder/triage/finding-1"
+        for decision in ("user", "brief", "path"):
+            with self.subTest(decision=decision):
+                events = finding_events(decision, title="Connect stalls", reproduction=reproduction)
+                ask, = channel.asks((), iter(events))
+                walk_report = self.fab_home / "walks/walk-1/report.md"
+                self.assertEqual(ask, channel.Ask("finding", "ladder", subject, "Which account?",
+                                                ts(2), call="triage-1", report=str(walk_report)))
+                page = channel.compose([], events, ts(3))
+                expected = (f"### {subject}, asked {ts(2)}\n\nConnect stalls\n\nRung: b0\n\n"
+                            + "\n".join(reproduction.splitlines()[:channel.QUESTION_LINES])
+                            + f"\n\nWhich account?\n\n- Read: `{walk_report}`\n"
+                            + f"- Answer: `fab page answer {subject} TEXT`")
+                self.assertIn(expected, page)
+                self.assertNotIn(f"step {channel.QUESTION_LINES}\n", page)
+                record = channel.answer(subject, "  Use the team account  ", events)
+                self.assertEqual((record["subject"], record["call"], record["question"], record["answer"]),
+                                 (subject, "triage-1", "Which account?", "Use the team account"))
+                self.assertEqual(channel.asks((), [*events, record]), [])
+                self.assertNotIn("Connect stalls", channel.compose([], [*events, record], ts(4)))
+                self.assertIn(f"answer {subject}\n", (self.fab_home / "tick.want").read_text())
+
+    def test_finding_asks_require_ended_walk_known_finding_and_question_decision(self):
+        for decision in ("drop", "backlog", "again"):
+            with self.subTest(decision=decision):
+                self.assertEqual(channel.asks((), finding_events(decision)), [])
+        for text in ("", " ", None, 4, []):
+            with self.subTest(text=text):
+                self.assertEqual(channel.asks((), finding_events("path", question=text)), [])
+        events = finding_events()
+        self.assertEqual(channel.asks((), [events[0], events[1], events[3]]), [])
+        self.assertEqual(channel.asks((), [dict(events[-1], finding="missing")]), [])
+        for key in ("finding", "question", "call", "ts"):
+            record = dict(events[-1])
+            del record[key]
+            self.assertEqual(channel.asks((), [*events[:-1], record]), [])
+
+    def test_finding_asks_keep_log_order_replace_and_reopen_after_answer(self):
+        events = finding_events()
+        subject = "ladder/triage/finding-1"
+        events += [question(3), qa.finding_triaged("finding-1", "brief", question="Change the brief?",
+                                                 call="triage-2", ts=ts(2))]
+        opened = channel.asks((), events)
+        self.assertEqual([ask.kind for ask in opened], ["call", "finding"])
+        self.assertEqual((opened[-1].call, opened[-1].text), ("triage-2", "Change the brief?"))
+        events.append(event(4, "call.answered", subject=subject))
+        self.assertEqual([ask.kind for ask in channel.asks((), events)], ["call"])
+        events.append(qa.finding_triaged("finding-1", "user", question="Now which?", ts=ts(4)))
+        self.assertEqual([ask.kind for ask in channel.asks((), events)], ["call", "finding"])
+
+    def test_compose_ladders_use_main_editions_and_show_backlog_count_after_landing(self):
+        directories = [write_ladder(self.home / name, draft=name) for name in ("ladder", "other")]
+        loaded = [channel.plan.load_plan(directory / "plan.toml") for directory in directories]
+        edition = walks.edition([("briefs/kit.md", "The committed brief.\n"),
+                                 ("briefs/b0.md", "The committed brief.\n")])
+        events = finding_events("backlog", question="", edition=edition)
+        events[0] = dict(events[0], edition=edition)
+        events += [event(3, "tiers.run", tip="main", verdict="green")]
+        sh = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.home)))
+        sh.on(["git", "show"], Result(0, "The committed brief.\n"))
+        read_editions = walks.editions
+        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+                          read_editions(plan, directory, sh=sh)):
+            page = channel.compose(directories, events, ts(4))
+        self.assertLess(page.index("## After landing"), page.index("## The ladder"))
+        for plan in loaded:
+            editions = {rung.id: walks.edition([(path, "The committed brief.\n")
+                                               for path in rung.brief])
+                        for rung in plan.rungs.values()}
+            expected = [f"- {findings.line(state)}"
+                        for state in findings.rungs(plan, events, editions, ts(4))]
+            count = 1 if plan.draft == "ladder" else 0
+            self.assertIn(f"### {plan.draft}\n\n" + "\n".join(expected)
+                          + f"\n- Backlog: {count} findings in `docs/design/debt/ladder.md`", page)
+        self.assertEqual(sh.argvs(), [command for name in ("ladder", "other") for command in [
+            ["git", "rev-parse", "--show-toplevel"],
+            ["git", "show", f"origin/main:{name}/briefs/kit.md"],
+            ["git", "show", f"origin/main:{name}/briefs/b0.md"],
+            ["git", "show", f"origin/main:{name}/briefs/kit.md"],
+            ["git", "show", f"origin/main:{name}/briefs/b1.md"]]])
+        self.assertIn("due: rerun", page)
+        self.assertNotIn("## Unread", page)
+
+    def test_compose_unreadable_editions_list_the_plan_and_keep_other_ladders(self):
+        directories = [write_ladder(self.home / name, draft=name)
+                       for name in ("outside", "missing-brief", "readable")]
+        sh = FakeRunner().on(["git", "rev-parse"], lambda call:
+                            Result(128, err="not a checkout") if call.cwd == str(directories[0])
+                            else Result(0, str(self.home)))
+        sh.on(["git", "show", "origin/main:missing-brief/briefs/kit.md"], Result(1))
+        sh.on(["git", "show"], Result(0, "brief\n"))
+        read_editions = walks.editions
+        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+                          read_editions(plan, directory, sh=sh)):
+            page = channel.compose(directories, [], ts(4))
+        self.assertLess(page.index("## The ladder"), page.index("## Unread"))
+        self.assertIn("### readable", page)
+        self.assertNotIn("### outside", page)
+        self.assertNotIn("### missing-brief", page)
+        self.assertIn(f"- {directories[0]}: git rev-parse --show-toplevel exited 128   not a checkout", page)
+        self.assertIn(f"- {directories[1]}: rung b0: cannot read brief briefs/kit.md at origin/main", page)
+
+    def test_backlog_signal_requires_two_current_render_rejections_and_clear_rewrites(self):
+        directory = write_ladder(self.home / "ladder")
+        _write(self.fab_home / channel.PLANS, str(directory) + "\n")
+        plan = channel.plan.load_plan(directory / "plan.toml")
+        events = finding_events("backlog", question="")
+        render = triage.render_key(triage.backlog_text(plan, events))
+        for n in (1, 2):
+            branch = f"ladder/ladder/backlog-{n}"
+            events += [event(3, "branch.ready", task=branch, branch=branch, tip=f"tip-{n}", render=render),
+                       event(n + 3, "branch.rejected", task=branch, branch=branch, tip=f"tip-{n}",
+                             step="gate", gate="gate-host", log=f"/queue/{n}.log")]
+        sh = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.home)))
+        sh.on(["git", "show"], Result(0, "brief\n"))
+        read_editions = walks.editions
+        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+                          read_editions(plan, directory, sh=sh)):
+            self.assertNotIn("### backlog:ladder,", channel.compose([directory], events[:-2], ts(6)))
+            page = channel.compose([directory], events, ts(6))
+            self.assertIn(f"### backlog:ladder, backlog rejected twice, since {ts(5)}", page)
+            self.assertIn("- Branch: `ladder/ladder/backlog-2`\n- Step: `gate`\n"
+                          "- Read: `gate-host:/queue/2.log`\n"
+                          "- Clear: `fab page clear backlog:ladder TEXT`", page)
+            changed = [*events, qa.finding_triaged("finding-1", "drop", ts=ts(6))]
+            self.assertNotIn("### backlog:ladder,", channel.compose([directory], changed, ts(6)))
+            landed = [*events, event(6, "branch.landed", task=branch, branch=branch,
+                                     tip="tip-2", main="main", into="")]
+            self.assertNotIn("### backlog:ladder,", channel.compose([directory], landed, ts(6)))
+            for record in events:
+                log.append(**record)
+            with redirect_stdout(io.StringIO()), patch("fab.log.now", return_value=ts(6)):
+                self.assertEqual(cli.main(["page", "clear", "backlog:ladder", "Retry", "--by", "free"]), 0)
+            self.assertEqual(log.read()[-1], event(6, "signal.cleared", signal="backlog:ladder",
+                                                   by="free", text="Retry"))
+            self.assertNotIn("### backlog:ladder,", (self.fab_home / channel.PAGE).read_text())
+            self.assertIn("clear backlog:ladder\n", (self.fab_home / "tick.want").read_text())
+            with self.assertRaisesRegex(ValueError, "no open signal"):
+                channel.clear("backlog:ladder", "Again", log.read())
 
     def test_queue_signal_facts_and_oldest_first_from_an_iterator(self):
         events = [dict(self.rejection(3, tests=["pkg::a", "pkg::b"]), ts=ts(8)),

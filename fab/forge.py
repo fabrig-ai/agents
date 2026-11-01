@@ -60,9 +60,9 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | list:
 
 
 def question(ask: channel.Ask) -> str:
-    """The asking report's excerpt, prefixed by the reason for a parked chain."""
+    """The report excerpt, prefixed by a parked reason or finding question (13.6)."""
     quoted = channel.excerpt(Path(ask.report)) if ask.report else "(report missing)"
-    return f"{ask.text}\n\n{quoted}" if ask.kind == "parked" else quoted
+    return f"{ask.text}\n\n{quoted}" if ask.kind in ("parked", "finding") else quoted
 
 
 def reply_brief(ask: channel.Ask, thread: Sequence[dict]) -> str:
@@ -112,11 +112,20 @@ def _needs_issue(ask: channel.Ask, events: Sequence[dict]) -> bool:
                    if entry.get("ev") == "issue.closed" and entry.get("number") == latest["number"]), None)
     if closed is None:
         return False
-    return any(index > closed and entry.get("subject") == ask.subject
-               and entry.get("call") == ask.call
-               and (entry.get("ev") == "call.parked" if ask.kind == "parked" else
-                    entry.get("ev") == "call.ended" and entry.get("outcome") == "question")
-               for index, entry in enumerate(events))
+    for index, entry in enumerate(events):
+        if index <= closed or entry.get("call") != ask.call:
+            continue
+        if ask.kind == "finding":
+            if (entry.get("ev") == "finding.triaged"
+                    and entry.get("finding") == ask.subject.rsplit("/", 1)[-1]
+                    and entry.get("decision") in ("user", "brief", "path")
+                    and entry.get("question") == ask.text):
+                return True
+        elif entry.get("subject") == ask.subject:
+            if (entry.get("ev") == "call.parked" if ask.kind == "parked" else
+                    entry.get("ev") == "call.ended" and entry.get("outcome") == "question"):
+                return True
+    return False
 
 
 def _comments(number: int, api: Callable) -> list[dict]:
@@ -195,7 +204,7 @@ def sync(repo: Path | None = None, *, api: Callable | None = None, sh: Runner = 
             return 0
         try:
             events = log.read(log_path)
-            # Both kinds of ask for one subject share one conversation, using the newest ask.
+            # Asks for one subject share one conversation, using the newest ask.
             asks = {ask.subject: ask for ask in channel.asks((), events)}
             for ask in asks.values():
                 if not _needs_issue(ask, events):
