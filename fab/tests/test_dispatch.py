@@ -3868,6 +3868,35 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.queue.assert_not_called()
 
 
+class AfterLandingImportTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.path = self.home / "events.jsonl"
+        self.hosts = {"b": Host("b", "fake@b", ("builder", "after-landing"))}
+        self.lines = [dict(ts="t1", ev="test", state="new", tip="x", profile="qa-jig", test="a"),
+                      dict(ts="t1", ev="test", state="new", tip="x", profile="qa-jig", test="b"),
+                      dict(ts="t1", ev="test", state="flake", tip="x", profile="qa-jig", test="c"),
+                      dict(ts="t2", ev="run", tip="x", verdict="red", new=2)]
+        self.fake = FakeRunner().on(["ssh"], lambda call: Result(0, "".join(
+            json.dumps(line) + "\n" for line in self.lines)))
+
+    def test_runs_and_new_reds_are_imported_once_from_the_newest(self):
+        dispatch._import_after_landing([], self.hosts, sh=self.fake, log_path=self.path)
+        dispatch._import_after_landing(log.read(self.path), self.hosts, sh=self.fake, log_path=self.path)
+        records = log.read(self.path)
+        self.assertEqual([(entry["ev"], entry.get("test")) for entry in records],
+                         [("tiers.red", "a"), ("tiers.red", "b"), ("tiers.run", None)])
+        self.assertIn("--since t2", self.fake.calls[-1].argv[-1])
+
+    def test_no_machine_with_the_role_reads_nothing_and_a_failed_read_is_a_note(self):
+        dispatch._import_after_landing([], {"c": Host("c", "fake@c", ("builder",))}, sh=self.fake,
+                                       log_path=self.path)
+        self.assertEqual(self.fake.calls, [])
+        failing = FakeRunner().on(["ssh"], Result(255, err="no route"))
+        dispatch._import_after_landing([], self.hosts, sh=failing, log_path=self.path)
+        self.assertEqual(log.read(self.path)[-1]["text"], "after-landing import failed: no route")
+
+
 class CatchUpTest(unittest.TestCase):
     def setUp(self):
         self.home = self.enterContext(tmp_home())

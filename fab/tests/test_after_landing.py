@@ -630,5 +630,19 @@ class InstallTest(unittest.TestCase):
         self.assertEqual(out.getvalue(), "done\n")
 
 
+
+class ImportedTest(unittest.TestCase):
+    def test_runs_and_new_reds_are_kept_everything_else_stays(self):
+        run = {"ts": "t", "ev": "run", "tip": "x", "verdict": "green", "new": 0, "pairs": ["p"], "freed": 3}
+        self.assertEqual(after_landing.imported(run), {"ev": "tiers.run", "tip": "x",
+                                                       "verdict": "green", "new": 0})
+        red = {"ev": "test", "state": "new", "tip": "x", "profile": "qa-jig", "test": "t1",
+               "binary": "b", "branches": ["d/a"], "log": "l", "rerun": "r"}
+        self.assertEqual(after_landing.imported(red)["ev"], "tiers.red")
+        self.assertNotIn("rerun", after_landing.imported(red))
+        for entry in ({**red, "state": "standing"}, {"ev": "error", "error": "boom"}):
+            self.assertIsNone(after_landing.imported(entry))
+
+
 if __name__ == "__main__":
     unittest.main()

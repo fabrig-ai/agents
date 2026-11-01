@@ -59,11 +59,11 @@
   by the tasks `report-base`, `report-code`, `report-landing` and
   `report-command`; `fab report` is not a command until the last lands. No
   timer runs `fab report daily` yet.
-- **After landing is live, its verdicts unread:** `fab-after-landing.service`
-  on hetzner10, slot 7, since 11-01. The old `tools/after-landing`
-  (hetzner7, slot 4) stopped with hetzner7, which no longer answers. Its
-  records stay on hetzner10 (`fab after-landing log`): nothing imports them
-  into the log or the user's page yet.
+- **After landing is live:** `fab-after-landing.service` on hetzner10,
+  slot 7, since 11-01; the tick imports its verdicts onto the user's page.
+  The old `tools/after-landing` (hetzner7, slot 4) stopped with hetzner7,
+  which no longer answers. A new red reaches no task yet: the page is where
+  it is heard.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
   `fab.calls.review_brief`, `last_review` and `landed_after` the review

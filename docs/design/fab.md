@@ -368,6 +368,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   last run, each test's last executed result) is
   `FAB_HOME/after-landing/state.json`, saved after the records; a run cut
   short is redone whole.
+- **The user hears the verdict:** each tick imports the after-landing
+  machine's `run` records and its new reds into the log, as `tiers.run` and
+  `tiers.red` (`al_ts` the record's time, read from the newest imported), and
+  the user's page shows the newest run's verdict, counts and faults and its
+  new reds with their suspects' branches, under `## After landing`.
 - **The slot stays bounded:** a run ends by sweeping the slot's target as the
   queue sweeps its own (section 7).
 - **Left out from the old tool:** posts to coordinators and its resolver,

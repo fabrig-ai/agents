@@ -177,8 +177,30 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+def landing_lines(events: Iterable[dict]) -> list[str]:
+    """The page's after-landing lines: for the newest tiers.run, `<verdict> at
+    \`<tip[:12]>\`, <its ts>: new N, standing N, unattributed N, flakes N`, then `; faults:
+    <faults joined by "; ">` when it has any; then one `new red: <profile> <test>, since
+    <branches joined by ", ", or "unknown branches">` per tiers.red at that tip. Empty
+    without a run. Pure."""
+    events = list(events)
+    last = next((event for event in reversed(events) if event.get("ev") == "tiers.run"), None)
+    if last is None:
+        return []
+    line = (f"{last.get('verdict', '?')} at `{str(last.get('tip', ''))[:12]}`, {last.get('ts', '')}: "
+            + ", ".join(f"{name} {last.get(key, 0)}" for name, key in (
+                ("new", "new"), ("standing", "standing"), ("unattributed", "unattributed"),
+                ("flakes", "flake"))))
+    if last.get("faults"):
+        line += "; faults: " + "; ".join(last["faults"])
+    reds = [f"new red: {event.get('profile')} {event.get('test')}, since "
+            + (", ".join(event.get("branches") or []) or "unknown branches")
+            for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")]
+    return [line, *reds]
+
+
 def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: str,
-           unread: Sequence[str] = ()) -> str:
+           unread: Sequence[str] = (), landing: Sequence[str] = ()) -> str:
     """The page as Markdown, ending with a newline, sections separated by one blank line.
 
     entries: each ask with its body, the text the page quotes for it (the caller reads it:
@@ -198,7 +220,9 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
        are no entries.
     3. `## Daily reports`, then per report `### <name>, <day>`, the line `\\`<path>\\``, and
        its signals lines (`- none` when it has none); `(none)` when there are no reports.
-    4. `## Unread`, one `- <line>` per unread entry; left out when unread is empty.
+    4. `## After landing`, one `- <line>` per landing line (landing_lines); left out when
+       landing is empty.
+    5. `## Unread`, one `- <line>` per unread entry; left out when unread is empty.
     Pure."""
     sections = ["# The user's page\n"
                 f"{now}. Only what is the user's: budgets, machines, what is hard to reverse.",
@@ -224,6 +248,8 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
                         "\n".join(signals or ["- none"]))
     if not reports:
         sections.append("(none)")
+    if landing:
+        sections.append("## After landing\n\n" + "\n".join(f"- {line}" for line in landing))
     if unread:
         sections.append("## Unread\n\n" + "\n".join(f"- {line}" for line in unread))
     return "\n\n".join(sections).rstrip("\n") + "\n"
@@ -238,7 +264,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     and events; each ask's body: plan, its text; call, excerpt(Path(report)); parked, its
     text, then a blank line and excerpt(Path(report)) when report is not "". The reports are
     latest_reports(fab.log.home() / "reports"). Return render(entries, reports, now,
-    unread)."""
+    unread, landing_lines(events))."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
@@ -254,7 +280,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
         if ask.kind == "parked" and ask.report:
             body += "\n\n" + excerpt(Path(ask.report))
         entries.append((ask, body))
-    return render(entries, latest_reports(log.home() / "reports"), now, unread)
+    return render(entries, latest_reports(log.home() / "reports"), now, unread, landing_lines(events))
 
 
 def write(text: str) -> Path:

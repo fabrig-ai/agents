@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -408,6 +408,33 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             imported.add(key)
 
 
+def _import_after_landing(events: list[dict], hosts: Mapping[str, Host], *, sh: Runner,
+                          log_path: Path | None) -> None:
+    """Import the after-landing machine's records (after_landing.imported) into the log once,
+    reading from the newest imported al_ts. No machine with the role imports nothing; a read
+    that fails is a note, and the next tick reads again."""
+    machine = next((hosts[name] for name in sorted(hosts) if after_landing.ROLE in hosts[name].roles), None)
+    if machine is None:
+        return
+    since = max((event["al_ts"] for event in events if "al_ts" in event), default="")
+    result = sh(ssh(machine.ssh, ["fab", "after-landing", "log", "--since", since]))
+    if not result.ok:
+        failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
+        log.append("note", path=log_path, text=f"after-landing import failed: {failure}")
+        return
+    seen = {(event["al_ts"], event.get("ev"), event.get("profile"), event.get("test"))
+            for event in events if "al_ts" in event}
+    for entry in log.records(result.out):
+        record = after_landing.imported(entry)
+        if record is None or "ts" not in entry:
+            continue
+        ev = record.pop("ev")
+        key = (entry["ts"], ev, record.get("profile"), record.get("test"))
+        if key not in seen:
+            events.append(log.append(ev, path=log_path, al_ts=entry["ts"], **record))
+            seen.add(key)
+
+
 def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None = None,
                   sh: Runner, log_path: Path | None) -> bool:
     """Merge a branch into the plan's trunk once; log conflicts and retry refused pushes."""
@@ -736,6 +763,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
     _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
+    _import_after_landing(log.read(log_path), hosts, sh=sh, log_path=log_path)
     calm = flow.measure(hosts, log.now(), sh=sh)
     for plan, tasks, directory, checkout in loaded:
         taken = _tick_plan(plan, tasks, directory, checkout, hosts, calm, sh=sh, log_path=log_path)

@@ -359,6 +359,20 @@ class AfterLanding:
                     sleep(idle)
 
 
+def imported(entry: dict) -> dict | None:
+    """The log record the dispatcher keeps for one of RECORD's entries, its ev included, or
+    None: a `run` becomes tiers.run (tip, verdict, the counts, branches, faults,
+    log), a `test` whose state is new becomes tiers.red (tip, profile, binary, test,
+    branches, log); anything else is left on the machine. Pure."""
+    if entry.get("ev") == "run":
+        fields = ("tip", "verdict", *CONFIRMED, "flake", "recovered", "branches", "faults", "log")
+        return {"ev": "tiers.run", **{key: entry[key] for key in fields if key in entry}}
+    if entry.get("ev") == "test" and entry.get("state") == "new":
+        fields = ("tip", "profile", "binary", "test", "branches", "log")
+        return {"ev": "tiers.red", **{key: entry[key] for key in fields if key in entry}}
+    return None
+
+
 def service(slot: int) -> units.Service:
     """UNIT, which runs `fab after-landing run --slot <slot>` and drains for up to DRAIN."""
     return units.Service(UNIT, "fabrig's slow tiers on each new main", ROLE,

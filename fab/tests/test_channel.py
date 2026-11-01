@@ -295,6 +295,22 @@ capacity
 - other: missing field
 """)
 
+    def test_landing_lines_show_the_newest_run_and_its_new_reds(self):
+        events = [dict(ev="tiers.run", ts="t1", tip="old", verdict="green"),
+                  dict(ev="tiers.red", tip="old", profile="qa-jig", test="gone"),
+                  dict(ev="tiers.red", tip="abcdef1234567890", profile="qa-jig", test="t1",
+                       branches=["d/a", "d/b"]),
+                  dict(ev="tiers.red", tip="abcdef1234567890", profile="qa-temper", test="t2"),
+                  dict(ev="tiers.run", ts="t2", tip="abcdef1234567890", verdict="red", new=2,
+                       standing=0, unattributed=1, flake=3, faults=["browser-jig: exit 75"])]
+        self.assertEqual(channel.landing_lines(events), [
+            "red at `abcdef123456`, t2: new 2, standing 0, unattributed 1, flakes 3; faults: browser-jig: exit 75",
+            "new red: qa-jig t1, since d/a, d/b",
+            "new red: qa-temper t2, since unknown branches"])
+        self.assertEqual(channel.landing_lines(events[1:4]), [])
+        page = channel.render([], [], ts(0), landing=["green at `x`, t: new 0"])
+        self.assertIn("\n\n## After landing\n\n- green at `x`, t: new 0\n", page)
+
     def test_render_empty_page_and_no_unread_section(self):
         self.assertEqual(channel.render([], [], ts(0)), f"""# The user's page
 {ts(0)}. Only what is the user's: budgets, machines, what is hard to reverse.
