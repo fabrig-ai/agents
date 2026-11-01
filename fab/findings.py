@@ -153,13 +153,7 @@ def findings(events: Iterable[dict]) -> dict[str, Finding]:
                 if (finding.walk not in finished
                         or event["subject"] != f"{finding.draft}/triage/{identifier}"):
                     continue
-                changes = {"answers": (*finding.answers, event["answer"]), "action": ""}
-                if finding.state == "asked":
-                    brief = asks.get(identifier) == "brief"
-                    changes.update(state="dropped" if brief else "new", question="")
-                    if brief:
-                        changes["reason"] = event["answer"]
-                found[identifier] = replace(finding, **changes)
+                found[identifier] = _answered(finding, event, asks.get(identifier, ""))
             continue
         if kind == "signal.cleared":
             identifier = event["signal"]
@@ -171,42 +165,64 @@ def findings(events: Iterable[dict]) -> dict[str, Finding]:
         finding = found.get(identifier)
         if finding is None or finding.walk not in finished:
             continue
-        if kind == "finding.triaged":
-            decision = event["decision"]
-            state = {"path": "foreman", "user": "asked", "brief": "asked",
-                     "backlog": "backlog", "drop": "dropped", "again": "new"}[decision]
-            found[identifier] = replace(
-                finding, state=state, owner=event["owner"], reason=event["reason"],
-                question=event["question"] if state == "asked" else "",
-                action=event["question"] if decision == "path" else "",
-                again=event["into"] if decision == "again" else finding.again)
-            asks[identifier] = decision
-            if decision == "again":
-                _again(found, event["into"])
-        elif kind == "finding.settled":
-            if finding.state == "decided" and foremen.get(identifier) == event["run"]:
-                left = event["verdict"] == "left"
-                found[identifier] = replace(finding, state="left" if left else "repairing",
-                                            reason=event["reason"], action="" if left else finding.action)
-        elif kind == "signal.cleared":
-            found[identifier] = replace(finding, state="dropped", reason=event["text"],
-                                        question="", action="")
-        else:
-            task = f"{finding.draft}/{identifier}"
-            if event["task"] == task + "/foreman":
-                if kind == "run.started" and event["kind"] == "foreman" and finding.state == "foreman":
-                    foremen[identifier] = event["run"]
-                    found[identifier] = replace(finding, state="deciding")
-                elif (kind == "run.ended" and finding.state == "deciding"
-                      and foremen.get(identifier) == event["run"]):
-                    found[identifier] = replace(finding, state="decided" if event["outcome"] == "done"
-                                                else "repairing")
-            elif event["task"] == task and finding.state == "repairing":
-                if kind == "branch.landed":
-                    found[identifier] = replace(finding, state="landed", landed=event["main"])
-                elif kind == "run.started":
-                    found[identifier] = replace(finding, state="repairing")
+        _transition(finding, event, found, asks, foremen)
     return {identifier: finding for identifier, finding in found.items() if finding.walk in finished}
+
+
+def _answered(finding: Finding, event: dict, decision: str) -> Finding:
+    """Keep an answer, release its action and resolve an asked finding (docs/design/fab.md, 13.15)."""
+    changes = {"answers": (*finding.answers, event["answer"]), "action": ""}
+    if finding.state == "asked":
+        brief = decision == "brief"
+        changes.update(state="dropped" if brief else "new", question="")
+        if brief:
+            changes["reason"] = event["answer"]
+    return replace(finding, **changes)
+
+
+def _transition(finding: Finding, event: dict, found: dict[str, Finding],
+                asks: dict[str, str], foremen: dict[str, str]) -> None:
+    """Apply one validated event to a visible finding (docs/design/fab.md, 13.15).
+
+    Update found in place, including recurrence targets; retain triage decisions
+    in asks for answers and foreman run ids in foremen for matching completions.
+    """
+    identifier, kind = finding.id, event["ev"]
+    if kind == "finding.triaged":
+        decision = event["decision"]
+        state = {"path": "foreman", "user": "asked", "brief": "asked",
+                 "backlog": "backlog", "drop": "dropped", "again": "new"}[decision]
+        found[identifier] = replace(
+            finding, state=state, owner=event["owner"], reason=event["reason"],
+            question=event["question"] if state == "asked" else "",
+            action=event["question"] if decision == "path" else "",
+            again=event["into"] if decision == "again" else finding.again)
+        asks[identifier] = decision
+        if decision == "again":
+            _again(found, event["into"])
+    elif kind == "finding.settled":
+        if finding.state == "decided" and foremen.get(identifier) == event["run"]:
+            left = event["verdict"] == "left"
+            found[identifier] = replace(finding, state="left" if left else "repairing",
+                                        reason=event["reason"], action="" if left else finding.action)
+    elif kind == "signal.cleared":
+        found[identifier] = replace(finding, state="dropped", reason=event["text"],
+                                    question="", action="")
+    else:
+        task = f"{finding.draft}/{identifier}"
+        if event["task"] == task + "/foreman":
+            if kind == "run.started" and event["kind"] == "foreman" and finding.state == "foreman":
+                foremen[identifier] = event["run"]
+                found[identifier] = replace(finding, state="deciding")
+            elif (kind == "run.ended" and finding.state == "deciding"
+                  and foremen.get(identifier) == event["run"]):
+                found[identifier] = replace(finding, state="decided" if event["outcome"] == "done"
+                                            else "repairing")
+        elif event["task"] == task and finding.state == "repairing":
+            if kind == "branch.landed":
+                found[identifier] = replace(finding, state="landed", landed=event["main"])
+            elif kind == "run.started":
+                found[identifier] = replace(finding, state="repairing")
 
 
 def _raised(event: dict, verdict: str) -> Finding:
