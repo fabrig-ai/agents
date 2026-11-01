@@ -55,6 +55,29 @@ class IntegrationTest(unittest.TestCase):
         self.assertNotIn("demo/red-1", repair.body)
         self.assertNotIn("## Not merged yet", repair.body)
 
+    def test_finding_tasks_do_not_hold_the_end_check(self):
+        with tmp_home():
+            finding = replace(TASK, id="demo/finding-1", kind="finding", part="qa", path="")
+            tasks = {TASK.id: TASK, finding.id: finding}
+            self.assertEqual(integration.next_step(PLAN, tasks, [merged()]),
+                             integration.Step("check", "tip", "tip"))
+            self.assertEqual(integration.next_step(PLAN, tasks, [merged(), *checked()]),
+                             integration.Step("ready", "tip", "tip"))
+
+    def test_mid_check_pending_work_excludes_finding_tasks(self):
+        with tmp_home():
+            finding = replace(TASK, id="demo/finding-1", kind="finding", part="qa", path="")
+            pending = replace(TASK, id="demo/b")
+            tasks = {TASK.id: TASK, finding.id: finding, pending.id: pending}
+            events = [dict(merged(), ts="2026-11-01T00:00:00Z")]
+            events += [dict(record, mid=True, ts="2026-11-01T00:01:00Z")
+                       for record in checked(outcome="failed")]
+            repair, = integration.repair_tasks(PLAN, events, {}, tasks).values()
+            self.assertIn("## Not merged yet", repair.body)
+            self.assertIn("- demo/b:", repair.body)
+            self.assertNotIn(finding.id, repair.body)
+            self.assertNotIn("- demo/a:", repair.body)
+
     def test_refusal_fix_appends_to_a_specless_integrations_repair(self):
         events = [merged(), *checked(outcome="failed"),
                   dict(ev="refusal.settled", task="demo/repair-1", verdict="fix", section="## Repair\n\nFix the test.\n")]

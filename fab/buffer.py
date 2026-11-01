@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Mapping
 
+from fab import fix
 from fab.plan import Plan, Task
 
 GROUPS = ("consolidation", "repair", "contract", "slice")  # the buffer's groups, first first
@@ -20,14 +21,14 @@ def group(plan: Plan, task: Task, refused: bool) -> str:
 
     - "consolidation": task.consolidation is true (a structure review wrote it, fab-gates.md 2),
       whatever else holds of it;
-    - "repair": kind red (an after-landing repair), or refused is true (its next run
-      is a repair or rebase run on a refusal);
+    - "repair": kind in fix.FIX_KINDS (red or finding; docs/design/fab-qa.md, 2), or
+      refused is true (its next run is a repair or rebase run on a refusal);
     - "contract": its part is in plan.parts with contract true;
     - "slice": anything else, a task whose part is not in plan.parts among them.
     """
     if task.consolidation:
         return "consolidation"
-    if task.kind == "red" or refused:
+    if task.kind in fix.FIX_KINDS or refused:
         return "repair"
     part = plan.parts.get(task.part)
     if part is not None and part.contract:

@@ -33,6 +33,16 @@ class GroupTest(BufferTestCase):
         self.assertEqual(buffer.group(the_plan, red, False), "repair")
         self.assertOrder(the_plan, tasks, ["merge", "red-1", "wire", "plain"])
 
+    def test_finding_tasks_sort_with_reds_ahead_of_contracts_and_slices(self):
+        the_plan = sliced(["plain", "wire"], contracts=["wire"])
+        finding = spec("finding-1", "qa", kind="finding")
+        tasks = specs(spec("plain", "plain"), spec("wire", "wire"),
+                      spec("red-1", "after-landing", kind="red"), finding,
+                      spec("red-2", "after-landing", kind="red"))
+        self.assertEqual(buffer.group(the_plan, finding, False), "repair")
+        self.assertOrder(the_plan, tasks, ["red-1", "finding-1", "red-2", "wire", "plain"],
+                         candidates=reversed(tasks))
+
     def test_first_matching_group_wins(self):
         the_plan = sliced(["plain", "wire"], contracts=["wire"])
         cases = ((spec("merge", "wire", consolidation=True), True, "consolidation"),

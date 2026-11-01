@@ -9,7 +9,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, codex, gate, log, precheck, state
+from fab import atomic, codex, fix, gate, log, precheck, state
 from fab.plan import Plan, Task
 from fab.sh import Failed, Runner, run
 
@@ -166,7 +166,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
                 landed = {event.get("task") for event in events if event.get("ev") == "branch.landed"
                           and event.get("ts", "") <= check.get("ts", "")}
                 pending = [task for name, task in plan_tasks.items()
-                           if name not in landed and task.kind not in ("repair", "red")]
+                           if name not in landed and task.kind not in ("repair", *fix.FIX_KINDS)]
                 if pending:
                     body += ("\n## Not merged yet\n\nThis was a check along the way: these tasks had not "
                              "merged. Leave a red that lies in what one of them owns, or that one of them "
@@ -213,7 +213,7 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
     ready plan can log a hand catch-up even if main has moved on. Pure."""
     if plan.landing != "integration":
         return None
-    tasks = {identifier: task for identifier, task in tasks.items() if task.kind != "red"}
+    tasks = {identifier: task for identifier, task in tasks.items() if task.kind not in fix.FIX_KINDS}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
     if any(event.get("ev") == "call.started" and event.get("role") == "cut"
            and event.get("subject") == f"{plan.draft}/cut" and event["call"] not in ended
