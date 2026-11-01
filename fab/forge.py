@@ -60,7 +60,7 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | list:
 
 
 def question(ask: channel.Ask) -> str:
-    """The report excerpt, prefixed by a parked reason or finding question (13.6)."""
+    """The report excerpt, prefixed by a parked reason or finding question (docs/design/channel.md, 3)."""
     if ask.kind == "parked" and not ask.report:
         return ask.text
     quoted = channel.excerpt(Path(ask.report)) if ask.report else "(report missing)"

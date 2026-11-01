@@ -1,4 +1,4 @@
-"""Events start the tick; the timer is only the backstop (docs/design/fab-tick.md, 6).
+"""Events start the tick; the timer is only the backstop (docs/design/tick.md, 6).
 
 Whatever ends work the dispatcher waits for wakes the tick: it appends a reason to the want
 file beside the log on the dispatcher's machine (hel8), over ssh from any other machine

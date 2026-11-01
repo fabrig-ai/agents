@@ -45,7 +45,7 @@ def commit_path(path: str, checkout: Path, edit: Callable[[str], str], *, branch
                 message: str, worktree: Path, sh: Runner = run, trunk: str = "main") -> str | None:
     """Commit and push an edited repository path, or return None when unchanged.
 
-    Use commit's worktree, command order and cleanup (docs/design/fab.md, 13.15).
+    Use commit's worktree, command order and cleanup (docs/design/qa.md, 2).
     Read a missing file as empty text and stage it with `git add -- <path>` before
     committing. Refuse absolute paths and paths outside checkout before commands.
     """

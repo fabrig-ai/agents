@@ -1,4 +1,4 @@
-"""The dispatcher: one idempotent tick keeps every plan's tasks moving (docs/design/fab.md, 6).
+"""The dispatcher: one idempotent tick keeps every plan's tasks moving (docs/design/tick.md, 1).
 
 `decide` is pure: from the plan, its tasks, the log and the machines it returns the actions
 to take now. `tick` gathers those inputs, carries the actions out through `fab.run`,
@@ -70,7 +70,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     LAND_AFTER delays fetch/push retries; LAND_TRIES parks them for the user.
     Queued questions use ANSWER_AT, ANSWER_AFTER or draft-local blocking; reviews use
     REVIEW_AT or REVIEW_AFTER since this draft's last review started. Retire follows
-    review once every part is done. Pure; docs/design/fab-gates.md, 2; fab-calls.md, 2; fab-tick.md, 5.
+    review once every part is done. Pure; docs/design/gates.md, 2; calls.md, 2; tick.md, 5.
     """
     ignored = {event["call"] for event in events if event.get("ev") == "call.started"
                and (event.get("role") == "reply"
@@ -241,7 +241,7 @@ def foreman_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Actio
 
 def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action]:
     """Return actions to start refusal foremen or act on verdicts, one per open refusal of
-    fab.repairs.refusals(tasks, events), in its order (docs/design/fab-calls.md, 2):
+    fab.repairs.refusals(tasks, events), in its order (docs/design/calls.md, 2):
     - foreman: Action("examine", task=<task>, branch=<refused branch>, detail="<step>
       <branch>");
     - decided: Action("remedy", task=<task>, run=<foreman run>, detail=<foreman run>);
@@ -382,7 +382,7 @@ def places(hosts: Mapping[str, Host], flight: Iterable[dict],
            calm: Mapping[str, bool] | None = None) -> dict[str, int]:
     """Free Codex places per builder: its `places` minus its runs in flight (never below 0).
 
-    `places` is a hint (docs/design/fab-tick.md, 4): a builder with none free that calm names
+    `places` is a hint (docs/design/tick.md, 4): a builder with none free that calm names
     True (fab.flow.measure) gets 1, while its runs in flight are fewer than its `slots` (any
     number when slots is 0). calm None is no builder calm."""
     occupied = Counter(event["host"] for event in flight)
@@ -400,7 +400,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     """The actions for now, in this order:
 
     0. flow: one Action("flow", task=plan.draft, detail="target <n>, <m> in flight"), n being
-       the sum of builders' places for integration plans (fab-integration.md 3), or fab.flow.target
+       the sum of builders' places for integration plans (integration.md 3), or fab.flow.target
        starting at those places for queue plans. m is the runs in flight of the draft's
        tasks (task starting with `<draft>/`). It is printed, never carried out.
     1. collect: only this draft's owned runs, including its calls' review runs.
@@ -485,7 +485,7 @@ def _failed_asks(views: Mapping[str, state.TaskView], events: list[dict]) -> lis
 def early_starts(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
                  events: list[dict], pushed: frozenset[str]) -> dict[str, tuple[tuple[str, str], ...]]:
     """The waiting tasks that may start early, each with (need, branch) for its needs not merged
-    (docs/design/fab-integration.md, 3). An integration plan with early: every need is landed, or is
+    (docs/design/integration.md, 3). An integration plan with early: every need is landed, or is
     running or done with its branch in pushed (origin's branches, read by the tick) and every
     need of its own landed (one level only). A task whose early start was refused
     (early.refused) waits as usual. Pure."""
@@ -596,7 +596,7 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
     Read from the oldest loaded draft cursor, or the newest queue_ts without loaded
     drafts. Log-known task branches and fab branch forms never become queue.* records.
     Only tasks' and owned fab branches' records advance a draft cursor. Skip torn lines;
-    deduplicate by queue timestamp, event kind, branch and tip (docs/design/fab-landing.md, 3).
+    deduplicate by queue timestamp, event kind, branch and tip (docs/design/landing.md, 3).
     """
     owners = {f"{draft}/integration": draft for draft in plan_drafts}
     owners.update({event["branch"]: draft for event in events
@@ -656,7 +656,7 @@ def _queue_record(entry: dict, tasks: Mapping[str, Task], owners: Mapping[str, s
     """Classify a queue outcome and build its fields, or return None when skipped.
 
     Owned collateral and unloaded fab branches are skipped; backlog landings keep
-    task equal to branch and into empty (docs/design/fab.md, 13.8 and 13.15).
+    task equal to branch and into empty (docs/design/landing.md, 3; qa.md, 2).
     Finding repairs land into main so their fold releases the rung (docs/design/qa.md, 2).
     """
     branch = entry.get("branch")
@@ -1170,7 +1170,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
 
 def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
          log_path: Path | None = None, trigger: str = "hand", only: bool = False) -> list[Action]:
-    """Run one round under the tick lock (docs/design/fab-tick.md, 6).
+    """Run one round under the tick lock (docs/design/tick.md, 6).
 
     Validate trigger before locking. Event ticks wait for the lock; hand and backstop
     ticks return [] when it is held, taking nothing. Under the lock:
@@ -1207,7 +1207,7 @@ def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
                     load_actions: Sequence[Action], hosts: Mapping[str, Host], *, sh: Runner,
                     log_path: Path | None, only: bool,
                     plan_drafts: Sequence[str]) -> tuple[list[dict], list[tier_reds.Red], bool]:
-    """Import queue and after-landing records, then reconcile reds (docs/design/fab-landing.md, 3).
+    """Import queue and after-landing records, then reconcile reds (docs/design/landing.md, 3).
 
     Return fresh events, folded reds and whether failed loads defer openings.
     Retired drafts in plan_drafts own queue records only. With only, open no reds.
@@ -1408,7 +1408,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
 
 
 def _backlog_branches(draft: str, events: list[dict]) -> set[str]:
-    """The draft's readied backlog branches (docs/design/fab.md, 13.15)."""
+    """The draft's readied backlog branches (docs/design/qa.md, 2)."""
     form = re.compile(rf"ladder/{re.escape(draft)}/backlog-[1-9][0-9]*")
     return {event["branch"] for event in events if event.get("ev") == "branch.ready"
             and isinstance(event.get("branch"), str) and form.fullmatch(event["branch"])}
@@ -1416,7 +1416,7 @@ def _backlog_branches(draft: str, events: list[dict]) -> set[str]:
 
 def _ready_backlog(plan: Plan, events: list[dict], checkout: Path, *, sh: Runner,
                    log_path: Path | None) -> None:
-    """Ready a changed backlog after decisions and passes (docs/design/fab.md, 13.15).
+    """Ready a changed backlog after decisions and passes (docs/design/qa.md, 2).
 
     Pending branches and two rejections of one render wait. Read main through git;
     missing paths start empty. Failures get a note and retry on a later round.
@@ -1452,7 +1452,7 @@ def _ready_backlog(plan: Plan, events: list[dict], checkout: Path, *, sh: Runner
 
 
 def _record_triage(plan: Plan, events: list[dict], *, log_path: Path | None) -> None:
-    """Read ended triage reports and log their decisions once (docs/design/fab-qa.md, 2).
+    """Read ended triage reports and log their decisions once (docs/design/qa.md, 2).
 
     Unreadable reports get a note without a call field so decisions retries the call.
     Print one line when the step logs decisions or notes.
@@ -1481,7 +1481,7 @@ def _record_triage(plan: Plan, events: list[dict], *, log_path: Path | None) -> 
 
 def _record_passes(plan: Plan, events: list[dict], directory: Path, *, sh: Runner,
                    log_path: Path | None) -> None:
-    """Read editions once and log rerun passes before decide (docs/design/fab-qa.md, 2).
+    """Read editions once and log rerun passes before decide (docs/design/qa.md, 2).
 
     A failed edition read notes the cause and leaves all passes for another round.
     Print one line when the step logs passes or a note.
@@ -2046,7 +2046,7 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
                 continue
         if view.status == "done" and plan.landing == "integration" and any(
                 views.get(need) is None or views[need].status != "landed" for need in tasks[identifier].needs):
-            # An early start merges only after what it built on has (fab-integration.md 3).
+            # An early start merges only after what it built on has (integration.md 3).
             continue
         if view.status == "done":
             amendment = call_review.task_rebase(tasks[identifier], events, trunk=integration.call_base(plan, events))

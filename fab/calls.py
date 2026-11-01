@@ -1,4 +1,4 @@
-"""Claude calls: fresh, short sessions on briefs compiled by code (docs/design/fab.md, 6).
+"""Claude calls: fresh, short sessions on briefs compiled by code (docs/design/calls.md, 1).
 
 A call never waits, polls or watches. Code compiles its brief from files; the call writes
 files on its chain's branch and ends with a report whose first line is its outcome, as a

@@ -70,10 +70,6 @@
   will be the first finding to reach a foreman and a repair.
 - **Walks run by fab: not built** (2's last part; 3): a session still walks
   by hand with `fab qa walk` and `fab qa result`.
-- **Stale citations:** `fab/spec_edit.py` (`commit_path`) and
-  `fab/dispatch.py` (`_queue_record`, `_backlog_branches`, `_ready_backlog`)
-  cite `docs/design/fab.md, 13.15`, the section before the split; it is
-  this design's 2.
 - **Departures,** each with its reason in 2:
   - from temper's `domain/findings.md`: the record lives in fab's log,
     not a labelled forge issue; no signature (QA findings have no test

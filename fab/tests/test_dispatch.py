@@ -6650,7 +6650,7 @@ class ReplayFindingsTest(unittest.TestCase):
 
 
 class EarlyStartTest(unittest.TestCase):
-    """Early starts (docs/design/fab-integration.md, 3): a task may start from the pushed work of a need
+    """Early starts (docs/design/integration.md, 3): a task may start from the pushed work of a need
     that is still running, one level deep, and merges only after its needs have."""
 
     PLAN = plan.Plan("draft", "fabrig", (), 1, 2, {}, (), landing="integration")

@@ -1,5 +1,5 @@
 #!/usr/bin/env -S python3 -I -B
-"""heavy: every build through admission (docs/design/fab.md, 7)."""
+"""heavy: every build through admission (docs/design/machines.md, 2)."""
 import os
 import sys
 
