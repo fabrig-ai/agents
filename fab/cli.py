@@ -17,6 +17,7 @@ COMMANDS = {
     "report": ("fab.report", "the standing reports of a plan and of the landing"),
     "serve": ("fab.serve", "the public status page, live from the log"),
     "status": ("fab.state", "a plan's tasks and their status"),
+    "plan": ("fab.inputs", "a plan's inputs: commit them on its trunk or land them"),
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
     "check": ("fab.integration", "check an integration trunk as a user unit"),
