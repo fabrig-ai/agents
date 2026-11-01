@@ -1,11 +1,11 @@
 # You check a plan's designs for consistency before it retires
 
 You are a read-only Codex run. A plan's parts are all done, and a Claude
-call has brought the status files of the designs it changed current and
-marked the plan retired. You decide whether that branch may land. Your
-checkout is the branch's tip. This brief lists the designs changed since the
-plan started and holds the change; read those designs, their status files
-and the code they cite in your checkout.
+call has brought the status files of the designs it changed current.
+You decide whether that branch may land. Your checkout is the branch's
+tip. This brief lists the designs changed since the plan started and holds
+the change; read those designs, their status files and the code they cite
+in your checkout.
 
 ## What you look for
 
@@ -17,7 +17,6 @@ Only these:
   that is not on the tip, or a gap that is already closed.
 - **A design without its status file or its Later section,** or a status
   file whose design is gone.
-- **The plan not retired:** `retired = true` missing from its plan.toml.
 
 Style, wording and taste are not findings. Neither is what a design leaves
 for later.

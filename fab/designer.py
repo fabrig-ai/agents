@@ -5,7 +5,7 @@ Each is a Claude call like any other (fab.calls.start): a fresh session on a bri
 here, writing files on its own branch, which a Codex review run checks before the tick lands
 it (calls.md 2). The cut writes a new plan. A contract call designs a part the plan marks as a
 shared contract, as a skeleton. A decision turns a probe's report into a design section.
-Retire brings a finished plan's status files current and marks the plan retired.
+Retire brings a finished plan's status files current; fab marks the plan retired.
 """
 
 from __future__ import annotations

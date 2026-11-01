@@ -3325,6 +3325,30 @@ class MultiPlanTickTest(unittest.TestCase):
         self.lands.assert_not_called()
         self.assertFalse(any("receipt" in argv[-1] for argv in self.fake.argvs() if argv[0] == "ssh"))
 
+    def test_fabrig_queue_readies_moved_tip_without_later_call_end(self):
+        rust = self.fabrig_plan()
+        self.append(*chain_history("approved"))
+        self.tick(rust)
+        self.tip = "moved-tip"
+        self.tick(rust)
+        self.tick(rust)
+        ready = [entry for entry in log.read() if entry["ev"] == "branch.ready"]
+        self.assertEqual([entry["tip"] for entry in ready], ["first-tip", "moved-tip"])
+        self.assertEqual(self.fake.argvs().count(
+            ["git", "push", "origin", "moved-tip:refs/heads/ready/calls/root"]), 1)
+        self.lands.assert_not_called()
+
+    def test_fabrig_queue_readies_same_tip_after_later_call_end(self):
+        rust = self.fabrig_plan()
+        self.append(*chain_history("approved"))
+        self.tick(rust)
+        self.append(call_ended("root"))
+        self.tick(rust)
+        self.tick(rust)
+        ready = [entry for entry in log.read() if entry["ev"] == "branch.ready"]
+        self.assertEqual([entry["tip"] for entry in ready], ["first-tip", "first-tip"])
+        self.lands.assert_not_called()
+
     def test_fabrig_answer_call_keeps_questions_parked_until_landing(self):
         rust = self.fabrig_plan(tasks=("a",))
         self.append(*question_history(status="parked"), *chain_history("approved", role="answer", subject="draft"))
@@ -5013,6 +5037,167 @@ class IntegrationMergeTest(unittest.TestCase):
         self.queue.assert_not_called()
 
 
+class RetireFinishTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.checkout = self.home / "checkout"
+        self.directory = write_plan(self.checkout / "docs/plan/draft", "draft")
+        self.plan, self.tasks = plan.load(self.directory)
+        self.path = self.home / "events.jsonl"
+        self.action = Action("finish", task="root", run="root", run_kind="retire", branch="calls/root")
+        self.relative = "docs/plan/draft/plan.toml"
+        self.worktree = log.home() / "retire/root"
+        self.branch_text = 'draft = "draft"\nretired = false # pending\n[[part]]\nid = "core"\n'
+        self.tip = "before-retire"
+        self.fake = FakeRunner()
+        self.fake.on(["git", "rev-parse", "--verify"], lambda call: Result(0, self.tip))
+        self.fake.on(["git", "show"], lambda call: Result(0, self.branch_text))
+        self.fake.on(["git", "worktree", "add"], self.populate)
+        self.fake.on(["git", "push", "-q", "--force"], self.pushed)
+        self.land = self.enterContext(patch.object(dispatch, "_land_branch", side_effect=lambda argv:
+                                                  self.fake(["land", *argv], check=True)))
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.append(*chain_history("approved", role="retire", subject="draft/retire"))
+
+    def append(self, *events):
+        for entry in events:
+            log.append(path=self.path, **entry)
+
+    def populate(self, call):
+        write(self.worktree / self.relative, self.branch_text)
+        return Result(0)
+
+    def pushed(self, call):
+        self.branch_text = (self.worktree / self.relative).read_text()
+        self.tip = "retired-tip"
+        return Result(0)
+
+    def take(self):
+        dispatch._take(self.action, self.tasks, {}, self.directory, plan=self.plan,
+                       checkout=self.checkout, sh=self.fake, log_path=self.path)
+
+    def test_retire_edit_replaces_or_inserts_top_level_flag(self):
+        cases = [
+            ('draft = "draft"\nretired = false # pending\n[options]\nretired = false\n',
+             'draft = "draft"\nretired = true # pending\n[options]\nretired = false\n'),
+            ('draft = "draft"\n  [[part]]\nid = "core"\n',
+             'draft = "draft"\nretired = true\n  [[part]]\nid = "core"\n'),
+            ('draft = "draft"', 'draft = "draft"\nretired = true\n'),
+            ('retired=true # set\n', 'retired=true # set\n'),
+            ('[options]\nretired = false\n', 'retired = true\n[options]\nretired = false\n'),
+        ]
+        for before, after in cases:
+            with self.subTest(before=before):
+                self.assertEqual(dispatch._retire_plan(before), after)
+        with self.assertRaisesRegex(ValueError, "missing plan.toml"):
+            dispatch._retire_plan("")
+        with self.assertRaises(ValueError):
+            dispatch._retire_plan("invalid TOML")
+
+    def test_retire_commits_branch_plan_before_agents_delivery(self):
+        write(self.directory / "plan.toml", 'retired = true\n')
+        self.take()
+        expected = 'draft = "draft"\nretired = true # pending\n[[part]]\nid = "core"\n'
+        self.assertEqual(self.branch_text, expected)
+        self.assertEqual((self.worktree / self.relative).read_text(), expected)
+        self.assertEqual((self.directory / "plan.toml").read_text(), 'retired = true\n')
+        commit = [*dispatch.FAB_GIT, "commit", "-q", "-m", "draft: retired", "--", self.relative]
+        push = ["git", "push", "-q", "--force", "origin", "HEAD:refs/heads/calls/root"]
+        self.assertEqual(self.fake.argvs(), [
+            ["git", "fetch", "origin"],
+            ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"],
+            ["git", "show", f"origin/calls/root:{self.relative}"],
+            ["git", "fetch", "origin"],
+            ["git", "worktree", "add", "-B", "calls/root", str(self.worktree), "origin/calls/root"],
+            commit, push,
+            ["git", "worktree", "remove", "--force", str(self.worktree)],
+            ["git", "branch", "-D", "calls/root"],
+            ["land", "calls/root"]])
+        self.assertEqual([call.cwd for call in self.fake.calls if call.argv in (commit, push)],
+                         [str(self.worktree)] * 2)
+        finished = log.read(self.path)[-1]
+        self.assertEqual((finished["ev"], finished["role"], finished["outcome"]),
+                         ("call.finished", "retire", "done"))
+        self.assertEqual(log.read(), [])
+
+    def test_retire_guards_skip_commit_and_keep_delivery(self):
+        for guard in ("retired", "landed", "gone", "other-role"):
+            with self.subTest(guard=guard):
+                self.path = self.home / f"{guard}.jsonl"
+                self.append(*chain_history("approved", role="retire", subject="draft/retire"))
+                if guard == "landed":
+                    self.append(dict(ev="branch.landed", branch="calls/root"))
+                self.branch_text = "retired=true # already set\n"
+                self.action = replace(self.action, run_kind="cut" if guard == "other-role" else "retire")
+                self.fake.calls.clear()
+                self.fake.rules.insert(0, (["git", "rev-parse", "--verify"],
+                                          Result(128 if guard == "gone" else 0, self.tip)))
+                self.take()
+                self.fake.rules.pop(0)
+                self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+                self.assertFalse(any("commit" in argv for argv in self.fake.argvs()))
+                self.assertFalse(any("worktree" in argv for argv in self.fake.argvs()))
+                self.assertEqual(self.fake.argvs()[-1], ["land", "calls/root"])
+                if guard in ("landed", "other-role"):
+                    self.assertEqual(self.fake.argvs(), [["land", "calls/root"]])
+                if guard == "gone":
+                    self.assertFalse(any("show" in argv for argv in self.fake.argvs()))
+
+    def test_retire_commit_or_push_failure_leaves_finish_open_and_retries(self):
+        for failing in ([*dispatch.FAB_GIT, "commit"], ["git", "push", "-q", "--force"]):
+            with self.subTest(failing=failing):
+                self.path = self.home / ("commit.jsonl" if "commit" in failing else "push.jsonl")
+                self.append(*chain_history("approved", role="retire", subject="draft/retire"))
+                self.branch_text = 'draft = "draft"\nretired = false\n'
+                self.fake.calls.clear()
+                self.land.reset_mock()
+                self.fake.rules.insert(0, (failing, Result(1, err="refused")))
+                self.take()
+                self.land.assert_not_called()
+                records = log.read(self.path)
+                self.assertEqual(records[-1]["ev"], "note")
+                self.assertIn("finish root failed:", records[-1]["text"])
+                self.assertIn("refused", records[-1]["text"])
+                self.assertFalse(any(entry["ev"] == "call.finished" for entry in records))
+                self.assertEqual(call_review.chains(records)["root"].state, "approved")
+                self.assertIn(["git", "worktree", "remove", "--force", str(self.worktree)], self.fake.argvs())
+                self.fake.rules.pop(0)
+                self.take()
+                self.land.assert_called_once_with(["calls/root"])
+                self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+
+    def test_retire_missing_plan_in_worktree_leaves_finish_open(self):
+        self.fake.rules.insert(0, (["git", "worktree", "add"], Result(0)))
+        self.take()
+        self.land.assert_not_called()
+        self.assertEqual(log.read(self.path)[-1]["text"], "finish root failed: missing plan.toml")
+        self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
+        self.assertFalse(any("commit" in argv for argv in self.fake.argvs()))
+
+    def test_retire_fabrig_readies_committed_tip_once(self):
+        self.plan = replace(self.plan, repo="fabrig")
+        self.take()
+        self.take()
+        ready = [entry for entry in log.read(self.path) if entry["ev"] == "branch.ready"]
+        self.assertEqual([entry["tip"] for entry in ready], ["retired-tip"])
+        self.assertEqual(self.fake.argvs().count(
+            ["git", "push", "origin", "retired-tip:refs/heads/ready/calls/root"]), 1)
+        self.assertEqual(sum("commit" in argv for argv in self.fake.argvs()), 1)
+        self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
+        self.land.assert_not_called()
+
+    def test_retire_integration_merges_after_committing(self):
+        self.plan = replace(self.plan, landing="integration")
+        with patch.object(dispatch, "_merge_branch", side_effect=lambda *args, **kwargs:
+                          self.fake(["merge", self.tip], check=True).ok) as merge:
+            self.take()
+        merge.assert_called_once_with("calls/root", self.plan, self.checkout,
+                                      sh=self.fake, log_path=self.path)
+        self.assertEqual(self.fake.argvs()[-1], ["merge", "retired-tip"])
+        self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+        self.land.assert_not_called()
+
+
 class IntegrationDeliveryTest(unittest.TestCase):
     def setUp(self):
         self.home = self.enterContext(tmp_home())
@@ -5023,6 +5208,7 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home)))
         self.fake.on(["git", "rev-parse", "--verify"], Result(0, "branch-tip"))
         self.fake.on(["git", "rev-parse", "HEAD"], Result(0, "merged-tip"))
+        self.fake.on(["git", "show"], Result(0, "retired = true\n"))
         self.out = io.StringIO()
         self.enterContext(redirect_stdout(self.out))
         self.land = self.enterContext(patch.object(dispatch.land, "main", side_effect=AssertionError("unexpected land")))
@@ -5067,8 +5253,11 @@ class IntegrationDeliveryTest(unittest.TestCase):
                     self.assertEqual((ready["task"], ready["branch"], ready["tip"]),
                                      ("calls/root", "calls/root", "branch-tip"))
                     push = ["git", "push", "origin", "branch-tip:refs/heads/ready/calls/root"]
-                    self.assertEqual(self.fake.argvs(), [
-                        ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"], push])
+                    verify = ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"]
+                    preflight = ([["git", "fetch", "origin"], verify,
+                                   ["git", "show", "origin/calls/root:plan/plan.toml"]]
+                                 if role == "retire" else [])
+                    self.assertEqual(self.fake.argvs(), preflight + [verify, push] + preflight + [verify])
                     self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
                     self.append(dict(ev="branch.landed", task="calls/root", branch="calls/root", queue_ts="002"))
                     self.take(action)

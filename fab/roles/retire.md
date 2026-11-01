@@ -16,8 +16,8 @@ need more than the brief gives.
   is on main (the inventory, and the code itself where a line is in doubt).
   Remove what the plan finished; keep what it did not, saying why.
 - **Each design's Later section** holding what the plan left for later.
-- **`retired = true`** in the plan's `plan.toml`, after which nothing more
-  runs for it.
+
+Fab sets `retired = true` when the call ends done. Do not touch `plan.toml`.
 
 A design you find contradicting another, or the code, you correct where the
 code and the drafts agree, and say so in your report. After you, a read-only

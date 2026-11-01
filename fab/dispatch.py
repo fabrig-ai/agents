@@ -14,6 +14,7 @@ import json
 import re
 import sys
 import tempfile
+import tomllib
 from collections import Counter
 from collections.abc import Sequence, Iterable, Mapping
 from contextlib import redirect_stdout
@@ -800,6 +801,48 @@ def _untry(branch: str, hosts: Mapping[str, Host], *, sh: Runner) -> None:
     sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "untry", branch]), check=True)
 
 
+def _retire_plan(text: str) -> str:
+    """Set the plan's top-level retired flag, preserving its tables and other text."""
+    if not text:
+        raise ValueError("missing plan.toml")
+    if tomllib.loads(text).get("retired") is True:
+        return text
+    lines = text.splitlines(keepends=True)
+    table = next((index for index, line in enumerate(lines) if line.lstrip().startswith("[")),
+                 len(lines))
+    header = "".join(lines[:table])
+    edited, count = re.subn(r"(?m)^([ \t]*retired[ \t]*=[ \t]*)false(?=[ \t]*(?:#|$))",
+                          r"\g<1>true", header)
+    if not count:
+        edited = header + ("\n" if header and not header.endswith("\n") else "")
+        edited += "retired = true\n"
+    return edited + "".join(lines[table:])
+
+
+def _pre_deliver(action: Action, plan: Plan, plan_dir: Path, checkout: Path, *,
+                 sh: Runner, log_path: Path | None) -> None:
+    """Commit a done retire chain's plan flag before delivery, unless already retired,
+    landed or absent from origin. Failures leave the finish open for a later tick.
+    """
+    if action.run_kind != "retire":
+        return
+    if any(event.get("ev") == "branch.landed" and event.get("branch") == action.branch
+           for event in log.read(log_path)):
+        return
+    sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
+    if not sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{action.branch}^{{commit}}"],
+              cwd=str(checkout), check=False).ok:
+        return
+    path = (plan_dir.resolve().relative_to(checkout.resolve()) / "plan.toml").as_posix()
+    text = sh(["git", "show", f"origin/{action.branch}:{path}"],
+              cwd=str(checkout), check=True).out
+    if tomllib.loads(text).get("retired") is True:
+        return
+    spec_edit.commit_path(path, checkout, _retire_plan, branch=action.branch,
+                          trunk=action.branch, worktree=log.home() / "retire" / action.task,
+                          message=f"{plan.draft}: retired", sh=sh)
+
+
 def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
              log_path: Path | None, section: str = "") -> bool:
     """Deliver to the trunk until it lands, then to main, retaining queued repair text."""
@@ -813,7 +856,7 @@ def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
 
 def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | None,
                   section: str = "", **fields) -> bool:
-    """Ready a fab branch with fields; return True only after its queue landing imports."""
+    """Ready a changed tip or ended call; return True after its queue landing imports."""
     events = log.read(log_path)
     if any(event.get("ev") == "branch.landed" and event.get("branch") == branch
            and "queue_ts" in event for event in events):
@@ -826,12 +869,12 @@ def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | N
     changed = max((index for index, event in enumerate(events)
                    if event.get("ev") == "call.ended" and event.get("call") in calls_on_branch),
                   default=-1)
-    if ready > changed:
-        return False
     tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
              cwd=str(checkout), check=True).out.strip()
     if not tip:
         raise ValueError("branch has no tip")
+    if ready > changed and events[ready].get("tip") == tip:
+        return False
     sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{branch}"],
        cwd=str(checkout), check=True)
     if section:
@@ -975,11 +1018,11 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
     """Take task, question, refusal or call-chain actions, logging failures as notes.
 
     Foremen print their asking run or refused step and builder; remedies print verdict and
-    reason. Failed settlements and integration deliveries remain open for the next tick.
+    reason. Failed pre-delivery edits, settlements and integration deliveries retry.
     """
     detail = action.detail
     outcome = "failed"
-    finish_events = []
+    finish_events = None
     try:
         match action.kind:
             case "collect":
@@ -1010,6 +1053,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "hold":
                 _hold(action, log_path=log_path)
             case "finish":
+                _pre_deliver(action, plan, plan_dir, checkout, sh=sh, log_path=log_path)
                 finish_events = log.read(log_path)
                 if _deliver(action.branch, plan, checkout, sh=sh, log_path=log_path):
                     _finish(action, log_path=log_path)
@@ -1021,7 +1065,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
         log.append("note", path=log_path,
                    text=f"{action.kind} {action.task or '-'} {detail}")
     finally:
-        if action.kind == "finish":
+        if finish_events is not None:
             _record_finish(action, plan, checkout, finish_events, outcome=outcome,
                            sh=sh, log_path=log_path)
     print(f"{action.kind} {action.task or '-'} {detail}")
