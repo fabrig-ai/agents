@@ -1251,8 +1251,13 @@ login that still works reused across them before more are signed in.
   id. Builders reach the shelf by ssh to hel8 (the user, 11-01: custody
   stays central). `fab after-landing run --live` adds the live pairs of
   `fab.after_landing.LIVE`: `live-temper` (`TEMPER_LIVE_ACCOUNT`, a
-  `chatgpt` record; `TEMPER_LIVE_CLAUDE`, a `claude-box`) and `live-smith`
-  (`SMITH_LIVE_CLAUDE`). Each pair borrows its logins, lent to the builder
+  `chatgpt` record; `TEMPER_LIVE_CLAUDE`, a `claude-box`). `live-smith` is
+  out (11-01: all 17 of its tests red at once on hetzner8): besides
+  `SMITH_LIVE_CLAUDE` its tests need `SMITH_LIVE`, a whole live root
+  (`config/smith/config.toml`, `host-id`, `tokens/chatgpt`, a ChatGPT
+  record of smith's own made by `smith login chatgpt`, and
+  `programs/claude`), which no kind holds yet; it comes back as a
+  directory kind once the user signs one in. Each pair borrows its logins, lent to the builder
   under its run directory for holder `after-landing/<tip>/<pair>`, runs
   with the variables naming them, and returns them when it ends; a pair
   short of a login faults, and a login that cannot be returned stays lent

@@ -544,15 +544,14 @@ class AfterLandingTest(unittest.TestCase):
     def test_live_pairs_borrow_their_logins_from_the_dispatcher_and_return_them(self):
         runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": ["claude-box-1", "claude-box-2"],
                                    "codex": ["codex-7"], "claude": ["claude-9"]})
-        self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-smith", "live-skein"))
+        self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-skein"))
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "green")
         directory = Path(record["log"])
-        temper, smith, skein = self.envs[2], self.envs[3], self.envs[4]
+        temper, skein = self.envs[2], self.envs[3]
         self.assertEqual(self.envs[:2], [{}, {}])
         self.assertEqual(temper, {"TEMPER_LIVE_ACCOUNT": str(directory / "logins/TEMPER_LIVE_ACCOUNT/login"),
                                   "TEMPER_LIVE_CLAUDE": str(directory / "logins/TEMPER_LIVE_CLAUDE")})
-        self.assertEqual(smith, {"SMITH_LIVE_CLAUDE": str(directory / "logins/SMITH_LIVE_CLAUDE")})
         openai, anthropic = directory / "logins/SKEIN_TEST_LIVE_OPENAI_AUTH", \
             directory / "logins/SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS"
         self.assertEqual(skein, {"SKEIN_TEST_LIVE_OPENAI_AUTH": str(openai / "auth.json"),
@@ -566,9 +565,6 @@ class AfterLandingTest(unittest.TestCase):
             ["borrow", "chatgpt", "b1", "--path", temper["TEMPER_LIVE_ACCOUNT"], "--holder", holder],
             ["borrow", "claude-box", "b1", "--path", temper["TEMPER_LIVE_CLAUDE"], "--holder", holder],
             ["return", "chatgpt-1"], ["return", "claude-box-1"],
-            ["borrow", "claude-box", "b1", "--path", smith["SMITH_LIVE_CLAUDE"], "--holder",
-             f"after-landing/{self.tip[:12]}/live-smith"],
-            ["return", "claude-box-2"],
             ["borrow", "codex", "b1", "--path", skein["SKEIN_TEST_LIVE_OPENAI_AUTH"], "--holder",
              f"after-landing/{self.tip[:12]}/live-skein"],
             ["borrow", "claude", "b1", "--path", skein["SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS"], "--holder",
@@ -589,7 +585,6 @@ class AfterLandingTest(unittest.TestCase):
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "partial")
         self.assertEqual(record["faults"], ["live-temper: logins: fab logins: no free claude-box login",
-                                            "live-smith: logins: fab logins: no free claude-box login",
                                             "live-skein: logins: fab logins: no free codex login"])
         self.assertEqual([profile for profile, _, _ in self.invocations], ["qa-skein", "qa-jig"])
         self.assertIn(["return", "chatgpt-1"], self.calls)

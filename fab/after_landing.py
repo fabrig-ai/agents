@@ -30,10 +30,11 @@ TIER_SET = ("exhaustive-skein", "qa-skein", "qa-smith", "qa-jig", "process-jig",
             "browser-skein", "browser-jig", "browser-temper", "qa-temper")
 # The live pairs `--live` adds: each variable its tests read, and the kind of login fab lends
 # for it, borrowed from the shelf on the dispatcher for the pair and returned after it
-# (docs/design/fab.md, 13.13).
+# (docs/design/fab.md, 13.13). Not live-smith: its tests need `SMITH_LIVE`, a whole live root
+# (smith's configuration, host id, a ChatGPT record of smith's own signed in by `smith login
+# chatgpt`, and programs/claude), which no shelf kind holds yet (11-01, red on hetzner8).
 LIVE = {
     "live-temper": (("TEMPER_LIVE_ACCOUNT", "chatgpt"), ("TEMPER_LIVE_CLAUDE", "claude-box")),
-    "live-smith": (("SMITH_LIVE_CLAUDE", "claude-box"),),
     "live-skein": (("SKEIN_TEST_LIVE_OPENAI_AUTH", "codex"), ("SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS", "claude")),
 }
 # The cheapest models, for live pairs whose tests take theirs from the environment (the
