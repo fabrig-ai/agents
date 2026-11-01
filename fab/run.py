@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import replace
 from datetime import datetime
@@ -183,13 +184,14 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     """Start a run of task on host and log run.started; return the run id.
 
     early names (need, branch) for each need not merged yet whose pushed work the run starts
-    from (an early start, docs/design/fab-integration.md, 3): each origin/<branch> is merged into the
+    from (docs/design/fab-integration.md, 3): each origin/<branch> is merged into the
     run's checkout after it is set up, in order, and the brief says so; a merge that conflicts
     aborts the start with a ValueError beginning `early:`. run.started carries early (the needs).
 
     With checkout, an absolute task.path inside it is repository-relative in the brief;
     paths outside it, paths already relative and checkout=None keep their given spelling.
-
+    First move the builder install forward to this package's HEAD; a sync failure only notes
+    stderr. Dispatcher hosts are skipped (docs/design/fab-tick.md, 3).
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
     (implement, review, rebase: the branch made afresh from origin/<trunk>, an earlier run's local branch reset; repair: the existing
@@ -200,7 +202,6 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     run, task, kind, host, dir (the worktree), branch, base ("origin/<trunk>", or the checked
     skeleton tip), codex (the id), state (codex-run's state directory) and report (the builder's
     report path).
-
     A task of a repository in SLOTTED builds in a slot instead of a worktree: claim the first
     idle slot (`fab slot list`, then `fab slot claim N RUN TASK`; none idle is a ValueError
     naming the host), then in `~/src/fabrig/slots/<n>` fetch origin and switch to the branch
@@ -233,12 +234,12 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     source = call_review.task_source(task, events)
     if source is not None and kind != "rebase":
         base = source[0]["tip"]
+    _sync_install(host, sh=sh)
     rejection = _rejection(rejection, sh=sh)
     text = brief(task, role_text(task.repo, trunk), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection, trunk=trunk)
     if early:
         text += early_section(early)
-
     def remote(argv, *, input=None):
         return sh(ssh(host.ssh, argv), input=input, check=True)
 
@@ -255,6 +256,31 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
         # A start that fails part way gives back what it took, so the next start finds it free.
         _undo_start(task, remote, run_id=run_id, branch=branch, repo=repo, worktree=worktree)
         raise
+
+
+def _sync_install(host: Host, *, sh: Runner) -> None:
+    """Advance only an ancestor builder install; any failure leaves the start free to proceed."""
+    if "dispatcher" in host.roles:
+        return
+    try:
+        package = Path(__file__).resolve().parent.parent
+        tip = sh(["git", "-C", str(package), "rev-parse", "HEAD"], check=True).out.strip()
+        if len(tip) not in (40, 64) or any(char not in "0123456789abcdef" for char in tip):
+            raise ValueError("package HEAD is not a commit hash")
+        root = Path(remote_home(host))
+        git = shlex.join(["git", "-C", str(root / "install")])
+        script = (f'{git} fetch origin && head=$({git} rev-parse HEAD) && '
+                  f'if test "$head" = {tip}; then :; else '
+                  f'{git} merge-base --is-ancestor "$head" {tip}; ancestry=$?; '
+                  f'if test "$ancestry" = 0; then {git} checkout -q --detach {tip}; '
+                  'elif test "$ancestry" != 1; then exit "$ancestry"; fi; fi')
+        sh(ssh(host.ssh, ["flock", "-w", "60", str(root / "install.lock"),
+                          "bash", "-c", script]), check=True, timeout=120)
+    except (OSError, Failed, ValueError) as error:
+        detail = (error.result.err or error.result.out or f"exit {error.result.code}"
+                  if isinstance(error, Failed) else str(error))
+        print(f"fab run: {host.name}: install sync failed: {' '.join(detail.splitlines())}",
+              file=sys.stderr)
 
 
 def _undo_start(task: Task, remote, *, run_id: str, branch: str, repo: Path, worktree: Path) -> None:

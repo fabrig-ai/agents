@@ -11,6 +11,16 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 2. Slots and disk
 
+- **Builder installs follow the dispatcher:** a run's start fetches origin
+  in `FAB_HOME/install` under `FAB_HOME/install.lock` (waiting up to 60 s)
+  and moves an ancestor install to the running dispatcher's commit,
+  detached. An install at that commit, ahead or diverged stays; sync
+  failures only note stderr and never fail a start. Dispatcher hosts are
+  skipped (docs/design/fab-tick.md, 3). This updates the fab commands on
+  the builder's PATH without changing the links, worktrees, slots or units.
+  Long-running queue and after-landing services still need
+  `bin/install.sh HOST` to update and restart them.
+
 - **Measured (hetzner6, 10-30 20:00Z):** eight slots of 5-39 GB each; cargo's
   incremental data is 50-90% of every slot, stale test executables up to
   14 GB, everything else 2-4 GB.

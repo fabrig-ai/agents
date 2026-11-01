@@ -8,6 +8,10 @@
   and slots for fabrig (claim, switch, release with the sweep at collect);
   `fab codex` launches Codex as user units (live on hetzner6 since 20:30Z;
   codex-run is no longer called). A failed start gives back what it took.
+  Before a start's builder work, its fab install follows the running
+  dispatcher's commit under `install.lock`, only forward; a sync failure
+  notes stderr and the start continues. Dispatcher hosts are skipped.
+  Services still move and restart only with `bin/install.sh`.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
   run by hand, live since 20:27Z.
 

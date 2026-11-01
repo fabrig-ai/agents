@@ -2,15 +2,15 @@ import io
 import json
 import shlex
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from fab import log, run
 from fab.hosts import Host
 from fab.plan import Task
-from fab.sh import Failed, Result, ssh
+from fab.sh import Failed, Result, run as execute, ssh
 from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
 
@@ -187,7 +187,104 @@ class RejectionTextTest(unittest.TestCase):
         self.assertEqual(fake.calls, [])
 
 
+class InstallSyncTest(unittest.TestCase):
+    def test_start_syncs_running_package_before_any_builder_work(self):
+        tip = "a" * 40
+        fake = starter().on(["git"], Result(0, tip + "\n"))
+        errors = io.StringIO()
+        runner = Mock(wraps=fake)
+        with tmp_home() as home, redirect_stderr(errors):
+            run.start(TASK, HOST, sh=runner, checkout=home / "task-checkout")
+        self.assertEqual(runner.call_args_list[1].kwargs, {"check": True, "timeout": 120})
+        self.assertEqual(fake.calls[0].argv,
+                         ["git", "-C", str(Path(run.__file__).resolve().parent.parent),
+                          "rev-parse", "HEAD"])
+        sync = command(fake.calls[1])
+        self.assertEqual(sync[:6], ["flock", "-w", "60", str(ROOT / "install.lock"), "bash", "-c"])
+        self.assertIn(f"git -C {ROOT}/install fetch origin", sync[6])
+        self.assertIn(f"checkout -q --detach {tip}", sync[6])
+        self.assertEqual(command(fake.calls[2])[0], "mkdir")
+        self.assertEqual(command(fake.calls[4]),
+                         ["git", "-C", str(ROOT / "repos/agents"), "fetch", "origin"])
+        self.assertEqual(errors.getvalue(), "")
+
+    def test_sync_checks_out_only_an_ancestor_and_preserves_other_branches(self):
+        # Real git exercises ancestry and detach semantics, under fake ssh in a temporary HOME.
+        with tmp_home() as home:
+            _, clone = git_pair(home)
+            root = home / "builder home"
+            root.mkdir()
+            install = root / "install"
+            clone.rename(install)
+            ancestor = git(install, "rev-parse", "HEAD")
+            git(install, "commit", "--allow-empty", "-m", "Dispatcher")
+            tip = git(install, "rev-parse", "HEAD")
+            git(install, "push", "origin", "HEAD:main")
+            git(install, "commit", "--allow-empty", "-m", "Builder ahead")
+            ahead = git(install, "rev-parse", "HEAD")
+            git(install, "checkout", "--detach", ancestor)
+            git(install, "commit", "--allow-empty", "-m", "Other line")
+            diverged = git(install, "rev-parse", "HEAD")
+            for before in (tip, ancestor, ahead, diverged):
+                with self.subTest(before=before):
+                    git(install, "checkout", "-B", "builder-state", before)
+                    fake = FakeRunner().on(["git"], Result(0, tip + "\n"))
+                    fake.on(["ssh"], lambda call: execute(command(call), timeout=5))
+                    with patch.object(run, "remote_home", return_value=str(root)):
+                        run._sync_install(HOST, sh=fake)
+                    self.assertEqual(git(install, "rev-parse", "HEAD"),
+                                     tip if before == ancestor else before)
+                    self.assertEqual(git(install, "branch", "--show-current"),
+                                     "" if before == ancestor else "builder-state")
+
+    def test_sync_failures_note_one_line_and_allow_the_start(self):
+        def unavailable(call):
+            raise OSError("ssh unavailable\nsecond line")
+
+        failures = (Result(255, err="ssh offline\nconnection lost"),
+                    Result(1, err="fetch failed"), Result(1, err="missing install"),
+                    Result(1, err="lock timed out after 60 s"), unavailable)
+        for failure in failures:
+            with self.subTest(failure=failure), tmp_home():
+                fake = FakeRunner()
+                def answer(call):
+                    if command(call)[0] == "flock":
+                        return failure(call) if callable(failure) else failure
+                    return fallback(call)
+                fallback = starter().rules[0][1]
+                fake.on(["ssh"], answer).on(["git"], Result(0, "b" * 40 + "\n"))
+                errors = io.StringIO()
+                with redirect_stderr(errors):
+                    self.assertEqual(run.start(TASK, HOST, sh=fake), "draft/task-1")
+                self.assertEqual(len(errors.getvalue().splitlines()), 1)
+                self.assertIn("builder: install sync failed:", errors.getvalue())
+                expected = "ssh unavailable" if callable(failure) else failure.err.splitlines()[0]
+                self.assertIn(expected, errors.getvalue())
+                self.assertEqual(log.read()[-1]["ev"], "run.started")
+                self.assertEqual(command(fake.calls[-1])[:3], ["fab", "codex", "start"])
+
+    def test_unreadable_package_head_does_not_prevent_a_start(self):
+        for result in (Result(1, err="not a repository"), Result(0, "")):
+            with self.subTest(result=result), tmp_home(), redirect_stderr(io.StringIO()) as errors:
+                fake = starter().on(["git"], result)
+                run.start(TASK, HOST, sh=fake)
+                self.assertEqual(log.read()[-1]["ev"], "run.started")
+                self.assertEqual(len(errors.getvalue().splitlines()), 1)
+                self.assertFalse(any(command(call)[0] == "flock" for call in fake.calls[1:]))
+
+    def test_start_skips_sync_for_a_dispatcher_even_when_it_is_also_a_builder(self):
+        with tmp_home():
+            fake = starter()
+            run.start(TASK, replace(HOST, roles=("builder", "dispatcher")), sh=fake)
+            self.assertTrue(all(call.argv[0] == "ssh" for call in fake.calls))
+            self.assertFalse(any(command(call)[0] == "flock" for call in fake.calls))
+            self.assertEqual(command(fake.calls[0])[0], "mkdir")
+
+
 class RunStartTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(run, "_sync_install"))
+
     def test_start_passes_rejection_log_to_remote_and_local_brief_without_mutating_record(self):
         with tmp_home() as home:
             gate = Host("gate", "gate@invalid", ("gate",))
@@ -1222,6 +1319,9 @@ class RefusalTextTest(unittest.TestCase):
 
 
 class OptimisticRunTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch.object(run, "_sync_install"))
+
     def test_checked_tip_is_base_in_worktrees_slots_briefs_and_events(self):
         for trunk in ("main", "component-kit/integration"):
             for repo in ("agents", "fabrig"):

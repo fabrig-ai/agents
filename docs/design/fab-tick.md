@@ -59,6 +59,17 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   worktree (repositories that build nothing heavy). `fab run start` prepares
   the checkout at the task's base, writes the brief, and starts
   `codex-run task` there.
+- **Builders follow the dispatcher:** before any builder command, `fab run
+  start` reads the running fab package's checkout `HEAD` and, over one ssh
+  under `flock -w 60 FAB_HOME/install.lock`, fetches origin in
+  `FAB_HOME/install`. An install already at that commit stays; an ancestor
+  moves to it with `git checkout -q --detach`; an ahead or diverged install
+  stays. This moves only forward, so a dispatcher pinned for a replay never
+  downgrades a builder. Any sync failure is a one-line note on stderr and
+  never fails the start. A host with the `dispatcher` role is skipped: its
+  tick already moves its install. Run worktrees, slots, PATH links and
+  units are untouched; long-running services still need `bin/install.sh`
+  to move and restart them (docs/design/fab-machines.md, 2).
 - **The brief is compiled, not gathered:** the role text
   (`fab/roles/implementer.md`), the task spec, and the paths it cites. Codex
   reads what the brief names in the checkout itself.
