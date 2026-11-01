@@ -49,9 +49,11 @@ and Claude reads the code's structure in batches, never on the landing path.
   task of kind `interface` owning `**`, and runs the tests (`bin/fab test`
   in a detached worktree; fabrig: `fab precheck` in an idle slot). Its
   `call.checked` (call, root, subject, branch, tip, outcome `green` or
-  `red`, the part's task ids and specs, `findings`) pins the tip and the
-  specs together; an infra failure logs nothing and the next tick retries.
-  Review and designer calls' branches are not gated.
+  `red`, and when green the part's task ids, specs and paths, `findings`)
+  pins the tip and the specs together; an infra failure logs nothing and
+  the next tick retries. Each done call of the chain, root and amends, is
+  checked. Cut, answer, review, decision and retire calls' branches are
+  not gated.
 - **The taste file,** `fab/taste.md`, holds the banned names and pairs of
   good and bad code from this repository, each with one line on why. It is
   added to every implementer's brief after the role text.
@@ -75,5 +77,4 @@ and Claude reads the code's structure in batches, never on the landing path.
 
 - fabrig's api gate, the public API against the skeleton (rustdoc JSON);
   names, docs and clones over Rust (integration.md 2 has the minimal gates).
-- Gates on review calls' branches, which have no task `files` to check
-  against.
+- Gates on review calls' branches.

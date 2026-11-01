@@ -14,7 +14,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **Questions that are the user's** (budgets, machines, what is hard to
   reverse) park their task and are listed, with the reports' signals that
   are the user's, on one page the user reads; nothing else goes to the user.
-- **Whoever asks decides it is the user's,** never the page. Five things
+- **Whoever asks decides it is the user's,** never the page. Four things
   are (`fab.channel.asks`, folded from the plans and the log):
   - a plan's `[[question]]` with no answer, the cut's (calls.md 3);
   - a call that ended `Question:` (gates.md 2);
@@ -33,11 +33,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     closes the ask (as it closes the call and parked kinds) and makes the
     finding new again or dropped (`brief`), its answer in the next triage
     call's brief; a `; user:` answer only releases the rung, and the next
-    triage call's brief carries it;
-  - an integration plan's stop (integration.md 3): a `plan.stopped` opens
-    Ask kind `stopped`, subject `<draft>/integration`, its text the
-    record's, what to read its report; `fab page answer
-    <draft>/integration TEXT` closes it and lifts the stop.
+    triage call's brief carries it.
   A task's questions are the foreman's and the answerer's and never reach
   the page; an answer call that cannot settle one ends `Question:` itself.
 - **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
@@ -117,8 +113,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 ## 3. The user's questions on the forge
 
 - **One issue per subject** (`fab/forge.py`): `fab issues sync` takes the
-  log's open asks (`fab.channel.asks((), events)`, 2): calls, parked
-  chains, findings and stopped plans. A plan's questions stay in plan.toml. One pass opens,
+  log's open asks (`fab.channel.asks((), events)`, 2), calls and parked
+  chains only. A plan's questions stay in plan.toml. One pass opens,
   converses, then closes, under `FAB_HOME/issues.lock`; a second pass while
   it runs exits 0 at once. The log is the only state. No webhook or router;
   one conversation call runs at a time.
@@ -132,13 +128,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   stops the pass with exit 1 and one line naming the step, method and path;
   earlier records remain for the next pass.
 - **Open:** an ask without `issue.opened` for its subject gets an issue;
-  after `issue.closed`, only a later ask opens another (for a stopped
-  plan, a later `plan.stopped` of the subject). Log order, not
+  after `issue.closed`, only a later ask opens another. Log order, not
   timestamp precision, decides later. Both ask kinds for a subject share
   one issue, using the newest ask. Title: `<subject>: <first non-blank
   question line>`, cut to 200 characters. Body: the call report's
-  `channel.excerpt`, or the parked (or stopped) reason and its report's
-  excerpt when the report is a local file, then
+  `channel.excerpt`, or the parked reason and its report's excerpt, then
   `Read: <report path>` and the footer: "Answer in a comment. Ask for more
   context if you need it: the loop replies here. Your answer is recorded
   once the loop reads it as one." Apply label 1 and log `issue.opened`
