@@ -318,3 +318,7 @@ each is now a persistent systemd user unit that fab writes, on one pattern
   `fab/migrate`). Then a new builder lent its logins when it joins and
   returned when it goes, and swaps proposed from `login.checked`'s weekly
   percent.
+- `live-smith` back in `fab.after_landing.LIVE` (`SMITH_LIVE` from
+  `smith-live`) once the signed-in root is captured, its pair borrowing
+  with no `--path` so the root is lent at its fixed path (3); landed only
+  then, or every after-landing run faults the pair.

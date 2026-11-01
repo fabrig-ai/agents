@@ -11,6 +11,8 @@ sources = [
   "docs/design/machines.md",
 ]
 
+retired = true
+
 [buffer]
 low = 1.0
 high = 2.0

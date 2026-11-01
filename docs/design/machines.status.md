@@ -30,10 +30,28 @@
   `live-smith` was taken out 11-01 ~02:00Z (red on 831e86f27 and
   e4f852afa: `SMITH_LIVE` unset): it needs a smith live root signed in by
   `smith login`.
-- The `smith-live` directory kind exists at its fixed path; live-smith's return to `fab.after_landing.LIVE` waits for the root's capture.
+- **The `smith-live` kind** (3; plan `smith-live`, 38de1b9): a directory
+  kind with a fixed path, `.local/state/smith-live` (`Kind.fixed`).
+  `lend` and `borrow` default to it and accept it as relative, `~/` or the
+  host's absolute path; any other path is refused before anything is
+  copied. `borrow` without `--path` is refused for a kind without one. A
+  lent directory is made mode 700. `check` refuses it as it does
+  `chatgpt` and `github`. Tested with fake hosts and a dummy root.
 
 ## Gaps and departures
 
+- **No smith live root on the shelf yet:** the root on hetzner9
+  (`~/.local/state/smith-live`) awaits the user's `smith login chatgpt`,
+  then `fab logins capture hetzner9 smith-live --free --path
+  .local/state/smith-live`. Until then `live-smith` stays out of
+  `fab.after_landing.LIVE` (machines.md 5).
+- **A pair's borrow ignores a fixed path:** machines.md 3 lends a pair's
+  login "at the kind's fixed path or under its run directory", but
+  `fab.after_landing`'s `borrow` always passes `--path
+  <run>/logins/<variable>`, which the shelf refuses for `smith-live`. It
+  must pass no `--path` for a fixed kind (and set the variable to
+  `$HOME/.local/state/smith-live`) when live-smith returns. The comment
+  above `LIVE` still says no shelf kind holds the root.
 - **The dispatcher's own units** (4, 11-01): designed; to be built by plan
   `hel8-units`. Until it lands, `fab-status`, `fab-issues` and
   `fab-logins-check` are transient units started by hand
