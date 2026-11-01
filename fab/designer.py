@@ -100,6 +100,41 @@ def design_index(root: Path) -> str:
     return "\n".join(entries) or "(none)"
 
 
+def plan_start(checkout: Path, draft: str, *, rev: str = "origin/main",
+               sh: Runner = run, plan_path: str | None = None) -> str:
+    """Return the oldest commit adding the plan's plan.toml (docs/design/fab-calls.md, 3).
+
+    Read `git log --format=%H --diff-filter=A <rev> -- <plan_path>/plan.toml`,
+    with check=True. plan_path defaults to <PLANS>/<draft>; ValueError naming the
+    plan file when no commit added it. fab.sh.Failed when git fails.
+    """
+    plan_path = plan_path or f"{PLANS}/{draft}"
+    plan_file = f"{plan_path}/plan.toml"
+    commits = sh(["git", "log", "--format=%H", "--diff-filter=A", rev, "--", plan_file],
+                 cwd=str(checkout), check=True).out.splitlines()
+    if not commits:
+        raise ValueError(f"no commit added {plan_file}")
+    return commits[-1]
+
+
+def design_diff(checkout: Path, start: str, design: str, *, rev: str = "origin/main",
+                sh: Runner = run) -> str:
+    """Return a design and its status file's diff since start (docs/design/fab-calls.md, 3).
+
+    Run `git diff <start>^ <rev> -- <design> <status>` with check=True. If start
+    has no parent, diff against the empty tree, whose id comes from
+    `git hash-object -t tree --stdin` with empty input, for either hash format.
+    fab.sh.Failed when git fails; the parent probe uses check=False.
+    """
+    base = f"{start}^"
+    parent = sh(["git", "rev-parse", "--verify", "-q", base], cwd=str(checkout), check=False)
+    if not parent.ok:
+        base = sh(["git", "hash-object", "-t", "tree", "--stdin"], cwd=str(checkout),
+                  input="", check=True).out.strip()
+    return sh(["git", "diff", base, rev, "--", design, status_path(design)],
+              cwd=str(checkout), check=True).out
+
+
 def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
                     sh: Runner = run, plan_path: str | None = None) -> list[str]:
     """The designs changed since the plan started: those a commit after the plan's start
@@ -114,16 +149,11 @@ def changed_designs(checkout: Path, draft: str, *, rev: str = "origin/main",
     design (designs' rule) or a design's status file (then its design is returned, whether
     or not that design still exists at rev). plan_path overrides <PLANS>/<draft> with a
     repository-relative plan directory."""
-    plan_path = plan_path or f"{PLANS}/{draft}"
-    plan_file = f"{plan_path}/plan.toml"
+    start = plan_start(checkout, draft, rev=rev, sh=sh, plan_path=plan_path)
 
     def git(*args, check=True):
         return sh(["git", *args], cwd=str(checkout), check=check)
 
-    commits = git("log", "--format=%H", "--diff-filter=A", rev, "--", plan_file).out.splitlines()
-    if not commits:
-        raise ValueError(f"no commit added {plan_file}")
-    start = commits[-1]
     if git("rev-parse", "--verify", "-q", f"{start}^", check=False).ok:
         paths = git("diff", "--name-only", "--no-renames", f"{start}^", rev, "--", f"{DESIGNS}/").out
     else:
@@ -355,44 +385,82 @@ def decision_brief(plan: Plan, part_id: str, tasks: dict[str, Task], statuses: d
     ])
 
 
+def _retire_quote(root: Path, start: str, design: str, rev: str,
+                  sh: Runner) -> tuple[str, str]:
+    """Read the two quote forms at rev; return the shorter quote and its omission line."""
+    status = status_path(design)
+    content = sh(["git", "show", f"{rev}:{design}"], cwd=str(root), check=False)
+    note = sh(["git", "show", f"{rev}:{status}"], cwd=str(root), check=False)
+    difference = design_diff(root, start, design, rev=rev, sh=sh)
+    whole = (f"## {design}\n\nText at `{rev}`:\n\n"
+             f"{content.out if content.ok else '(removed)'}\n\n## {status}\n\n"
+             f"{note.out if note.ok else '(no status file)'}")
+    patch = f"## {design}\n\nDiff since the plan started:\n\n```diff\n{difference}```"
+    lines = len(content.out.splitlines()) if content.ok else 0
+    listed = (f"- {design} ({lines} lines, diff {len(difference.splitlines())} lines): "
+              "read it in your worktree")
+    return min((patch, whole), key=len), listed
+
+
+def _retire_designs(quotes: Sequence[tuple[str, str]], budget: int) -> str:
+    """Fill the section in order, reserving all list lines and skipping quotes that do not fit."""
+    if not quotes:
+        return "(none)"
+    notice = "Did not fit:\n"
+    remaining = budget - len(notice) - 2 - sum(len(line) + 1 for _, line in quotes)
+    selected, skipped = [], []
+    for quote, line in quotes:
+        if len(quote) + 2 <= remaining:
+            selected.append(quote)
+            remaining -= len(quote) + 2
+        else:
+            skipped.append(line)
+    if skipped:
+        selected.append(notice + "\n".join(skipped))
+    return "\n\n".join(selected)
+
+
 def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], root: Path,
                  changed: Sequence[str], *, call_id: str, branch: str, report: str,
-                 plan_path: str | None = None) -> str:
-    """Retire's brief, changed being changed_designs(root, plan.draft). Sections, through
-    fab.calls._brief, in this order:
+                 plan_path: str | None = None, rev: str = "origin/main", sh: Runner = run) -> str:
+    """Retire's brief (docs/design/fab-calls.md, 3); changed is changed_designs' paths.
+    Sections, through fab.calls._brief, in this order:
 
     1. `Role`: fab.calls.ROLES["retire"]'s text.
     2. `Call facts`.
     3. `Plan parts and slices`: fab.calls._parts_table(plan, tasks, statuses), then
        `Plan: \\`<PLANS>/<draft>/plan.toml\\``.
     4. `The user's drafts`: fab.calls.drafts_text(plan, root).
-    5. `Designs changed since the plan started`: per path of changed, in order, `## <path>`
-       and the design's text (`(removed)` when it does not exist under root), then
-       `## <status path>` and the status file's text (`(no status file)` when missing);
-       `(none)` when changed is empty.
+    5. `Designs changed since the plan started`: in path order, each design headed
+       `## <path>`, as the shorter of its diff since plan_start and its text plus
+       status file at rev. Quotes label the form; diffs use fenced diff blocks.
+       Read text with `git show <rev>:<path>` through sh; `(removed)` for an absent
+       design and `(no status file)` for absent status. `(none)` when changed is empty.
+       Budget: BRIEF_LIMIT less every other section's compiled text, including
+       headings and separators, and one list line per changed design, reserved first.
+       Skip a quote that does not fit, continuing with later paths; list skipped
+       designs after the quotes under `Did not fit:` as `- <path> (<n> lines, diff
+       <m> lines): read it in your worktree`, n the design's lines at rev (0 removed).
     6. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)).
 
     plan_path overrides <PLANS>/<draft> with a repository-relative plan directory.
-    ValueError past fab.calls.BRIEF_LIMIT: the designs are quoted whole, and a plan that
-    changed more than the limit holds is retired by hand."""
+    ValueError past fab.calls.BRIEF_LIMIT when the other sections alone exceed it.
+    """
     plan_path = plan_path or f"{PLANS}/{plan.draft}"
-    designs_text = []
-    for design in changed:
-        path = root / design
-        text = path.read_text(encoding="utf-8") if path.exists() else "(removed)"
-        status = status_path(design)
-        path = root / status
-        note = path.read_text(encoding="utf-8") if path.exists() else "(no status file)"
-        designs_text.append(f"## {design}\n\n{text}\n\n## {status}\n\n{note}")
-    return calls._brief([
+    sections = [
         ("Role", calls.ROLES["retire"].read_text(encoding="utf-8")),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("Plan parts and slices", calls._parts_table(plan, tasks, statuses) +
          f"\n\nPlan: `{plan_path}/plan.toml`"),
         ("The user's drafts", calls.drafts_text(plan, root)),
-        ("Designs changed since the plan started", "\n\n".join(designs_text) or "(none)"),
+        ("Designs changed since the plan started", ""),
         ("Inventory", calls.render_inventory(calls.inventory(root))),
-    ])
+    ]
+    budget = calls.BRIEF_LIMIT - len(calls._brief(sections))
+    start = plan_start(root, plan.draft, rev=rev, sh=sh, plan_path=plan_path) if changed else ""
+    quotes = [_retire_quote(root, start, design, rev, sh) for design in sorted(changed)]
+    sections[4] = (sections[4][0], _retire_designs(quotes, budget))
+    return calls._brief(sections)
 
 
 def main(argv: list[str]) -> int:
@@ -515,4 +583,4 @@ def _compile(args, plan, tasks, statuses, root, facts, plan_path, events):
     if plan.retired:
         raise ValueError(f"plan {plan.draft!r} is already retired")
     changed = changed_designs(root, plan.draft, sh=run, plan_path=plan_path)
-    return retire_brief(plan, tasks, statuses, root, changed, plan_path=plan_path, **facts)
+    return retire_brief(plan, tasks, statuses, root, changed, plan_path=plan_path, sh=run, **facts)

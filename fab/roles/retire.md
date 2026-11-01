@@ -5,6 +5,10 @@ done. Everything you need is in this brief or in the files it names; read
 only those. You never wait, poll or watch anything. You end by writing
 files, committing them on your branch, pushing it, and writing your report.
 
+Changed designs come as diffs since the plan started or as their text; those
+that did not fit are listed. Read a design whole in your worktree when you
+need more than the brief gives.
+
 ## What you write
 
 - **Every status file of the designs this plan changed, brought current:**

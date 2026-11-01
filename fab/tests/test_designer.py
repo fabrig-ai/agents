@@ -69,7 +69,11 @@ def runner(root):
             .on(["git", "rev-parse"], Result(0, str(root) + "\n"))
             .on(["git", "remote"], Result(0, runs.REMOTES["agents"] + "\n"))
             .on(["git", "log"], Result(0, "start\n"))
-            .on(["git", "diff"], Result(0, DESIGN + "\n")))
+            .on(["git", "diff", "--name-only"], Result(0, DESIGN + "\n"))
+            .on(["git", "diff"], Result(0, "long diff\n" * 100))
+            .on(["git", "show"], lambda call: (
+                Result(0, (root / call.argv[2].split(":", 1)[1]).read_text())
+                if (root / call.argv[2].split(":", 1)[1]).is_file() else Result(1))))
 
 
 class SubjectTest(unittest.TestCase):
@@ -242,6 +246,179 @@ class HistoryPathTest(unittest.TestCase):
                 designer.changed_designs(root, "demo", plan_path=plan_path, sh=fake)
 
 
+class RetireHistoryTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        _, self.root = git_pair(self.home)
+        self.plan, self.tasks = fixture(self.root)
+        self.plan_file = self.root / "docs/plan/demo/plan.toml"
+        self.plan_text = self.plan_file.read_text()
+        self.plan_file.unlink()
+
+    def commit(self, title):
+        git(self.root, "add", ".")
+        git(self.root, "commit", "-qm", title)
+        return git(self.root, "rev-parse", "HEAD")
+
+    def cut(self):
+        atomic.write(self.plan_file, self.plan_text)
+        return self.commit("Cut")
+
+    def brief(self, changed=None, *, rev="HEAD"):
+        if changed is None:
+            changed = designer.changed_designs(self.root, "demo", rev=rev)
+        return designer.retire_brief(self.plan, self.tasks, {}, self.root, changed, rev=rev, **FACTS)
+
+    def section(self, text):
+        return text.split("# Designs changed since the plan started\n\n", 1)[1].split(
+            "\n\n# Inventory", 1)[0]
+
+    def test_retire_chooses_shorter_diff_or_text_in_path_order(self):
+        lines = [f"Contract line {index}\n" for index in range(3000)]
+        atomic.write(self.root / DESIGN, "".join(lines))
+        removed = "docs/design/removed.md"
+        atomic.write(self.root / removed, "# Removed design\n")
+        self.commit("Before plan")
+        lines[1500] = "Changed contract line\n"
+        atomic.write(self.root / DESIGN, "".join(lines))
+        small = "docs/design/small.md"
+        atomic.write(self.root / small, "# Small\n")
+        (self.root / removed).unlink()
+        start = self.cut()
+        changed = designer.changed_designs(self.root, "demo", rev="HEAD")
+        self.assertEqual(changed, [DESIGN, removed, small])
+        atomic.write(self.root / DESIGN, "Uncommitted design\n")
+        atomic.write(self.root / designer.status_path(DESIGN), "Uncommitted status\n")
+        section = self.section(self.brief(list(reversed(changed))))
+        difference = git(self.root, "diff", f"{start}^", "HEAD", "--", DESIGN,
+                         designer.status_path(DESIGN)) + "\n"
+        self.assertIn(f"## {DESIGN}\n\nDiff since the plan started:\n\n```diff\n{difference}```", section)
+        self.assertLess(len(difference), len("".join(lines)))
+        small_diff = git(self.root, "diff", f"{start}^", "HEAD", "--", small,
+                         designer.status_path(small)) + "\n"
+        small_text = (f"## {small}\n\nText at `HEAD`:\n\n# Small\n\n\n"
+                      "## docs/design/small.status.md\n\n(no status file)")
+        small_patch = f"## {small}\n\nDiff since the plan started:\n\n```diff\n{small_diff}```"
+        self.assertLess(len(small_text), len(small_patch))
+        self.assertIn(min((small_patch, small_text), key=len), section)
+        self.assertIn(f"## {removed}\n\nText at `HEAD`:\n\n(removed)", section)
+        self.assertNotIn("Uncommitted", section)
+        self.assertLess(section.index(f"## {DESIGN}"), section.index(f"## {removed}"))
+        self.assertLess(section.index(f"## {removed}"), section.index(f"## {small}"))
+        self.assertLess(len(self.section(self.brief([DESIGN]))), 1000)
+
+    def test_retire_reads_design_and_status_at_requested_revision(self):
+        self.commit("Before plan")
+        self.cut()
+        atomic.write(self.root / DESIGN, "# At retirement\n")
+        atomic.write(self.root / designer.status_path(DESIGN), "Retirement status\n")
+        self.commit("Retirement revision")
+        git(self.root, "tag", "retire-tip")
+        atomic.write(self.root / DESIGN, "# After retirement\n")
+        atomic.write(self.root / designer.status_path(DESIGN), "Later status\n")
+        self.commit("After retirement")
+        section = self.section(self.brief(rev="retire-tip"))
+        self.assertIn("Text at `retire-tip`:", section)
+        self.assertIn("# At retirement\n", section)
+        self.assertIn("## docs/design/core.status.md\n\nRetirement status\n", section)
+        self.assertNotIn("After retirement", section)
+        self.assertNotIn("Later status", section)
+
+    def test_retire_root_cut_diffs_against_empty_tree(self):
+        git(self.root, "checkout", "--orphan", "root-retire")
+        git(self.root, "rm", "-qf", "README.md")
+        start = self.cut()
+        tree = git(self.root, "hash-object", "-t", "tree", "--stdin")
+        difference = git(self.root, "diff", tree, "HEAD", "--", DESIGN,
+                         designer.status_path(DESIGN))
+        self.assertEqual(designer.plan_start(self.root, "demo", rev="HEAD"), start)
+        self.assertEqual(designer.design_diff(self.root, start, DESIGN, rev="HEAD").rstrip("\n"),
+                         difference)
+        self.assertIn("new file mode", difference)
+        self.assertIn("# Designs changed since the plan started", self.brief())
+
+    def test_retire_lists_oversized_design_and_keeps_filling(self):
+        atomic.write(self.root / DESIGN, "# Large\n" + "A" * 9000 + "\n")
+        self.commit("Before plan")
+        atomic.write(self.root / DESIGN, "# Large\n" + "B" * 9000 + "\n")
+        small = "docs/design/z.md"
+        atomic.write(self.root / small, "# Small\n")
+        start = self.cut()
+        difference = git(self.root, "diff", f"{start}^", "HEAD", "--", DESIGN,
+                         designer.status_path(DESIGN))
+        line = (f"- {DESIGN} (2 lines, diff {len(difference.splitlines())} lines): "
+                "read it in your worktree")
+        baseline = len(self.brief([])) - len("(none)")
+        limit = baseline + 600
+        with patch.object(calls, "BRIEF_LIMIT", limit):
+            text = self.brief()
+        self.assertLessEqual(len(text), limit)
+        section = self.section(text)
+        self.assertIn("Did not fit:\n" + line, section)
+        self.assertNotIn(f"## {DESIGN}", section)
+        self.assertIn(f"## {small}\n\nText at `HEAD`:", section)
+        self.assertLess(section.index(f"## {small}"), section.index("Did not fit:"))
+        with patch.object(calls, "BRIEF_LIMIT", baseline + len(line) + 120):
+            text = self.brief()
+        self.assertLessEqual(len(text), baseline + len(line) + 120)
+        self.assertNotIn(f"## {small}", self.section(text))
+        self.assertIn(f"- {small} (1 lines, diff ", self.section(text))
+
+    def test_retire_lists_removed_design_with_zero_lines(self):
+        removed = "docs/design/removed.md"
+        atomic.write(self.root / removed, "# Removed\n")
+        self.commit("Before plan")
+        (self.root / removed).unlink()
+        start = self.cut()
+        difference = git(self.root, "diff", f"{start}^", "HEAD", "--", removed,
+                         designer.status_path(removed))
+        line = (f"- {removed} (0 lines, diff {len(difference.splitlines())} lines): "
+                "read it in your worktree")
+        baseline = len(self.brief([])) - len("(none)")
+        limit = baseline + len(line) + 20
+        with patch.object(calls, "BRIEF_LIMIT", limit):
+            text = self.brief()
+        self.assertEqual(self.section(text), "Did not fit:\n" + line)
+        self.assertLessEqual(len(text), limit)
+
+    def test_retire_oversized_other_sections_fail_before_git(self):
+        fake = FakeRunner()
+        with patch.object(calls, "BRIEF_LIMIT", 10):
+            with self.assertRaisesRegex(ValueError, "BRIEF_LIMIT.*largest section"):
+                designer.retire_brief(self.plan, self.tasks, {}, self.root, [DESIGN], sh=fake, **FACTS)
+        self.assertEqual(fake.calls, [])
+
+
+class DesignDiffTest(unittest.TestCase):
+    def test_root_diff_uses_computed_tree_with_empty_input(self):
+        with tmp_home() as root:
+            for tree in ("4" * 40, "6" * 64):
+                with self.subTest(tree=tree):
+                    fake = (FakeRunner().on(["git", "rev-parse"], Result(1))
+                            .on(["git", "hash-object"], Result(0, tree + "\n"))
+                            .on(["git", "diff"], Result(0, "design and status diff\n")))
+                    checked = Mock(wraps=fake)
+                    self.assertEqual(designer.design_diff(root, "start", DESIGN, rev="tip", sh=checked),
+                                     "design and status diff\n")
+                    self.assertEqual(fake.argvs(), [
+                        ["git", "rev-parse", "--verify", "-q", "start^"],
+                        ["git", "hash-object", "-t", "tree", "--stdin"],
+                        ["git", "diff", tree, "tip", "--", DESIGN, designer.status_path(DESIGN)],
+                    ])
+                    self.assertEqual(fake.calls[1].input, "")
+                    self.assertTrue(all(call.cwd == str(root) for call in fake.calls))
+                    self.assertEqual([call.kwargs["check"] for call in checked.call_args_list],
+                                     [False, True, True])
+
+    def test_diff_failures_propagate(self):
+        with tmp_home() as root:
+            for command in ("hash-object", "diff"):
+                fake = (FakeRunner().on(["git", "rev-parse"], Result(1))
+                        .on(["git", command], Result(1, err="git failed")))
+                with self.subTest(command=command), self.assertRaises(Failed):
+                    designer.design_diff(root, "start", DESIGN, sh=fake)
+
+
 class RetireDueTest(unittest.TestCase):
     def setUp(self):
         parts = {name: Part(name, name, "feature", (), DESIGN, done=True) for name in ("a", "b")}
@@ -387,7 +564,8 @@ class BriefTest(unittest.TestCase):
                                        self.root, "demo/probe-1", **FACTS)
 
     def retire(self, changed=(DESIGN,)):
-        return designer.retire_brief(self.plan, self.tasks, {}, self.root, changed, **FACTS)
+        return designer.retire_brief(self.plan, self.tasks, {}, self.root, changed,
+                                    sh=runner(self.root), **FACTS)
 
     def test_cut_sections_index_existing_plans_and_inventory(self):
         text = self.cut()
@@ -518,7 +696,8 @@ class BriefTest(unittest.TestCase):
             (lambda **options: designer.decision_brief(
                 self.plan, "probe", self.tasks, {}, self.root, "demo/probe-1", **FACTS, **options), "demo"),
             (lambda **options: designer.retire_brief(
-                self.plan, self.tasks, {}, self.root, [DESIGN], **FACTS, **options), "demo"),
+                self.plan, self.tasks, {}, self.root, [DESIGN], sh=runner(self.root),
+                    **FACTS, **options), "demo"),
         )
         for compile, draft in compilers:
             with self.subTest(draft=draft, compile=compile):
@@ -593,9 +772,9 @@ class BriefTest(unittest.TestCase):
         self.sections(text, ["Role", "Call facts", "Plan parts and slices", "The user's drafts",
                              "Designs changed since the plan started", "Inventory"])
         self.assertIn(calls.ROLES["retire"].read_text(), text)
-        self.assertIn(f"## {DESIGN}\n\n" + (self.root / DESIGN).read_text(), text)
+        self.assertIn(f"## {DESIGN}\n\nText at `origin/main`:\n\n" + (self.root / DESIGN).read_text(), text)
         self.assertIn("## docs/design/core.status.md\n\nCore is designed.", text)
-        self.assertIn("## docs/design/removed.md\n\n(removed)", text)
+        self.assertIn("## docs/design/removed.md\n\nText at `origin/main`:\n\n(removed)", text)
         self.assertIn("## docs/design/removed.status.md\n\n(no status file)", text)
         self.assertLess(text.index(f"## {DESIGN}"), text.index("## docs/design/core.status.md"))
         self.assertIn("Existing primitive.", text)
@@ -637,6 +816,11 @@ class MainTest(unittest.TestCase):
                     role_path = role_path.with_name("cut-run.md")
                 self.assertIn(role_path.read_text(), text)
                 self.assertIn("# Call facts", text)
+                if role == "retire":
+                    self.assertIn(f"## {DESIGN}\n\nText at `origin/main`:", text)
+                    self.assertIn(["git", "show", f"origin/main:{DESIGN}"], self.fake.argvs())
+                    self.assertIn(["git", "diff", "start^", "origin/main", "--", DESIGN,
+                                   designer.status_path(DESIGN)], self.fake.argvs())
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
 
