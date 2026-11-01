@@ -1985,8 +1985,8 @@ login that still works reused across them before more are signed in.
   `other`). A prefix ends at the first `/`; draft qualification uses this
   prefix before public classification. Subscription labels are
   masked emails. No task, run or call ids, branches, shas, paths, question
-  or answer text, notes, reports, full emails or holders in HTML or JSON;
-  subscriptions never expose hosts.
+  or answer text, notes, reports, full emails or raw holders in HTML or JSON.
+  Subscriptions expose only the public custody labels below.
 - **Subscriptions:** include logins named `claude-<n>`, `claude-box-<n>` or
   `codex-<n>` of kind `claude`, `claude-box` or `codex`. Normalize `claude-box`
   to `claude` for grouping and display: a box login and a Claude login for
@@ -1999,7 +1999,15 @@ login that still works reused across them before more are signed in.
   stay separate. The snapshot's `subscriptions` list has one entry per group,
   sorted by kind then label. Each has `subscription` (the masked email),
   `kind`, `plan` matching `[a-z0-9_]{1,40}` or empty, `logins` (the sign-in
-  count), `checked_age_s` and `limits`. For `local@domain`, the mask keeps
+  count), `held`, `held_by`, `checked_age_s` and `limits`. `held` counts the
+  group's logins currently lent, from `fab.logins.fold`: each login with a
+  holder counts once; logins on the shelf count nothing. `held_by` is a
+  sorted list of public labels, repeated once per use. A holder that is a
+  known host name with the kind's machine path (`.claude/.credentials.json`
+  or `.codex/auth.json`) is labelled by that host name. Holders beginning
+  `walk/`, `after-landing/` or `check/` become `QA walk`, `after-landing`
+  or `check`; any other holder becomes `other`. No other holder text, path
+  or login id leaves the fold. For `local@domain`, the mask keeps
   the local's first and last characters around `***`, followed by `@` and
   the lowercased domain. A local of one or two characters keeps only its
   first character before `***`. Local characters keep their case; the domain
@@ -2018,11 +2026,14 @@ login that still works reused across them before more are signed in.
   `full_at` is Unix seconds if full before reset; otherwise `at_reset` is
   projected percent at reset to one decimal (zero rate lasts).
   The panel after Waiting on the user has Subscription (kind, plan, label,
-  and `7 sign-ins` or `1 sign-in` on its first row), Limit, Used (meter and
+  and `7 sign-ins` or `1 sign-in` on its first row), Held, Used (meter and
   percent), Resets (countdown and a UTC `time` element/title), Rate
   (`3.6%/h`) and At this pace (`full in 1 d 13 h`, `lasts, 19% at reset`,
-  or `–`). Meters warn at 80% and turn critical at 95%. A check with no
-  limits shows `–`. With no eligible subscriptions:
+  or `–`). Held appears only on the group's first row: a count in a
+  `span` whose `title` joins `held_by` with ` · `, or says `none` when zero.
+  There is no Limit column; a limit other than `week` follows its percent
+  in Used in small text (`92% · 5 h`). Meters warn at 80% and turn critical
+  at 95%. A check with no limits shows `–`. With no eligible subscriptions:
   `No login checked in the last 24 hours.` A Subscriptions tile after the
   weight ratio shows the highest `week` percent (`–` when absent), with
   `<n> subscriptions` below.
