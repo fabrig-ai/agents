@@ -62,3 +62,13 @@ Tests in `fab/tests/test_triage.py` and `fab/tests/test_calls.py`:
 
 The brief's sections and the command, and the brief's size on the tests'
 ladder.
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/triage-brief/foreman-1)
+
+Extract argument parsing from fab.calls.main to meet the 60-line cap.
+The branch owns `gate:size`: `fab/calls.py:635` main is 68 lines (cap 60).
+In `fab/calls.py`, move the parser construction through `parser.parse_args(argv)` into a small helper and replace that block with one helper call.
+Keep triage and designer delegation before parsing, and keep triage excluded from the subparser loop, as required by `docs/design/fab.md` §13.15.
+Preserve existing role arguments, brief compilation, call startup and exit behavior.
+Ensure main and the extracted helper each stay within 60 lines; the gate counts the full function span, including docstrings.
+Validate with the existing calls and triage tests, then rerun the gate.
