@@ -43,3 +43,14 @@ unchanged but for the new rows.
 ## Report
 
 The figures added, in order.
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/qa-figures/foreman-1)
+
+shorten figures()’s docstring to stop growing the existing oversized function
+`gate:size` reports `fab/landing_report.py:331` figures is 84 lines (cap 60).
+This branch adds three docstring lines and the `_qa_figures` expansion, growing figures() from 80 to 84 lines.
+`docs/design/fab.md`, section 12, permits existing oversized functions only when they do not grow.
+Condense the docstring by at least four lines so figures() returns to at most 80 lines; retain the QA behavior and `_qa_figures` call.
+The QA details already appear in `_qa_figures`’s docstring.
+Keep changes within `fab/landing_report.py`; no design or test changes are needed for this repair.
+The repair run should run the existing report tests and size gate.
