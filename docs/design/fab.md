@@ -1660,7 +1660,43 @@ only as tweaks once a replay matches its run.
     merge), pushes the trunk and logs `branch.landed` for task
     `<draft>/integration`, branch `main`; the check runs on the new tip. Any
     other conflict is aborted and logged as `branch.rejected`, step
-    `catch-up`: the plan stops for judgement until its trunk moves.
+    `catch-up`, with `main` the sha it could not merge; a catch-up repair
+    follows (below).
+  - **Caught up along the way** (the user, 11-01). Drafts run for hours
+    beside each other, and main moves under a trunk each time another lands:
+    on 10-31 every such merge was done by hand at the end (playground: 23
+    conflicts, 4 repairs, 56 minutes; jigq/debt: a compile red from main's
+    new `family::to_root` argument, hours after main had it). So while tasks
+    remain, a plan with `ready` catches its trunk up whenever main has moved,
+    as before a check: the tick reads after its fetch whether
+    `origin/<trunk>` contains `origin/main`, and when it does not and
+    `CATCH_AFTER` (30) minutes have passed since the plan's last catch-up
+    (merged or refused; else since its first task merge), the next step is a
+    catch-up, taken before a check along the way. It waits, as a check along
+    the way does, while any repair is open and while the cut is in flight.
+    Tasks started earlier merge into the caught-up trunk as any; those
+    started later build on main's newer code. A catch-up merge is not a task
+    merge: it does not count toward `MID_EVERY`. Once every task has merged,
+    catching up happens only before a check, as above, so a readied trunk is
+    not moved under the queue. A plan without `ready` (a replay) never
+    catches up: it stays on its base.
+  - **A catch-up that conflicts is repaired, not stopped.** Each catch-up
+    `branch.rejected` makes a repair task `<draft>/catch-up-<n>` (folded
+    from the log like `repair-<n>`, numbered apart from them; kind
+    `repair`, files `**`). Its body names the trunk's tip, the main sha and
+    the conflict's findings, and asks the run to merge that sha into its
+    branch (which starts at the trunk's tip), resolve each conflict keeping
+    both sides' intent (main's side is other drafts' landed work, the
+    trunk's this draft's), fix what main's changes break in this draft's
+    code, and push. Its acceptance: the pushed branch contains the sha, has
+    no conflict markers, and the crates the conflicts touched build and
+    pass clippy and their tests; the trunk's next check runs the rest. It
+    runs as an implement run from the trunk's tip and is merged like any
+    task, which brings main in. Its questions, answers and the open-repair
+    waits are a repair's; a catch-up repair is never one of the three reds
+    that stop a plan. A catch-up refusal at a main sha that already had a
+    catch-up repair merged stops the plan for judgement (that repair did not
+    bring main in); a refusal at a newer main is a new repair.
   - **A queue rejection is checked again:** the trunk is caught up and
     checked once more, then readied again (the queue asked to forget its
     tried tip when the tip is unchanged). A red check goes to repairs as
