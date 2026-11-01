@@ -154,6 +154,82 @@ class IntegrationTest(unittest.TestCase):
                          [*events, catch, dict(merged("tip9", "demo/t9"), ts="2026-11-01T10:11:00Z")]).kind,
                          "mid-check")
 
+    def test_repair_merges_count_toward_mid_every(self):
+        tasks = {f"demo/t{n}": replace(TASK, id=f"demo/t{n}") for n in range(11)}
+        events = [dict(merged(f"tip{n}", f"demo/t{n}"), ts=f"2026-11-01T10:{n:02d}:00Z")
+                  for n in range(integration.MID_EVERY - 1)]
+        for name in ("repair-1", "catch-up-1"):
+            with self.subTest(repair=name):
+                repair = replace(TASK, id=f"demo/{name}", kind="repair", path="")
+                pending = {**tasks, repair.id: repair}
+                self.assertIsNone(integration.next_step(PLAN, pending, events))
+                landed = dict(merged("repaired", repair.id), ts="2026-11-01T10:10:00Z")
+                step = integration.next_step(PLAN, pending, [*events, landed])
+                self.assertEqual((step.kind, step.tip), ("mid-check", "repaired"))
+
+    def test_third_catch_up_refusal_stops_without_a_third_repair(self):
+        self.assertEqual(integration.CATCH_LIMIT, 3)
+        events = [merged()]
+        for n in range(1, 3):
+            events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                            main=f"main-{n}", tip="tip"),
+                       merged("tip", f"demo/catch-up-{n}")]
+        clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                     tip="main-2", main="tip")
+        # Only this plan's main landing into its trunk resets the count.
+        for unrelated in (dict(clean, task="other/integration"), dict(clean, into="other/integration"),
+                          dict(clean, branch="other")):
+            events.append(unrelated)
+        events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                           main="main-3", tip="tip"))
+        repairs = integration.repair_tasks(PLAN, events, {})
+        self.assertEqual(list(repairs), ["demo/catch-up-1", "demo/catch-up-2"])
+        self.assertEqual(integration.next_step(PLAN, repairs, events, main="main-3").kind, "stop")
+
+    def test_both_catch_up_stops_clear_only_after_a_clean_catch_up(self):
+        clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                     tip="main-0", main="tip")
+        for repeated in (True, False):
+            with self.subTest(repeated=repeated):
+                events = [merged(), clean]
+                for n in range(1, 3 if repeated else 4):
+                    events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                                       main="main-1" if repeated else f"main-{n}", tip="tip"))
+                    if n == 1 or not repeated and n == 2:
+                        events.append(merged("tip", f"demo/catch-up-{n}"))
+                repairs = integration.repair_tasks(PLAN, events, {})
+                self.assertEqual(integration.next_step(PLAN, repairs, events, main="moved", trunk="hand").kind,
+                                 "stop")
+                self.assertEqual(integration.next_step(PLAN, repairs, events).kind, "stop")
+                self.assertEqual(integration.next_step(replace(PLAN, ready=False), repairs, events,
+                                                      trunk="hand").kind, "stop")
+                self.assertEqual(integration.next_step(PLAN, repairs, events, trunk="hand"),
+                                 integration.Step("caught", "hand", "main caught up by hand"))
+                events.append(dict(clean, tip="main-new", main="hand", by="hand"))
+                self.assertEqual(integration.next_step(PLAN, repairs, events),
+                                 integration.Step("check", "hand", "hand"))
+
+    def test_clean_catch_up_restarts_refusal_count_and_keeps_repair_numbers(self):
+        events = [merged()]
+        for n in range(1, 3):
+            events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                            main=f"main-{n}", tip="tip"), merged("tip", f"demo/catch-up-{n}")]
+        events.append(dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                           tip="main-2", main="caught"))
+        for n in range(3, 6):
+            events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                               main=f"main-{n}", tip="caught"))
+            repairs = integration.repair_tasks(PLAN, events, {})
+            self.assertEqual(len(repairs), min(n, 4))
+            step = integration.next_step(PLAN, repairs, events, main=f"main-{n}")
+            if n < 5:
+                self.assertIsNone(step)
+                self.assertIn(f"demo/catch-up-{n}", repairs)
+                events.append(merged("caught", f"demo/catch-up-{n}"))
+            else:
+                self.assertEqual(step.kind, "stop")
+                self.assertNotIn("demo/catch-up-5", repairs)
+
     def test_catch_up_repairs_fold_in_log_order_with_separate_numbers_and_answers(self):
         refusal = dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
                        main="main-sha", tip="trunk-tip", findings="CONFLICT: crate/src/lib.rs")
@@ -194,7 +270,7 @@ class IntegrationTest(unittest.TestCase):
         events += [dict(refusal, tip="fixed")]
         self.assertEqual(list(integration.repair_tasks(PLAN, events, {})), ["demo/catch-up-1"])
         self.assertEqual(step(), integration.Step("stop", "fixed",
-                         "main conflicts with the trunk again after its catch-up repair; needs judgement"))
+                         "main catch-up refused repeatedly; needs judgement"))
         events[-1] = dict(refusal, tip="fixed", main="newer-sha")
         self.assertEqual(list(integration.repair_tasks(PLAN, events, {})),
                          ["demo/catch-up-1", "demo/catch-up-2"])
@@ -208,7 +284,9 @@ class IntegrationTest(unittest.TestCase):
         for n in range(1, 4):
             events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
                             main=f"main-{n}", tip=f"tip{n-1}"),
-                       merged(f"tip{n}", f"demo/catch-up-{n}")]
+                       merged(f"tip{n}", f"demo/catch-up-{n}"),
+                       dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                            main=f"tip{n}", tip=f"main-{n}")]
         tasks = integration.repair_tasks(PLAN, events, {})
         self.assertEqual(integration.next_step(PLAN, tasks, events), integration.Step("check", "tip3", "tip3"))
         events += [dict(run_started("demo/integration", 1, kind="check", base="tip3"), mid=True),

@@ -15,6 +15,7 @@ from fab.sh import Failed, Runner, run
 
 
 CATCH_UP = "catch-up"  # the step of a rejection when main does not merge into the trunk
+CATCH_LIMIT = 3  # refusals since the last clean catch-up before stopping for judgement
 QUEUE_LIMIT = 3  # queue rejections of a trunk before its plan stops for judgement
 
 
@@ -62,13 +63,23 @@ def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
             and event.get("kind") == "check" and event.get("task") == f"{plan.draft}/integration"]
 
 
+def _clean_catch_up(plan: Plan, event: dict) -> bool:
+    """A logged merge of main into this plan's trunk, by the tick or by hand."""
+    return (event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
+            and event.get("task") == f"{plan.draft}/integration" and event.get("branch") == "main")
+
+
 def _catch_up_refusals(plan: Plan, events: Sequence[dict]) -> dict[int, str | None]:
     """Catch-up refusals in log order: their repair id, or None after a repair for that
-    main sha has merged into the trunk. Only a merge before the refusal counts."""
+    main sha has merged into the trunk or CATCH_LIMIT refusals since a clean catch-up.
+    Only a merge before the refusal counts; repair numbering spans clean catch-ups."""
     result = {}
     repairs = {}
     merged = set()
+    refused = 0
     for position, event in enumerate(events):
+        if _clean_catch_up(plan, event):
+            refused = 0
         if (event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
                 and event.get("task") in repairs):
             merged.add(repairs[event["task"]])
@@ -76,7 +87,9 @@ def _catch_up_refusals(plan: Plan, events: Sequence[dict]) -> dict[int, str | No
                 or event.get("task") != f"{plan.draft}/integration"):
             continue
         main = event.get("main")
-        identifier = None if main and main in merged else f"{plan.draft}/catch-up-{len(repairs) + 1}"
+        refused += 1
+        identifier = (None if (main and main in merged) or refused >= CATCH_LIMIT
+                      else f"{plan.draft}/catch-up-{len(repairs) + 1}")
         result[position] = identifier
         if identifier is not None:
             repairs[identifier] = main
@@ -89,7 +102,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
 
     Check reports quote at most 120 lines. Mid repairs list tasks not merged at the check,
     given plan_tasks. Both kinds fold question.answered text into Answers in log order.
-    A refusal after its main sha's catch-up repair merged generates no further repair.
+    A stopping catch-up refusal generates no further repair.
     """
     if plan.landing != "integration":
         return {}
@@ -163,12 +176,13 @@ def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) 
 
 
 def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
-              main: str | None = None) -> Step | None:
+              main: str | None = None, trunk: str | None = None) -> Step | None:
     """Check an entirely merged trunk, ready its green tip when requested (queue_step), or stop
     after three failed checks. Wait for unfinished tasks, absent merges and checks in flight.
     The third end red stops before its generated repair can start. A catch-up refusal after
-    its main sha's repair merged stops for judgement. main is origin/main's sha when the
-    trunk lacks it, otherwise None; while tasks remain it may call for a catch-up. Pure."""
+    its main sha's repair merged, or the third since a clean catch-up, stops for judgement.
+    main is origin/main's sha when the trunk lacks it, otherwise None; trunk is the fetched
+    origin/<trunk> tip. A stopped ready plan containing main logs a hand catch-up there. Pure."""
     if plan.landing != "integration":
         return None
     tasks = {identifier: task for identifier, task in tasks.items() if task.kind != "red"}
@@ -184,8 +198,13 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
         return None
     if sum(check["outcome"] == "failed" and not check.get("mid") for check in checks) >= 3:
         return Step("stop", tip, "red 3 times; needs judgement")
-    if any(identifier is None for identifier in _catch_up_refusals(plan, events).values()):
-        return Step("stop", tip, "main conflicts with the trunk again after its catch-up repair; needs judgement")
+    clean = next((position for position in range(len(events) - 1, -1, -1)
+                  if _clean_catch_up(plan, events[position])), -1)
+    if any(identifier is None and position > clean
+           for position, identifier in _catch_up_refusals(plan, events).items()):
+        if plan.ready and main is None and trunk:
+            return Step("caught", trunk, "main caught up by hand")
+        return Step("stop", tip, "main catch-up refused repeatedly; needs judgement")
     views = state.fold(tasks, events)
     if any(view.status != "landed" for view in views.values()):
         return _mid_step(plan, tasks, views, events, tip, checks, main=main)
