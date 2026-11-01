@@ -1,5 +1,11 @@
 # agents
 
-fabrig's factory: the fleet's declarations and its deployment (`fleet/`, `tools/`), and in time the roles, prompts and tools that run the pipeline. Private. It does not go through fabrig's merge queue.
+fabrig's factory: fab, the code of the code-producing and landing pipelines
+(`fab/`, `bin/fab`, `bin/heavy`), its designs (`docs/design/`, starting at
+`docs/design/fab.md`) and its plans (`docs/plan/`). Private. It does not go
+through fabrig's merge queue: it lands through `bin/fab land`.
 
-`old/` is the legacy kit as it was at tag `legacy-2026-10-28`. Machines still run some of its tools from their frozen `~/src/rust/agents` checkouts until each tool is ported or retired. Never fast-forward those checkouts: this tree moved, and their links would break.
+`old/` is the legacy kit as it was at tag `legacy-2026-10-28`, kept as
+reference only. The old pipeline that followed it (`tools/`, `fleet/`,
+`pipeline/`, `prompts/`) was deleted on 2026-11-01; it is in history at
+7a7df4f.

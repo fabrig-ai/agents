@@ -12,7 +12,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 ## 2. After landing
 
 - **fabrig's slow tiers run on each new main,** ported from the agents
-  repository's `tools/after-landing` (`docs/design/after-landing.md`) and
+  repository's old `tools/after-landing` (its design at 7a7df4f) and
   fabrig's `tools/tiers/run`. `fab after-landing run --slot N` loops on one
   builder in one slot claimed for it (`fab slot claim N after-landing
   after-landing`); it refuses any other slot.

@@ -1,7 +1,0 @@
-[Unit]
-Description=Converge this machine to the fleet declarations
-
-[Service]
-Type=oneshot
-WorkingDirectory=%h
-ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/fleet-sync" --timer'

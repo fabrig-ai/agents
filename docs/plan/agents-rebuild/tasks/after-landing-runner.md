@@ -12,7 +12,7 @@ minutes = 30
 Fill `AfterLanding` and `main` in `fab/after_landing.py` as their
 docstrings say. Design: `docs/design/fab.md`, section 11. It replaces the
 agents repository's `tools/after-landing/after-landing` (read
-`docs/design/after-landing.md` sections 1-4 only if a detail is unclear);
+`docs/design/after-landing.md` at 7a7df4f, sections 1-4, only if a detail is unclear);
 what that tool does beyond these docstrings (posts, bisection, guardians,
 replay, coverage posts) is deliberately left out.
 

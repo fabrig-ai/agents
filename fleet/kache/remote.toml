@@ -1,7 +1,0 @@
-
-[cache.remote]
-type = "s3"
-bucket = "kache"
-endpoint = "http://10.80.0.13:3900"
-region = "garage"
-prefix = "artifacts"

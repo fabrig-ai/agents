@@ -1,7 +1,0 @@
-[files]
-# Ops and the coordinator still own routing changes.
-"src/rust/tmp/post/machines" = "check"
-# Existing kache remains ops-owned. Only a successful first --provision install
-# may create these two files; subsequent normal/provision runs only warn.
-".config/kache/config.toml" = "check"
-".config/systemd/user/kache.service" = "check"

@@ -1,7 +1,0 @@
-[Unit]
-Description=Run pipeline watch
-
-[Service]
-Type=oneshot
-WorkingDirectory=%h
-ExecStart=/bin/bash -lc 'exec "$$HOME/src/fabrig/current/tools/records/watch" --once'

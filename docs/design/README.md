@@ -6,9 +6,9 @@
   rebuildable from `docs/design/` at a high level. Describe responsibilities,
   inputs, outputs, state, failure handling and boundaries, without restating code.
 - **Cite a design by repository-root path and section,** for example
-  `docs/design/sessions.md`, section 3.
+  `docs/design/fab-tick.md`, section 3.
 - **Each design has a keeper.** Its designer keeps the document and its adjacent
-  status file, such as `sessions.md` and `sessions.status.md`, current.
+  status file, such as `fab-tick.md` and `fab-tick.status.md`, current.
 - **Every design closes with Later.** Put deferred work there. The status file
   says where code lags or departs, with the code or check that establishes it.
 - **Change both in the same branch** when a change alters a design. A planned
@@ -22,31 +22,34 @@
 sentences with bold leads. Keep implementation detail in the code and command
 reference. Index and draft READMEs explain the directory; they are not designs.
 
-**Command references stay beside code** in `tools/**/*.md`. Designs cite those
-references for syntax, options and detailed limits. They do not replace them.
-Paths below are relative to this repository unless labelled otherwise. Runtime
-paths and records-repository data paths are labelled where they are introduced.
+**Command syntax stays in the code** (`bin/fab` and its modules' docstrings).
+Designs cite it for options and detailed limits; they do not replace it.
+Paths are relative to this repository unless labelled otherwise. Runtime
+paths (`FAB_HOME`, other repositories) are labelled where they are introduced.
 
 ## 3. Index
 
-| Document | Owner | Code covered / migration |
-|---|---|---|
-| `docs/design/pipeline.md` | s/multi-coord | `pipeline/coordinators.toml`, `prompts/`, `tools/lease`; role and landing boundaries |
-| `docs/design/sessions.md` | s/multi-coord | `tools/session/`, `prompts/`; launch, context and succession |
-| `docs/design/records.md` | s/multi-coord | `tools/records/record`, `tools/records/record-collect`; durable memory and event collection |
-| `docs/design/watch.md` | s/multi-coord | `tools/records/watch`, `tools/records/watch.toml`; stuck-work detection |
-| `docs/design/status-page.md` | s/multi-coord | `tools/records/status-page`; public index and planned release data |
-| `docs/design/fleet.md` | s/deploy | `fleet/`, `tools/fleet-sync`, `tools/installed`, `fleet/bootstrap/`; references `tools/fleet-sync.md`, `fleet/**/README.md` |
-| `docs/design/gate.md` | s/deploy | `tools/check.sh`, `tools/land`; host gate lock |
-| `docs/design/qa.md` | s/qa | `tools/qa/`; custody, rung walks and planned passes, evidence and live tiers |
-| `docs/design/after-landing.md` | s/dynamic-memory | `tools/after-landing/`; published-tip checks, verdicts, routing and bisection |
-| `docs/design/fab.md` | the user's pipeline session | `fab/`, `bin/fab`; the pipelines' new code, replacing the tools above part by part (`docs/plan/agents-rebuild/plan.toml`) |
+All of the pipelines' code is fab (`fab/`, `bin/fab`); its designs are owned
+by the user's pipeline session. `docs/design/fab.md` is the overview and holds
+what the others share; its section 6 maps citations of older names.
 
-**Migration is owned work.** The remaining migration rows list current text and coverage
-responsibility. They do not assert that every tool already has a full design.
-Command-reference material remains beside code when its owner extracts a design.
+| Document | Subsystem |
+|---|---|
+| `docs/design/fab.md` | overview, where things live, the event log, tests, what is left out |
+| `docs/design/fab-tick.md` | plans, runs and the tick |
+| `docs/design/fab-calls.md` | Claude calls, review and the designer |
+| `docs/design/fab-landing.md` | landing |
+| `docs/design/fab-machines.md` | builders, slots, disk and logins |
+| `docs/design/fab-reports.md` | reports, accounting and the status page |
+| `docs/design/fab-after-landing.md` | after landing |
+| `docs/design/fab-gates.md` | gates and the structure review |
+| `docs/design/fab-channel.md` | the channel to the user |
+| `docs/design/fab-integration.md` | plans on fabrig and integration trunks |
+| `docs/design/fab-qa.md` | QA findings |
+
+The old pipeline's designs were deleted with its code on 2026-11-01; they
+are in history at 7a7df4f.
 
 ## 4. Later
 
-- Complete the remaining owners' design moves and fill uncovered code contracts.
-- Bring the remaining pipeline tools and role files over from fabrig, with designs.
+- None.

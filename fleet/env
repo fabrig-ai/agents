@@ -1,7 +1,0 @@
-SKEIN_TEST_CHROMIUM=$HOME/.local/opt/chromium-147.0.7727.101/bin/chromium
-TEMPER_FORGEJO=$HOME/.local/opt/forgejo-17.0.0/forgejo
-TEMPER_FORGEJO_RUNNER=$HOME/.local/opt/forgejo-runner-13.2.0/forgejo-runner
-DISABLE_AUTOUPDATER=1
-# Central state (claims, leases, records, mailbox homes) lives on hel8; tools reach it over ssh (0013).
-FABRIG_CENTRAL=free@204.168.210.29
-FABRIG_CENTRAL_HOST=hel8

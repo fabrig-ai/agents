@@ -160,6 +160,11 @@ its subsections are now spread over the designs below. Two rules hold
 throughout: whoever designs a thing never accepts it, and the flow grows from
 a small start rather than to a fixed cap.
 
+The old pipeline's designs (pipeline, sessions, records, watch, status-page,
+fleet, gate, qa and after-landing, for `tools/`, `fleet/`, `pipeline/` and
+`prompts/`) were deleted with that code on 2026-11-01 (retire, the user's
+go); they are readable in history at 7a7df4f.
+
 | Design | Subsystem | Old sections |
 |---|---|---|
 | `docs/design/fab-tick.md` | plans, runs and the tick | 4, 5, 13.2, 13.4, 13.9, 13.10 |
@@ -208,5 +213,6 @@ a small start rather than to a fixed cap.
 
 ## 7. Later
 
-- Retiring the session launcher, watch's session rules, mail, leases and the
-  event collector once nothing resident remains.
+- Deleting the frozen legacy checkouts on the machines (`~/src/rust/agents`,
+  `~/src/fabrig/agents`, `~/src/fabrig/current`) and the disabled old units'
+  files, once nothing reads them.
