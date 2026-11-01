@@ -229,3 +229,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   (tick.md 3); dogfood-faults/reruns (11-01) was refused three times on
   code that lived only in a merge. Whether to rebase with merges, refuse a
   branch holding one, or land its squashed diff is open.
+- `bin/fab land`'s 120 s wall limit on `bin/fab test`, left by plan
+  test-budget: it stops a hung suite, but a loaded enough machine still
+  refuses a good branch at it. Whether it should grow, or follow the suite's
+  CPU time (`docs/design/fab.md` 4), waits for a refusal it causes.
+- Turning a gate budget's excess red (2): excesses are `over` in the batch
+  and its detail log, and reject nothing.

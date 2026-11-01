@@ -1,13 +1,24 @@
 # fab status
 
-2026-10-30. Contract: `docs/design/fab.md` (its sections 1-5; each
+2026-11-01. Contract: `docs/design/fab.md` (its sections 1-5; each
 subsystem's design has its own status file, section 6). Plan:
 `docs/plan/agents-rebuild/plan.toml` (`bin/fab status docs/plan/agents-rebuild`).
 
 ## Present
 
 - **Package and tests:** `bin/fab`, the runner seam, the test runner with its
-  30 s budget, the test helpers; about 250 tests in about 3 s.
+  30 s CPU budget, the test helpers; 2231 tests in 23.1 s of CPU and 22.6 s
+  of wall on main 21b50d6 (11-01, load 0.8).
+- **The suite's budget is CPU time** (4; plan `docs/plan/test-budget`,
+  retired 11-01; 21b50d6): `fab/testrun.py` takes the delta of `os.times()`'s
+  user, system and both children's fields from before discovery, so a child
+  counts only once waited for, and fails past `BUDGET_SECONDS`, still 30.0.
+  The summary reads `fab test: 2231 tests in 22.6 s wall, 23.1 s CPU (budget
+  30 s CPU)`. `TimedResult`'s per-test wall times still name the slow tests,
+  and a `-k` run stays exempt. No reader parses the line; `fab/cli.py`'s help
+  says CPU. Tested with patched `os.times` and clocks (`test_testrun.py`),
+  not on a loaded machine (slice 1 has no walk). Each checkout runs its own
+  `bin/fab test`, so no machine action.
 - **The event log** on hel8 (`~/src/fabrig/fab/log.jsonl`) holds every run,
   landing and note since 10-30 20:11Z; `fab status` folds it.
 
@@ -28,3 +39,7 @@ subsystem's design has its own status file, section 6). Plan:
   deleted from this repository. The checkouts and unit files stay (Later).
 - **Parts done by hand have no task specs** (package, slot-probe), so the
   tick's design line lists them.
+- **A wall limit remains around the suite:** `bin/fab land` still stops
+  `bin/fab test` at 120 s of wall time (`docs/design/landing.status.md`,
+  gaps), so the request's loaded machine is safe only up to about five
+  times the suite's CPU time.
