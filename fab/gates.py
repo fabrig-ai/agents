@@ -27,7 +27,7 @@ EXEMPT = ("interface", "migration")  # task kinds that may change or remove a si
 
 @dataclass(frozen=True)
 class Finding:
-    gate: str  # one of GATES, or PARSE
+    gate: str  # one of GATES, PARSE, or briefs (no digest decides it)
     text: str  # one line, Markdown
 
 

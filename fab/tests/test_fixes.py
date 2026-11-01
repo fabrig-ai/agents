@@ -206,6 +206,10 @@ class FixesTasksTest(unittest.TestCase):
                          "docs/design/", "status file", "temper/docs/help/", "help tests",
                          "precheck --onto origin/main"):
             self.assertIn(fragment, task.body)
+        sentence = ("The plan's rung briefs are not this repair's to change: leave them, and say "
+                    "so in your report if one is at fault.")
+        self.assertIn(sentence, task.body.split("## Acceptance\n", 1)[1])
+        self.assertIn(sentence, " ".join(fixes.ROLE.read_text().split()))
         self.assertLess(task.body.index(SECTION), task.body.index("## Refusal"))
         self.assertLess(task.body.index("Use the fake model"), task.body.index("Keep the story"))
 

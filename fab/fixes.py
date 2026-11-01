@@ -180,7 +180,9 @@ def _body(finding: Finding, merged: Sequence[Finding], reason: str, section: str
             "the change and green after, naming the world and why it is the lowest. Then fix. "
             "Design text the change makes untrue changes in the same branch: the tree's "
             "docs/design/ and status file; temper/docs/help/ with its help tests. Then run "
-            "the task's own checks as any fabrig task (precheck --onto origin/main).\n")
+            "the task's own checks as any fabrig task (precheck --onto origin/main). "
+            "The plan's rung briefs are not this repair's to change: leave them, and say "
+            "so in your report if one is at fault.\n")
 
 
 def tasks(plan: Plan, events: Sequence[dict]) -> dict[str, Task]:

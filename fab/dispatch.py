@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, atomic, buffer, call_review, calls, channel, designer, drafts, findings, fix, fixes, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
+from fab import after_landing, atomic, buffer, call_review, calls, channel, designer, drafts, findings, fix, fixes, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_digest, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -1125,7 +1125,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
             case "land":
                 detail = _land(action, tasks, sh=sh, log_path=log_path)
             case "ready":
-                detail = _screen_ready(action, tasks[action.task], hosts, sh=sh, log_path=log_path)
+                detail = _screen_ready(action, tasks[action.task], hosts, plan=plan,
+                                       plan_dir=plan_dir, checkout=checkout, sh=sh, log_path=log_path)
             case "merge":
                 _merge_branch(action.branch, plan, checkout, task=action.task,
                               sh=sh, log_path=log_path)
@@ -2063,13 +2064,40 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
 
 
 def _screen_ready(action: Action, task: Task, hosts: Mapping[str, Host], *,
-                  sh: Runner, log_path: Path | None) -> str:
-    """Run the Rust gates before delivering receipts or pushing a task's ready ref."""
+                  plan: Plan, plan_dir: Path, checkout: Path, sh: Runner, log_path: Path | None) -> str:
+    """Screen Rust changes and finding repairs' briefs before receipts and the ready ref."""
     findings = rust_gates.screen(task, log.read(log_path), sh=sh, log_path=log_path)
+    if not findings and task.kind == fixes.KIND:
+        findings = _screen_briefs(action, task, plan, plan_dir, checkout, sh=sh, log_path=log_path)
     if findings:
         return "rejected gate:" + ",".join(dict.fromkeys(finding.gate for finding in findings))
     _ready(action, task, hosts, sh=sh, log_path=log_path)
     return action.detail
+
+
+def _screen_briefs(action: Action, task: Task, plan: Plan, plan_dir: Path, checkout: Path, *,
+                   sh: Runner, log_path: Path | None) -> list[gates.Finding]:
+    """Reject edits to any rung's brief at the remote tip (docs/design/qa.md, 2)."""
+    if not plan.rungs:
+        return []
+    relative = plan_dir.resolve().relative_to(checkout.resolve())
+    briefs = {(relative / path).as_posix() for rung in plan.rungs.values() for path in rung.brief}
+    home = log.home()
+    repo = home / "repos" / task.repo
+    tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{action.branch}^{{commit}}"],
+             cwd=str(repo), check=True).out.strip()
+    base = sh(["git", "merge-base", "refs/remotes/origin/main", tip],
+              cwd=str(repo), check=True).out.strip()
+    findings = [gates.Finding("briefs", f"`{entry.path}` is a rung brief, not this "
+                             "repair's to change: drop the edit")
+                for entry in rust_digest.changes(repo, base, tip, sh=sh) if entry.path in briefs]
+    if findings:
+        run_id = next(event["run"] for event in reversed(log.read(log_path))
+                      if event.get("ev") == "run.started" and event.get("task") == task.id)
+        log.append("branch.rejected", path=log_path, task=task.id, branch=action.branch, tip=tip,
+                   step="gate:briefs", log=str(home / "digests" / f"{run_id}.md"),
+                   findings=gates.findings_text(findings))
+    return findings
 
 
 def _integration_tasks(plan: Plan, tasks: Mapping[str, Task], events: list[dict]) -> dict[str, Task]:

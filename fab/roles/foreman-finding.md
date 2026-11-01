@@ -21,6 +21,9 @@ the finding needs.
 When unsure, it is the code's: a repair that finds nothing to change
 says so.
 
+The plan's rung briefs are not this repair's to change: leave them, and
+say so in your report if one is at fault.
+
 ## Your report
 
 Its first line is one of:

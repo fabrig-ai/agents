@@ -7266,13 +7266,128 @@ class FindingDispatchTest(unittest.TestCase):
                         self.assertEqual(action.detail, f"{fix.RUNS} runs without landing; needs judgement")
 
     def test_finding_dispatch_refusal_foreman_uses_main(self):
-        events = [run_started(self.repair.id, branch=self.repair.id), run_ended(self.repair.id),
-                  dict(ev="branch.rejected", task=self.repair.id, branch=self.repair.id,
-                       tip="repair-tip", step="test", findings="assertion failed")]
-        for record in events:
+        for step in ("test", "gate:briefs"):
+            with self.subTest(step=step):
+                self.path = self.home / f"{step}.jsonl"
+                events = [run_started(self.repair.id, branch=self.repair.id), run_ended(self.repair.id),
+                          dict(ev="branch.rejected", task=self.repair.id, branch=self.repair.id,
+                               tip="repair-tip", step=step, findings="assertion failed")]
+                for record in events:
+                    log.append(path=self.path, **record)
+                action, = dispatch.repair_actions(self.tasks, log.read(self.path))
+                dispatch._examine(action, self.tasks, self.hosts, plan=self.plan, sh=self.fake, log_path=self.path)
+                record = log.read(self.path)[-1]
+                self.assertEqual((record["task"], record["base"], record["branch"]),
+                                 (self.repair.id + "/foreman", "origin/main", self.repair.id))
+
+
+class FindingBriefsTest(unittest.TestCase):
+    """Finding repairs keep every rung's brief unchanged before readying."""
+
+    def setUp(self):
+        """Put a ladder below the checkout and answer local git only with fakes."""
+        self.home = self.enterContext(tmp_home())
+        self.checkout = self.home / "checkout"
+        self.directory = write_ladder(self.checkout / "temper/docs/plan/ladder", "draft")
+        self.plan = replace(plan.load_plan(self.directory / "plan.toml"), repo="fabrig")
+        self.repair = fix.task("draft/finding-1", "finding", "qa", "Repair the finding.", [])
+        self.path = self.home / "events.jsonl"
+        self.branch = "draft/finding-1-r1"
+        self.action = Action("ready", task=self.repair.id, branch=self.branch, detail=self.branch)
+        self.repo = log.home() / "repos" / "fabrig"
+        (self.repo / ".git").mkdir(parents=True)
+        self.fake = FakeRunner().on(["git", "rev-parse", "--verify"], Result(0, "repair-tip\n"))
+        self.fake.on(["git", "merge-base"], Result(0, "base-tip\n"))
+        self.numstat = ["git", "diff", "--numstat"]
+        self.fake.on(self.numstat, Result(0))
+        self.screen = self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
+        self.output = self.enterContext(redirect_stdout(io.StringIO()))
+        for record in (run_started(self.repair.id, branch="draft/finding-1"),
+                       run_ended(self.repair.id), run_started(self.repair.id, 2, branch=self.branch),
+                       run_ended(self.repair.id, 2), run_started("draft/other", branch="draft/other")):
             log.append(path=self.path, **record)
-        action, = dispatch.repair_actions(self.tasks, log.read(self.path))
-        dispatch._examine(action, self.tasks, self.hosts, plan=self.plan, sh=self.fake, log_path=self.path)
-        record = log.read(self.path)[-1]
-        self.assertEqual((record["task"], record["base"], record["branch"]),
-                         (self.repair.id + "/foreman", "origin/main", self.repair.id))
+
+    def _changes(self, *paths):
+        """Replace the fake numstat reply, preserving its supplied path order."""
+        self.fake.rules[-1] = (self.numstat, Result(0, "".join(f"0\t1\t{path}\0" for path in paths)))
+
+    def _take(self):
+        """Drive the ready action through the dispatch shell."""
+        dispatch._take(self.action, {self.repair.id: self.repair}, {}, self.directory,
+                       plan=self.plan, checkout=self.checkout, sh=self.fake, log_path=self.path)
+
+    def _assert_ready(self):
+        """Require a ready record and its ready ref push, with no refusal or failed action."""
+        self._take()
+        records = log.read(self.path)
+        self.assertEqual(records[-1]["ev"], "branch.ready")
+        self.assertFalse(any(record["ev"] in ("branch.rejected", "note") for record in records))
+        self.assertIn(["git", "push", "origin", f"repair-tip:refs/heads/ready/{self.branch}"],
+                      self.fake.argvs())
+
+    def test_finding_brief_edits_reject_in_diff_order_with_last_run_digest(self):
+        """Shared and other rungs' deleted briefs reject once, with repository paths."""
+        paths = ["temper/docs/plan/ladder/briefs/b1.md", "temper/docs/plan/ladder/briefs/kit.md",
+                 "temper/docs/plan/ladder/briefs/b0.md"]
+        self._changes(paths[0], "temper/src/lib.rs", *paths[1:])
+        self._take()
+        refusal = log.read(self.path)[-1]
+        self.assertEqual({key: refusal[key] for key in ("ev", "task", "branch", "tip", "step", "log")},
+                         dict(ev="branch.rejected", task=self.repair.id, branch=self.branch,
+                              tip="repair-tip", step="gate:briefs",
+                              log=str(log.home() / "digests/draft/finding-1-2.md")))
+        expected = [gates.Finding("briefs", f"`{path}` is a rung brief, not this "
+                                 "repair's to change: drop the edit") for path in paths]
+        self.assertEqual(refusal["findings"], gates.findings_text(expected))
+        self.assertFalse(any(record["ev"] == "branch.ready" for record in log.read(self.path)))
+        self.assertFalse(any("refs/heads/ready/" in arg for call in self.fake.calls for arg in call.argv))
+        self.assertIn("rejected gate:briefs", self.output.getvalue())
+        self.assertEqual(self.fake.argvs(), [
+            ["git", "rev-parse", "--verify", f"refs/remotes/origin/{self.branch}^{{commit}}"],
+            ["git", "merge-base", "refs/remotes/origin/main", "repair-tip"],
+            ["git", "diff", "--numstat", "-z", "--no-renames", "base-tip", "repair-tip", "--"]])
+        self.assertTrue(all(call.cwd == str(self.repo) for call in self.fake.calls))
+        action, = dispatch.repair_actions({self.repair.id: self.repair}, log.read(self.path))
+        self.assertEqual(action, Action("examine", task=self.repair.id, branch=self.branch,
+                                        detail=f"gate:briefs {self.branch}"))
+
+    def test_finding_other_files_are_readied(self):
+        """A same-named file outside the plan is not one of its rung briefs."""
+        self._changes("temper/src/lib.rs", "briefs/kit.md")
+        self._assert_ready()
+        self.assertTrue(any(call.argv[:2] == ["git", "diff"] for call in self.fake.calls))
+
+    def test_feature_and_red_brief_edits_are_not_checked(self):
+        """Only finding repairs pay for the brief comparison."""
+        self._changes("temper/docs/plan/ladder/briefs/kit.md")
+        for kind in ("feature", "red"):
+            with self.subTest(kind=kind):
+                self.repair = replace(self.repair, kind=kind)
+                self.fake.calls.clear()
+                self._assert_ready()
+                self.assertFalse(any(call.argv[:2] in (["git", "diff"], ["git", "merge-base"])
+                                     for call in self.fake.calls))
+                self.assertEqual(len(self.fake.calls), 3)
+
+    def test_finding_without_rungs_is_readied_without_a_comparison(self):
+        """A plan without rung briefs needs no extra git calls."""
+        self.plan = replace(self.plan, rungs={})
+        self._assert_ready()
+        self.assertEqual([call.argv[:2] for call in self.fake.calls],
+                         [["git", "fetch"], ["git", "rev-parse"], ["git", "push"]])
+
+    def test_rust_rejection_skips_brief_comparison_and_readying(self):
+        """A Rust refusal remains the sole refusal until the branch is readied again."""
+        def refuse(task, events, **kwargs):
+            log.append("branch.rejected", path=kwargs["log_path"], task=task.id,
+                       branch=self.branch, tip="repair-tip", step="gate:ratchet", log="digest",
+                       findings="count rose")
+            return [gates.Finding("ratchet", "count rose")]
+
+        self.screen.side_effect = refuse
+        self._changes("temper/docs/plan/ladder/briefs/kit.md")
+        self._take()
+        refusals = [record for record in log.read(self.path) if record["ev"] == "branch.rejected"]
+        self.assertEqual([record["step"] for record in refusals], ["gate:ratchet"])
+        self.assertFalse(any(record["ev"] == "branch.ready" for record in log.read(self.path)))
+        self.assertEqual(self.fake.calls, [])
