@@ -14,12 +14,13 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, tier_reds, wake
+from fab import atomic, call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, run, ssh
-from fab.tests import wakes
+from fab.tests import qa_records as qa, wakes
 from fab.tests.buffer_order import ids, sliced, spec, specs
+from fab.tests.ladder_plans import write_ladder
 from fab.tests.test_repairs import (TASK as REPAIR_TASK, foreman_run, rejected, report,
                                     settled, task_run)
 from fab.tests.support import (GIT_ENV, FakeRunner, call_ended, call_started, git, git_pair,
@@ -936,6 +937,204 @@ class CallActionsTest(unittest.TestCase):
             first = self.actions(events, design)
             self.assertEqual(self.actions(events, design), first)
         self.assertEqual((self.plan, self.tasks, events, design), before)
+
+
+class LadderTickTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.directory = write_ladder(self.home / "plan")
+        self.plan = plan.load_plan(self.directory / "plan.toml")
+        self.editions = {rung.id: walks.edition([
+            (path, (self.directory / path).read_text()) for path in rung.brief])
+            for rung in self.plan.rungs.values()}
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
+                                    Result(0, str(self.home)))
+        self.fake.on(["git", "show"], lambda call: Result(
+            0, (self.home / call.argv[-1].split(":", 1)[1]).read_text()))
+        self.now = self.enterContext(patch.object(log, "now", return_value=qa.STAMP))
+        self.out = io.StringIO()
+        self.enterContext(redirect_stdout(self.out))
+
+    def append(self, *events):
+        for entry in events:
+            fields = dict(entry)
+            log.append(fields.pop("ev"), **fields)
+
+    def add_walk(self, number=1, *, verdict="fail", identifiers=("finding-1",),
+                 draft="ladder", edition=None):
+        walk = f"walk-{number}"
+        fields = dict(draft=draft, backend="claude-forgejo",
+                      edition=self.editions["b0"] if edition is None else edition)
+        self.append(qa.walk_started(walk, "b0", **fields))
+        for index, identifier in enumerate(identifiers, 1):
+            self.append(qa.finding_raised(identifier, walk, "b0", index=index, **fields))
+        self.append(qa.walk_ended(walk, verdict, identifiers))
+
+    def end_triage(self, report, *, call="triage-1", draft="ladder", outcome="done"):
+        fields = dict(call=call, role="triage", subject=triage.subject(draft))
+        self.append(log.record("call.started", **fields),
+                    log.record("call.ended", outcome=outcome, **fields))
+        if report is not None:
+            atomic.write(log.home() / "calls" / call / "report.md", report)
+
+    def tick(self, **kwargs):
+        return dispatch.tick(self.directory, sh=self.fake, hosts={}, **kwargs)
+
+    def test_failed_walk_starts_one_triage_call_with_subject_unit_and_plan(self):
+        self.add_walk()
+        actions = self.tick()
+        self.assertEqual([action for action in actions if action.kind == "call"],
+                         [Action("call", task="ladder/triage", run_kind="triage")])
+        self.assertEqual([argv for argv in self.fake.argvs() if argv[0] == "systemd-run"],
+                         [["systemd-run", "--user", "--collect", "--unit",
+                           drafts.unit("triage", "ladder/triage"), FAB, "call", "triage",
+                           "--plan", str(self.directory.resolve())]])
+
+    def test_passing_walk_waits_until_thirty_minutes(self):
+        self.add_walk(verdict="pass")
+        self.now.return_value = "2026-11-01T00:29:59.000Z"
+        self.assertFalse(any(action.kind == "call" for action in self.tick()))
+        self.now.return_value = "2026-11-01T00:30:00.000Z"
+        self.assertEqual([action.run_kind for action in self.tick() if action.kind == "call"],
+                         ["triage"])
+
+    def test_passing_walk_starts_when_four_new_findings_accumulate(self):
+        self.add_walk(verdict="pass", identifiers=("finding-1", "finding-2", "finding-3"))
+        self.assertFalse(any(action.kind == "call" for action in self.tick()))
+        self.add_walk(2, verdict="pass", identifiers=("finding-4",))
+        self.assertEqual([action.run_kind for action in self.tick() if action.kind == "call"],
+                         ["triage"])
+
+    def test_open_triage_question_blocks_urgent_findings_across_ticks(self):
+        self.add_walk()
+        self.end_triage("Question: Which path?", outcome="question")
+        self.tick()
+        self.tick()
+        self.assertEqual(units(self.fake), [])
+
+    def test_triage_in_flight_starts_no_second_call(self):
+        self.add_walk()
+        self.append(log.record("call.started", call="triage-1", role="triage",
+                               subject="ladder/triage"))
+        self.tick()
+        self.tick()
+        self.assertEqual(units(self.fake), [])
+
+    def test_other_drafts_findings_do_not_start_triage(self):
+        self.add_walk(draft="other")
+        self.tick()
+        self.assertEqual(units(self.fake), [])
+
+    def test_ended_triage_report_records_each_decision_once_across_ticks(self):
+        self.add_walk(identifiers=tuple(f"finding-{n}" for n in range(1, 8)))
+        self.end_triage("""Done: 7 decisions
+finding-1: path ctl: Repair the story
+finding-2: path box: Repair the connection; user: Reinstall the app
+finding-3: backlog: Outside the story
+finding-4: user: Which account?
+finding-5: brief b0: The gate is beatable
+finding-6: merge finding-1: Same cause
+finding-7: drop: Walk setup
+""")
+        self.end_triage("Done: 1 decisions\nfinding-3: drop: Other draft\n",
+                        call="other-triage", draft="other")
+        self.tick()
+        first = [entry for entry in log.read() if entry["ev"].startswith("finding.")
+                 and entry["ev"] != "finding.raised"]
+        self.tick()
+        self.assertEqual([entry for entry in log.read() if entry["ev"].startswith("finding.")
+                          and entry["ev"] != "finding.raised"], first)
+        self.assertEqual([entry.get("decision", "merge") for entry in first],
+                         ["path", "path", "backlog", "user", "brief", "merge", "drop"])
+        self.assertEqual(first[1]["question"], "Reinstall the app")
+        self.assertEqual(first[4]["owner"], "b0")
+        self.assertEqual(first[5]["by"], "triage-1")
+        self.assertEqual(units(self.fake), [])
+        self.assertEqual(self.out.getvalue().count("triage ladder 7 records\n"), 1)
+
+    def test_report_with_no_decisions_records_one_note(self):
+        self.add_walk()
+        self.end_triage("Done: no valid lines\n")
+        self.tick()
+        self.tick()
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual([entry["text"] for entry in notes], ["triage triage-1: no decisions"])
+
+    def test_missing_report_is_noted_and_retried_when_it_arrives(self):
+        self.add_walk()
+        self.end_triage(None)
+        self.tick()
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("triage-1/report.md", notes[0]["text"])
+        atomic.write(log.home() / "calls/triage-1/report.md",
+                     "Done: 1 decisions\nfinding-1: drop: Walk setup\n")
+        self.tick()
+        self.assertEqual([entry["decision"] for entry in log.read()
+                          if entry["ev"] == "finding.triaged"], ["drop"])
+
+    def test_rerun_records_one_pass_before_decide_and_none_on_next_tick(self):
+        self.add_walk(verdict="pass", identifiers=())
+        self.add_walk(2, verdict="pass", identifiers=())
+        with patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
+            self.tick()
+        passed = [entry for entry in log.read() if entry["ev"] == "rung.passed"]
+        self.assertEqual(passed, [qa.rung_passed("b0", walk="walk-2", commit="commit",
+                                               edition=self.editions["b0"])])
+        self.assertIn(passed[0], decide.call_args.args[2])
+        self.tick()
+        self.assertEqual([entry for entry in log.read() if entry["ev"] == "rung.passed"], passed)
+        self.assertEqual(self.out.getvalue().count("passes ladder 1 rungs\n"), 1)
+
+    def test_decisions_then_passes_reach_decide_and_use_one_edition_read(self):
+        self.add_walk(verdict="pass")
+        self.add_walk(2, verdict="pass", identifiers=())
+        self.end_triage("Done: 1 decisions\nfinding-1: backlog: Off path\n")
+        with patch.object(walks, "editions", wraps=walks.editions) as editions:
+            with patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
+                self.tick()
+        editions.assert_called_once_with(self.plan, self.directory, sh=self.fake)
+        self.assertEqual([entry["ev"] for entry in decide.call_args.args[2]][-2:],
+                         ["finding.triaged", "rung.passed"])
+        self.assertEqual(units(self.fake), [])
+        self.assertLess(self.out.getvalue().index("triage ladder"),
+                        self.out.getvalue().index("passes ladder"))
+
+    def test_changed_edition_does_not_record_old_rerun(self):
+        self.add_walk(verdict="pass", identifiers=(), edition="old-edition")
+        self.add_walk(2, verdict="pass", identifiers=(), edition="old-edition")
+        self.tick()
+        self.assertFalse(any(entry["ev"] == "rung.passed" for entry in log.read()))
+
+    def test_unreadable_edition_logs_one_note_and_keeps_triage_moving(self):
+        self.add_walk(verdict="pass", identifiers=tuple(f"finding-{n}" for n in range(1, 5)))
+        self.add_walk(2, verdict="pass", identifiers=())
+        self.fake.rules.insert(0, (["git", "show"], Result(1, err="missing brief")))
+        self.tick()
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("b0", notes[0]["text"])
+        self.assertIn("briefs/kit.md", notes[0]["text"])
+        self.assertFalse(any(entry["ev"] == "rung.passed" for entry in log.read()))
+        self.assertEqual(units(self.fake), [drafts.unit("triage", "ladder/triage")])
+        self.fake.rules.pop(0)
+        self.tick()
+        self.assertEqual([entry["walk"] for entry in log.read() if entry["ev"] == "rung.passed"],
+                         ["walk-2"])
+
+    def test_ladder_records_respect_explicit_log_path(self):
+        path = self.home / "custom/log.jsonl"
+        self.add_walk(verdict="pass")
+        self.add_walk(2, verdict="pass", identifiers=())
+        self.end_triage("Done: 1 decisions\nfinding-1: backlog: Off path\n")
+        atomic.write(path, log.default_path().read_text())
+        log.default_path().unlink()
+        self.tick(log_path=path)
+        self.tick(log_path=path)
+        self.assertEqual(log.read(), [])
+        self.assertEqual([entry["ev"] for entry in log.read(path)
+                          if entry["ev"] in ("finding.triaged", "rung.passed")],
+                         ["finding.triaged", "rung.passed"])
 
 
 class TickTest(unittest.TestCase):
