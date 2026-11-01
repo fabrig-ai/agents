@@ -13,6 +13,7 @@ COMMANDS = {
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),
     "report": ("fab.report", "the standing reports of a plan and of the landing"),
+    "serve": ("fab.serve", "the public status page, live from the log"),
     "status": ("fab.state", "a plan's tasks and their status"),
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
