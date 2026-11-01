@@ -648,8 +648,21 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def _retire_designs(repo: Path, draft: str, plan_path: str, branch: str) -> list[str]:
+    """Designs changed on main but absent from the retire tip (docs/design/calls.md, 2)."""
+    from fab import designer
+
+    run(["git", "fetch", "origin"], cwd=str(repo), check=True)
+    try:
+        main = designer.changed_designs(repo, draft, rev="origin/main", sh=run, plan_path=plan_path)
+        tip = designer.changed_designs(repo, draft, rev=f"origin/{branch}", sh=run, plan_path=plan_path)
+    except ValueError:
+        return []
+    return sorted(set(main) - set(tip))
+
+
 def _chain_call(role: str, root: str, repo: Path, events: list[dict],
-                facts: Mapping[str, str]) -> tuple[str, str, dict]:
+                facts: Mapping[str, str], *, draft: str, plan_path: str) -> tuple[str, str, dict]:
     """Compile an amend or settle call from its root, refusing an invalid chain state."""
     from fab import call_review
 
@@ -657,7 +670,10 @@ def _chain_call(role: str, root: str, repo: Path, events: list[dict],
     if role == "amend":
         if chain is None or chain.state != "amend":
             raise ValueError(f"chain {root!r} must be in state amend")
-        return (call_review.amend_brief(chain, **facts), chain.subject,
+        designs = ()
+        if chain.role == "retire" and chain.refusals and call_review.land_refusal(chain.refusals[-1]):
+            designs = _retire_designs(repo, draft, plan_path, chain.branch)
+        return (call_review.amend_brief(chain, designs=designs, **facts), chain.subject,
                 dict(branch=chain.branch, amends=chain.root))
     attempts = call_review.settle_calls(chain, events) if chain else []
     recorded = {event.get("settle") for event in events if event.get("ev") == "chain.settled"}
@@ -697,7 +713,8 @@ def main(argv: list[str]) -> int:
         options = {}
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
         if args.role in ("amend", "settle"):
-            text, subject, options = _chain_call(args.role, args.root, repo, events, facts)
+            text, subject, options = _chain_call(args.role, args.root, repo, events, facts,
+                                                draft=plan.draft, plan_path=plan_path)
         elif args.role == "skeleton":
             if args.part not in plan.parts:
                 raise ValueError(f"unknown part {args.part!r}")

@@ -30,6 +30,8 @@ CONSISTENCY = Path(__file__).resolve().parent / "roles" / "consistency.md"  # a 
 DIFF_LIMIT = 120_000  # characters of the diff a review brief quotes; the run reads the rest itself
 FINDINGS_LINES = 40  # lines of a refusing report quoted in later briefs
 INFRA_LIMIT = 3  # review runs ending infra since the reset that hold the chain
+LAND_HOLD = "refused by fab land after its amendment"  # a landing refusal holds the amended tip
+LAND_STEPS = ("fetch", "rebase", "paths", "test", "push")  # fab land, excluding queue and trunk steps
 STATES = ("review", "reviewing", "approved", "amend", "amending", "hold", "parked", "finished")
 
 
@@ -77,8 +79,8 @@ def chains(events: Iterable[dict]) -> dict[str, Chain]:
     - hold, reason `<INFRA_LIMIT> review runs ended infra`: the last one ended infra;
     - approved: the last review run ended done;
     - amend: it refused, and the chain has no amend call since the reset;
-    - hold, reason `refused after its amendment`: it refused.
-
+    - hold, reason `refused by fab land after its amendment` for a fab land refusal,
+      else `refused after its amendment`: it refused.
     Pure: no file is read. Records missing a field the rule reads are skipped."""
     started, owners, folded, reviews = {}, {}, {}, {}
     for position, event in enumerate(events):
@@ -202,7 +204,8 @@ def settle_brief(chain: Chain, checkout: Path, events: Iterable[dict], *,
 
     Fetch the branch and quote its diff with the review brief's bound. Include every
     refusal and amend report's path and excerpt, the root brief's path and hold reason.
-    The second settle permits land or user only. Commands go through sh.
+    A LAND_HOLD permits amend or user first, user only second; other holds permit land
+    too. Commands go through sh (docs/design/calls.md, 2).
     """
     def git(*argv):
         return sh(["git", *argv], cwd=str(checkout), check=True).out
@@ -217,8 +220,7 @@ def settle_brief(chain: Chain, checkout: Path, events: Iterable[dict], *,
     facts = (f"- Call: {chain.root} ({chain.role})\n- Subject: {chain.subject}\n"
              f"- Branch: `{chain.branch}`\n- Base: `{base}`\n- Tip: `{tip}`\n"
              f"- Its brief: `{directory / chain.root / 'brief.md'}`\n- Hold: {chain.reason}")
-    restriction = ("Amend is no longer an option: land or user only."
-                   if settle_calls(chain, events) else "Choose land, amend or user.")
+    restriction = _settle_restriction(chain, bool(settle_calls(chain, events)))
     amendments = []
     for call in chain.calls[1:]:
         path = directory / call / "report.md"
@@ -233,7 +235,8 @@ def settle_brief(chain: Chain, checkout: Path, events: Iterable[dict], *,
                          ("The diff", change)])
 
 
-def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
+def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str,
+                designs: Sequence[str] = ()) -> str:
     """The amend call's brief, through fab.calls' own section builder and facts (so
     fab.calls.start rebinds its `# Call facts` as for any call), sections in this order:
 
@@ -246,7 +249,10 @@ def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
        task you are finishing.`
     4. `Findings`: per refusal in order, `## <run>` and the first FINDINGS_LINES lines of
        FAB_HOME/runs/<run>/report.md (`(report missing)` when it cannot be read); `(none)`
-       when the chain has no refusals.
+       when the chain has no refusals. fab land refusals name their step and quote their log.
+    5. `Designs main changed since your branch`, only for non-empty designs: each design
+       and its designer.status_path, then ask to check those status files against the branch
+       (docs/design/calls.md, 2).
 
     ValueError past fab.calls.BRIEF_LIMIT, as every call's brief."""
     directory = log.home() / "calls"
@@ -255,10 +261,16 @@ def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str) -> str:
     facts.extend(f"- Amended by: {call} (report `{directory / call / 'report.md'}`)"
                  for call in chain.calls[1:])
     facts.append("Read its brief first: it is the task you are finishing.")
-    return calls._brief([("Role", AMENDER.read_text().rstrip("\n")),
-                         ("Call facts", calls._facts(call_id, branch, report)),
-                         ("The call you amend", "\n".join(facts)),
-                         ("Findings", _findings(chain.refusals))])
+    sections = [("Role", AMENDER.read_text().rstrip("\n")),
+                ("Call facts", calls._facts(call_id, branch, report)),
+                ("The call you amend", "\n".join(facts)),
+                ("Findings", _findings(chain.refusals))]
+    if designs:
+        paths = "\n".join(f"- `{path}` (status `{designer.status_path(path)}`)" for path in designs)
+        sections.append(("Designs main changed since your branch", paths + "\n\n" +
+                         "Main changed these designs after your branch's tip: check each one's status file "
+                         "against what your branch writes."))
+    return calls._brief(sections)
 
 
 def start(chain: Chain, repo: str, checkout: Path, host: Host, events: Iterable[dict], *,
@@ -409,7 +421,35 @@ def _state(chain: dict) -> tuple[str, str]:
         return ("review", "") if count < INFRA_LIMIT else ("hold", f"{INFRA_LIMIT} review runs ended infra")
     if latest["outcome"] == "done":
         return "approved", ""
-    return ("hold", "refused after its amendment") if amendments else ("amend", "")
+    reason = LAND_HOLD if land_refusal(chain["refusals"][-1]) else "refused after its amendment"
+    return ("hold", reason) if amendments else ("amend", "")
+
+
+def land_refusal(refusal: str) -> dict | None:
+    """Return fab land's branch.rejected record, else None (docs/design/calls.md, 2).
+
+    A queue:-encoded record must have no queue_ts and a step in LAND_STEPS; review
+    run ids, queue and integration trunk rejections are not fab land refusals.
+    """
+    if not refusal.startswith("queue:"):
+        return None
+    try:
+        record = json.loads(refusal.removeprefix("queue:"))
+    except json.JSONDecodeError:
+        return None
+    if (isinstance(record, dict) and record.get("ev") == "branch.rejected"
+            and "queue_ts" not in record and record.get("step") in LAND_STEPS):
+        return record
+    return None
+
+
+def _settle_restriction(chain: Chain, second: bool) -> str:
+    """Limit the verdicts to ones that can resolve this hold without landing a refused tip."""
+    if chain.reason == LAND_HOLD:
+        return ("Amend is no longer an option, and land would land the tip fab land refused: user only."
+                if second else "A land verdict would land the tip fab land just refused "
+                "(refused again at rebase, paths or test): choose amend or user.")
+    return "Amend is no longer an option: land or user only." if second else "Choose land, amend or user."
 
 
 def _findings(refusals: tuple[str, ...]) -> str:
@@ -419,9 +459,13 @@ def _findings(refusals: tuple[str, ...]) -> str:
         heading = run_id
         if run_id.startswith("queue:"):
             rejection = json.loads(run_id.removeprefix("queue:"))
-            heading = "Queue rejection"
-            text = (f"Step: {rejection['step']}\n" + rejection.get("findings", "") +
-                    f"\nLog: {rejection.get('log', '(missing)')}")
+            if land_refusal(run_id):
+                heading = f"`fab land` refused at {rejection['step']}"
+                text = f"Step: {rejection['step']}\nLog:\n{rejection.get('log', '(missing)')}"
+            else:
+                heading = "Queue rejection"
+                text = (f"Step: {rejection['step']}\n" + rejection.get("findings", "") +
+                        f"\nLog: {rejection.get('log', '(missing)')}")
         else:
             try:
                 text = (log.home() / "runs" / run_id / "report.md").read_text()

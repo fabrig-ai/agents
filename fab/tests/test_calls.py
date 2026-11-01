@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import call_review, calls, channel, cli, log
+from fab import call_review, calls, channel, cli, designer, log
 from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.ladder_plans import write_ladder
@@ -978,6 +978,73 @@ class StartTest(unittest.TestCase):
             self.assertEqual(fake.calls, [])
 
 
+class ChainCallTest(unittest.TestCase):
+    def compile_amend(self, root, role="retire", *, queue=False, review=False):
+        events = [call_started("root", role, "demo/" + role), call_ended("root")]
+        if review:
+            events += [dict(ev="run.started", run="review-1", kind="review", task="root"),
+                       dict(ev="run.ended", run="review-1", outcome="failed")]
+        else:
+            rejection = dict(ev="branch.rejected", branch="calls/root", step="rebase", log="CONFLICT in x")
+            events.append(dict(rejection, queue_ts="queued") if queue else rejection)
+        return calls._chain_call("amend", "root", root, events,
+                                 dict(call_id="amend", branch="calls/root", report="/report"),
+                                 draft="demo", plan_path="nested/docs/plan/demo")
+
+    def test_retire_land_amend_compares_main_and_branch_designs_after_fetch(self):
+        with tmp_home() as root:
+            fake = FakeRunner()
+
+            def changed(checkout, draft, *, rev, sh, plan_path):
+                self.assertEqual((checkout, draft, sh, plan_path),
+                                 (root, "demo", fake, "nested/docs/plan/demo"))
+                self.assertEqual(fake.argvs(), [["git", "fetch", "origin"]])
+                return {"origin/main": ["docs/design/z.md", "docs/design/x.md", "docs/design/shared.md"],
+                        "origin/calls/root": ["docs/design/shared.md", "docs/design/branch.md"]}[rev]
+
+            with patch.object(calls, "run", fake), \
+                 patch.object(designer, "changed_designs", side_effect=changed) as changes:
+                text, subject, options = self.compile_amend(root)
+            self.assertEqual([call.kwargs["rev"] for call in changes.call_args_list],
+                             ["origin/main", "origin/calls/root"])
+            self.assertEqual(subject, "demo/retire")
+            self.assertEqual(options, dict(branch="calls/root", amends="root"))
+            self.assertIn("- `docs/design/x.md` (status `docs/design/x.status.md`)", text)
+            self.assertIn("- `docs/design/z.md` (status `docs/design/z.status.md`)", text)
+            self.assertLess(text.index("- `docs/design/x.md`"), text.index("- `docs/design/z.md`"))
+            self.assertNotIn("docs/design/shared.md", text)
+            self.assertNotIn("docs/design/branch.md", text)
+            self.assertTrue(all(call.cwd == str(root) for call in fake.calls))
+
+    def test_other_amendments_do_not_fetch_or_compute_designs(self):
+        for role, options in (("skeleton", {}), ("retire", dict(review=True)), ("retire", dict(queue=True))):
+            with self.subTest(role=role, options=options), tmp_home() as root:
+                fake = FakeRunner()
+                with patch.object(calls, "run", fake), patch.object(designer, "changed_designs") as changes:
+                    text, _, _ = self.compile_amend(root, role, **options)
+                changes.assert_not_called()
+                self.assertEqual(fake.argvs(), [])
+                self.assertNotIn("# Designs main changed since your branch", text)
+
+    def test_missing_plan_history_at_either_revision_still_compiles_amend(self):
+        for missing in ("origin/main", "origin/calls/root"):
+            with self.subTest(missing=missing), tmp_home() as root:
+                fake = FakeRunner()
+
+                def changed(checkout, draft, *, rev, **kwargs):
+                    if rev == missing:
+                        raise ValueError("plan history missing")
+                    return ["docs/design/x.md"]
+
+                with patch.object(calls, "run", fake), \
+                     patch.object(designer, "changed_designs", side_effect=changed):
+                    text, subject, options = self.compile_amend(root)
+                self.assertNotIn("# Designs main changed since your branch", text)
+                self.assertIn("## `fab land` refused at rebase", text)
+                self.assertEqual((subject, options["amends"]), ("demo/retire", "root"))
+                self.assertEqual(fake.argvs(), [["git", "fetch", "origin"]])
+
+
 class MainTest(unittest.TestCase):
     def test_triage_runs_report_only_with_medium_effort_in_the_plan_repository(self):
         cases = (("agents", "queue", "done", 0), ("agents", "integration", "done", 0),
@@ -1244,6 +1311,25 @@ class MainTest(unittest.TestCase):
                 branch="(assigned at start)", report="(assigned at start)") + "\n")
             self.assertIn("fix the signature", output.getvalue())
             self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
+    def test_main_retire_land_amend_passes_plan_context_to_design_comparison(self):
+        with tmp_home() as root:
+            fixture(root)
+            log.append("call.started", call="root", role="retire", subject="demo/retire", branch="calls/root")
+            log.append("call.ended", call="root", outcome="done")
+            log.append("branch.rejected", branch="calls/root", step="rebase", log="CONFLICT in x")
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), redirect_stdout(output), \
+                 patch.object(designer, "changed_designs", side_effect=[["docs/design/x.md"], []]) as changes:
+                self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo"),
+                                             "--brief-only"]), 0)
+            for call in changes.call_args_list:
+                self.assertEqual(call.args, (root, "demo"))
+                self.assertEqual(call.kwargs["plan_path"], "docs/plan/demo")
+                self.assertIs(call.kwargs["sh"], fake)
+            self.assertIn("# Designs main changed since your branch", output.getvalue())
+            self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"], ["git", "fetch", "origin"]])
 
     def test_main_amend_runs_on_chain_branch_and_subject(self):
         with tmp_home() as root:

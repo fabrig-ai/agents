@@ -58,6 +58,24 @@ def _review_runner():
     return fake.on(launcher, Result(0, "codex-1 /state/codex-1\n"))
 
 
+class LandRefusalTest(unittest.TestCase):
+    def test_only_land_steps_without_queue_timestamp_are_land_refusals(self):
+        record = _event("branch.rejected", branch=CHAIN.branch, step="rebase", log="CONFLICT in x")
+        with tmp_home():
+            for step in ("fetch", "rebase", "paths", "test", "push"):
+                with self.subTest(step=step):
+                    rejection = dict(record, step=step)
+                    self.assertEqual(review.land_refusal("queue:" + json.dumps(rejection)), rejection)
+            for rejection in (dict(record, queue_ts="queued"), dict(record, queue_ts=None),
+                              dict(record, step="merge"), dict(record, step="catch-up"),
+                              dict(record, step="gate:shape"), dict(record, ev="branch.landed")):
+                with self.subTest(rejection=rejection):
+                    self.assertIsNone(review.land_refusal("queue:" + json.dumps(rejection)))
+            for refusal in ("review-1", "queue:broken", "queue:[]", "queue:null", "queue:{}"):
+                with self.subTest(refusal=refusal):
+                    self.assertIsNone(review.land_refusal(refusal))
+
+
 class ChainsTest(unittest.TestCase):
     def chain(self, *events):
         """Fold one root and the events of interest."""
@@ -95,7 +113,7 @@ class ChainsTest(unittest.TestCase):
 
     def test_queue_refusal_amends_once_then_holds_after_second_approval(self):
         first = _event("branch.rejected", task=CHAIN.branch, branch=CHAIN.branch,
-                       tip="first", step="cargo", log="/queue/first", findings="compile error")
+                       tip="first", step="cargo", queue_ts="queued", log="/queue/first", findings="compile error")
         history = [*_review_events(outcome="done"), first]
         chain = self.chain(*history)
         self.assertEqual(chain.state, "amend")
@@ -115,6 +133,24 @@ class ChainsTest(unittest.TestCase):
         reset = [_event("call.parked", call=CHAIN.root),
                  _event(channel.ANSWERED, subject=CHAIN.subject)]
         self.assertEqual(self.chain(*history, second, *reset).state, "review")
+
+    def test_land_refusal_amends_then_holds_with_land_reason(self):
+        first = _event("branch.rejected", branch=CHAIN.branch, step="rebase", log="CONFLICT in x")
+        with tmp_home():
+            chain = self.chain(first)
+            self.assertEqual((chain.state, chain.reason), ("amend", ""))
+            history = [first, *_amend_events(), *_review_events(outcome="done")]
+            second = dict(first, log="CONFLICT in y")
+            chain = self.chain(*history, second)
+            self.assertEqual((chain.state, chain.reason), ("hold", review.LAND_HOLD))
+            self.assertEqual(len(chain.refusals), 2)
+
+    def test_last_refusal_selects_hold_reason(self):
+        land = _event("branch.rejected", branch=CHAIN.branch, step="test", log="failure")
+        for last in (_review_events("review-2"), [dict(land, queue_ts="queued")]):
+            with self.subTest(last=last), tmp_home():
+                chain = self.chain(land, *_amend_events(), *last)
+                self.assertEqual((chain.state, chain.reason), ("hold", "refused after its amendment"))
 
     def test_queue_refusals_ignore_other_branches_and_missing_steps(self):
         events = [_event("branch.rejected", branch="calls/other", step="test"),
@@ -443,6 +479,26 @@ class BriefTest(unittest.TestCase):
             self.assertIn("Read its brief first: it is the task you are finishing.", text)
             self.assertIn("## refusal-1\n\nFailed: fix this\n\n## refusal-2\n\n(report missing)", text)
 
+    def test_land_amend_brief_names_step_quotes_conflict_and_lists_design_status(self):
+        record = _event("branch.rejected", branch=CHAIN.branch, step="rebase",
+                        log="Rebasing (1/1)\nCONFLICT (content): Merge conflict in docs/design/x.status.md")
+        chain = replace(CHAIN, role="retire", refusals=("queue:" + json.dumps(record),))
+        with tmp_home():
+            options = dict(call_id="id", branch=chain.branch, report="report")
+            plain = review.amend_brief(chain, **options)
+            text = review.amend_brief(chain, designs=("docs/design/x.md",), **options)
+            findings = ("## `fab land` refused at rebase\n\nStep: rebase\nLog:\n" + record["log"])
+            self.assertIn(findings, plain)
+            self.assertNotIn("## Queue rejection", plain)
+            self.assertNotIn("# Designs main changed since your branch", plain)
+            section = ("# Designs main changed since your branch\n\n"
+                       "- `docs/design/x.md` (status `docs/design/x.status.md`)\n\n"
+                       "Main changed these designs after your branch's tip: check each one's status file "
+                       "against what your branch writes.\n")
+            self.assertEqual(text, plain + "\n" + section)
+            queue = replace(chain, refusals=("queue:" + json.dumps(dict(record, queue_ts="queued")),))
+            self.assertIn("## Queue rejection\n\nStep: rebase", review.amend_brief(queue, **options))
+
     def test_amend_brief_without_refusals(self):
         with tmp_home():
             text = review.amend_brief(CHAIN, call_id="id", branch="branch", report="report")
@@ -464,6 +520,24 @@ class BriefTest(unittest.TestCase):
             self.assertNotIn("placeholder", rebound)
             self.assertEqual(rebound.split("# The call you amend", 1)[1],
                              text.split("# The call you amend", 1)[1])
+
+    def test_land_hold_settle_permits_amend_or_user_then_user_only(self):
+        record = _event("branch.rejected", branch=CHAIN.branch, step="rebase", log="CONFLICT in x")
+        chain = replace(CHAIN, state="hold", reason=review.LAND_HOLD,
+                        refusals=("queue:" + json.dumps(record),))
+        attempt = _event("call.started", call="settle-1", role="settle", settles=chain.root)
+        choices = (([], "A land verdict would land the tip fab land just refused "
+                       "(refused again at rebase, paths or test): choose amend or user."),
+                   ([attempt], "Amend is no longer an option, and land would land the tip "
+                               "fab land refused: user only."))
+        for events, restriction in choices:
+            with self.subTest(events=events), tmp_home():
+                text = review.settle_brief(chain, Path("/checkout"), events, call_id="settle",
+                                           branch="", report="/report", sh=_review_runner())
+                self.assertIn(restriction, text)
+                self.assertIn("- Hold: " + review.LAND_HOLD, text)
+                self.assertIn("## `fab land` refused at rebase\n\nStep: rebase\nLog:\nCONFLICT in x", text)
+                self.assertNotIn("## Queue rejection", text)
 
     def test_settle_brief_has_chain_evidence_diff_and_restricted_second_choice(self):
         with tmp_home() as home:

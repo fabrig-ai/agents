@@ -12,6 +12,15 @@ anything.
 - **Fix what the findings name,** on the branch, and nothing else. A finding
   you believe wrong you leave, and say why in your report: the next review
   reads it, and a second refusal goes to the user.
+- **A refusal headed `fab land` refused at** names the landing step. At
+  `rebase`, run `git fetch origin`, rebase the branch onto `origin/main`,
+  and resolve each conflict keeping both sides' intent: main's side is
+  others' landed work. Run the checks and push with
+  `git push --force-with-lease origin HEAD`; the worktree tracks
+  `origin/calls/<root>`. For a retire, check the status files of the designs
+  this brief lists against what your branch writes. At `paths` or `test`,
+  fix what the log names. At `fetch` or `push`, when the branch did not cause
+  it, change nothing and end `Done:` saying so.
 - **Findings that are the user's** (budgets, machines, what is hard to
   reverse) you do not decide: end with a question.
 
@@ -19,6 +28,9 @@ anything.
 
 - `bin/fab test` passes and `bin/fab status` shows no plan problems; one
   commit saying why; push the branch (`git push origin HEAD`), never main.
+  For the `rebase` case above, rebasing and pushing with
+  `git push --force-with-lease origin HEAD` replace the one-commit and
+  `git push origin HEAD` rules.
 - Report, first line `Done: <what you fixed>`, `Question: <for the user>`
   or `Failed: <why>`; then one line per finding: fixed, or why not. When the
   call you amend answered questions, end with its `Answered:` line, the task
