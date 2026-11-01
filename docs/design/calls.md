@@ -81,14 +81,15 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     flow and surveys skeletons, 10-30 and 10-31, ended the same way). For a
     call that lands through `fab land` (this repository), the finish action
     reads the step of the `branch.rejected` that `fab land` logged during it:
-    - `rebase`, `test` or `paths`: no `call.finished` is logged. The
-      refusal counts as a refusal of the chain, as fabrig's queue rejections
-      do (integration.md 2; `_fold_review` already counts a `branch.rejected`
-      carrying the chain's branch and a step): the first since the chain's
-      reset is amended, the next holds it for settle, under the chain's one
-      amend count.
-    - `fetch` or `push` (main moved under it, the network): no
-      `call.finished` either; the finish is tried again on the next tick.
+    - Any step (`fetch`, `rebase`, `paths`, `test`, `push`): no
+      `call.finished` is logged. The refusal counts as a refusal of the
+      chain, as fabrig's queue rejections do (integration.md 2;
+      `_fold_review` already counts a `branch.rejected` carrying the chain's
+      branch and a step): the first since the chain's reset is amended, the
+      next holds it for settle, under the chain's one amend count. A
+      passing `fetch` or `push` failure costs one amend that finds nothing
+      to change and ends done, after which the finish is tried again; no
+      separate retry exists, so nothing loops.
     - The amend brief carries the refusal's `log` (the last 20 lines of
       `fab land`'s output, whose `CONFLICT` lines name the paths), under a
       heading naming `fab land`'s refusal, not a queue rejection. For
@@ -100,11 +101,14 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       A Claude amend rather than the Codex foreman (execution-modes.md's
       rebases) because the conflict is in text the call wrote and the amend
       chain already exists. For a retire, the brief also lists the designs
-      the rebased tip adds to `changed_designs` and asks it to check their
-      status files.
+      `changed_designs` gives at `origin/main` and not at the branch's tip,
+      and asks it to check their status files.
     - A hold from a `fab land` refusal has the reason `refused by fab land
       after its amendment`; its settle brief says a land verdict would be
-      refused again, so its verdict is amend or user.
+      refused again, so its verdict is amend or user, and a second settle
+      of such a hold (amend being no longer an option) is user only. A land
+      verdict on such a hold parks the chain with `settle failed`
+      (`_judge_chain`).
     - Chains finished before this lands stay finished; nothing replays
       them.
     Calls landing through fabrig's queue (integration.md 2) or merged into
