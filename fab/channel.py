@@ -11,13 +11,14 @@ call's subject and never a task; every later call of the subject carries it in i
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, log, plan, wake
+from fab import atomic, log, plan, tier_reds, wake
 from fab.plan import Plan
 from fab.report import LANDING
 
@@ -102,10 +103,13 @@ def signals(events: Iterable[dict]) -> list[Signal]:
 
     Queue rejections open queue:<branch>; a landing, a rejection or collateral at another
     tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
-    again. Other kinds of signals are left for their own folds.
+    again. Reds in state signal open red-<n>, until red.closed or a hand clear.
+    Faults open fault:<profile> for consecutive tiers.run records faulting that pair;
+    only a run without that fault closes it. Pure: no files are read.
     """
     events = list(events)
-    return sorted(_queue_signals(events), key=lambda signal: signal.since)
+    return sorted([*_queue_signals(events), *_red_signals(events), *_fault_signals(events)],
+                  key=lambda signal: signal.since)
 
 
 def _queue_signals(events: Iterable[dict]) -> list[Signal]:
@@ -139,6 +143,64 @@ def _queue_signals(events: Iterable[dict]) -> list[Signal]:
         found.append(Signal(identifier, f"rejected {event['branch']}", event["queue_ts"], facts,
                             f"{event.get('gate', 'gate')}:{event.get('log', '-')}", True))
     return found
+
+
+def _red_signals(events: Sequence[dict]) -> list[Signal]:
+    """Show the red fold's signals, hiding hand clears before the tick records closure."""
+    folded = tier_reds.reds(events)
+    cleared = {identifier for identifier, reason, _ in tier_reds.closures(events, folded=folded)
+               if reason == "cleared"}
+    found = []
+    for red in folded:
+        if red.state != "signal" or red.id in cleared:
+            continue
+        tests = []
+        for key in red.keys[:10]:
+            try:
+                case = json.loads(key)
+            except (TypeError, json.JSONDecodeError):
+                case = None
+            tests.append(" ".join(case) if isinstance(case, list) and len(case) == 3
+                         and all(isinstance(part, str) for part in case) else key)
+        if len(red.keys) > 10:
+            tests.append(f"and {len(red.keys) - 10} more")
+        suspects = [branch + (" (hand-pushed)" if branch in red.hand_pushed else "")
+                    for branch in red.suspects]
+        facts = (f"- Tip: `{red.tip}`", f"- Why: {red.signal_reason}",
+                 "- Tests: " + (", ".join(tests) or "(none)"),
+                 "- Suspects: " + (", ".join(suspects) or "(none)"))
+        read = str(tier_reds.evidence_path(red.id))
+        if red.report:
+            read += "`, `" + red.report
+        found.append(Signal(red.id, "after-landing red", red.since, facts, read, True))
+    return found
+
+
+def _fault_signals(events: Iterable[dict]) -> list[Signal]:
+    """Keep each pair's unbroken fault streak, with the newest fault text and run log.
+
+    Imported records name no host; `after-landing` identifies the machine's role.
+    """
+    opened = {}
+    for event in events:
+        if event.get("ev") != "tiers.run" or not isinstance(event.get("ts"), str):
+            continue
+        faults = {}
+        entries = event.get("faults")
+        for fault in entries if isinstance(entries, list) else ():
+            if not isinstance(fault, str):
+                continue
+            profile, colon, _ = fault.partition(":")
+            if colon and profile.strip():
+                faults[profile.strip()] = fault
+        current = {}
+        for profile, fault in faults.items():
+            since, count = opened[profile][:2] if profile in opened else (event["ts"], 0)
+            current[profile] = (since, count + 1, fault, event.get("log", "-"))
+        opened = current
+    return [Signal(f"fault:{profile}", "after-landing pair cannot run", since,
+                   (f"- Fault: {fault}", f"- Runs: {count}"), f"after-landing:{path}", False)
+            for profile, (since, count, fault, path) in opened.items()]
 
 
 def plan_dirs(given: Sequence[Path] = ()) -> list[Path]:
@@ -234,15 +296,19 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
 
 
 def landing_lines(events: Iterable[dict]) -> list[str]:
-    r"""The page's after-landing lines: for the newest tiers.run, `<verdict> at
-    \`<tip[:12]>\`, <its ts>: new N, standing N, unattributed N, flakes N`, then `; faults:
-    <faults joined by "; ">` when it has any; then one `new red: <profile> <test>, since
-    <branches joined by ", ", or "unknown branches">` per tiers.red at that tip. Empty
-    without a run. Pure."""
+    """The newest tiers.run's verdict, counts, faults, CPU and budget diagnostics,
+    then its tiers.red records labelled `new red:` or `unattributed red:` with suspects.
+    Append `<red> (<draft>/<red>): <state>, <k> tests at `<tip[:12]>`, since <ts>`
+    for each open red that is not a signal, in opening order. Without a run, only those
+    open-red lines remain. Pure.
+    """
     events = list(events)
     last = next((event for event in reversed(events) if event.get("ev") == "tiers.run"), None)
+    opened = [f"{red.id} ({red.task}): {red.state}, {len(red.keys)} tests at "
+              f"`{red.tip[:12]}`, since {red.since}"
+              for red in tier_reds.reds(events) if red.state not in ("closed", "signal")]
     if last is None:
-        return []
+        return opened
     line = (f"{last.get('verdict', '?')} at `{str(last.get('tip', ''))[:12]}`, {last.get('ts', '')}: "
             + ", ".join(f"{name} {last.get(key, 0)}" for name, key in (
                 ("new", "new"), ("standing", "standing"), ("unattributed", "unattributed"),
@@ -262,7 +328,7 @@ def landing_lines(events: Iterable[dict]) -> list[str]:
             + (", ".join(event.get("branches") or []) or "unknown branches")
             for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")
             and event.get("state", "new") in ("new", "unattributed")]
-    return [line, *details, *reds]
+    return [line, *details, *reds, *opened]
 
 
 def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: str,

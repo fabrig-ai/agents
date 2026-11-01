@@ -1,11 +1,12 @@
 import io
+import json
 import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import channel, cli, code_report, landing_report, log, report
+from fab import channel, cli, code_report, landing_report, log, report, tier_reds
 from fab.plan import Plan, Question
 from fab.tests.support import tmp_home
 
@@ -16,6 +17,23 @@ def ts(minute):
 
 def event(minute, ev, **fields):
     return {"ts": ts(minute), "ev": ev, **fields}
+
+
+def red_opened(minute=1, identifier="red-1", route="signal", **fields):
+    return event(minute, "red.opened", **{
+        "red": identifier, "tip": "abcdef1234567890", "keys": ['["browser-jig","pkg::bin","case"]'],
+        "suspects": [], "tasks": [], "draft": "", "route": route,
+        "reason": "no suspects" if route == "signal" else "", **fields,
+    })
+
+
+def foreman_events(verdict="left"):
+    return [red_opened(route="foreman", draft="demo", suspects=["demo/a"], tasks=["demo/a"]),
+            event(2, "run.started", red="red-1", tip="abcdef1234567890", kind="foreman",
+                  task="demo/red-1/foreman", run="foreman-1"),
+            event(3, "run.ended", run="foreman-1", outcome="done", report="/runs/foreman/report.md"),
+            event(4, "red.settled", red="red-1", run="foreman-1", verdict=verdict,
+                  reason="the tier needs a login")]
 
 
 def question(minute, subject="demo/core", call="cut-1"):
@@ -120,6 +138,127 @@ class ChannelTest(unittest.TestCase):
             with self.subTest(identifier=identifier, text=text), self.assertRaises(ValueError):
                 channel.clear(identifier, text, events)
         self.assertEqual(log.read(), [])
+        self.assertFalse((self.fab_home / "tick.want").exists())
+
+    def test_red_signal_at_opening_has_evidence_and_reason(self):
+        signal, = channel.signals(iter([red_opened()]))
+        self.assertEqual(signal, channel.Signal("red-1", "after-landing red", ts(1), (
+            "- Tip: `abcdef1234567890`", "- Why: no suspects",
+            "- Tests: browser-jig pkg::bin case", "- Suspects: (none)",
+        ), str(self.fab_home / "reds/red-1.md"), True))
+        page = channel.compose([], [red_opened()], ts(2))
+        self.assertIn(f"### red-1, after-landing red, since {ts(1)}", page)
+        self.assertIn("- Clear: `fab page clear red-1 TEXT`", page)
+        self.assertNotIn("## After landing", page)
+
+    def test_red_signal_limits_tests_and_marks_only_hand_pushed_suspects(self):
+        keys = [json.dumps(["browser-jig", "pkg::bin", f"case-{i}"]) for i in range(12)]
+        signal, = channel.signals([red_opened(keys=keys, draft="demo", tasks=["demo/a", "demo"],
+            suspects=["demo/a-r2", "hand/pushed", "demo/integration"],
+            reason="no fab task among the suspects")])
+        self.assertIn("- Why: no fab task among the suspects", signal.facts)
+        self.assertIn("case-9, and 2 more", signal.facts[2])
+        self.assertNotIn("case-10", signal.facts[2])
+        self.assertEqual(signal.facts[3],
+                         "- Suspects: demo/a-r2, hand/pushed (hand-pushed), demo/integration")
+        self.assertEqual(channel.signals([red_opened(keys=["legacy-key"])])[0].facts[2],
+                         "- Tests: legacy-key")
+
+    def test_left_red_signal_keeps_foreman_reason_report_and_transition_time(self):
+        events = foreman_events()
+        signal, = channel.signals(events)
+        self.assertEqual(signal.since, ts(4))
+        self.assertIn("- Why: not the suspects': the tier needs a login", signal.facts)
+        page = channel.compose([], events, ts(5))
+        self.assertIn(f"- Read: `{self.fab_home / 'reds/red-1.md'}`, `/runs/foreman/report.md`", page)
+        self.assertNotIn("red-1 (demo/red-1)", page)
+
+    def test_repairing_red_is_an_after_landing_line_and_not_a_signal(self):
+        for verdict in ("fix", "none"):
+            with self.subTest(verdict=verdict):
+                events = foreman_events(verdict)
+                self.assertEqual(channel.signals(events), [])
+                self.assertEqual(channel.landing_lines(iter(events)), [
+                    f"red-1 (demo/red-1): repairing, 1 tests at `abcdef123456`, since {ts(4)}"])
+                page = channel.compose([], events, ts(5))
+                self.assertIn("## Open signals\n\n(none)", page)
+                self.assertIn("## After landing\n\n- red-1 (demo/red-1): repairing", page)
+                events.append(event(5, "tiers.run", tip="latest-tip", verdict="red", faults=[]))
+                self.assertEqual(channel.landing_lines(events), [
+                    f"red at `latest-tip`, {ts(5)}: new 0, standing 0, unattributed 0, flakes 0",
+                    f"red-1 (demo/red-1): repairing, 1 tests at `abcdef123456`, since {ts(4)}"])
+
+    def test_unfixed_red_signal_shows_why_and_red_closed_removes_it(self):
+        events = foreman_events("fix") + [event(5, "branch.landed", task="demo/red-1"),
+                  event(6, "tiers.run", tip="unfixed-tip", branches=["demo/red-1-r2"],
+                        faults=[], reds=['["browser-jig","pkg::bin","case"]'])]
+        signal, = channel.signals(events)
+        self.assertEqual(signal.since, ts(6))
+        self.assertIn("- Why: unfixed: demo/red-1 landed, still red at unfixed-tip", signal.facts)
+        self.assertFalse(any("red-1 (demo/red-1)" in line for line in channel.landing_lines(events)))
+        events.append(event(7, "red.closed", red="red-1", reason="recovered", tip="green"))
+        self.assertEqual(channel.signals(events), [])
+        self.assertFalse(any("red-1 (demo/red-1)" in line for line in channel.landing_lines(events)))
+
+    def test_red_clear_command_hides_signal_until_tick_closes_it_without_returning(self):
+        for record in foreman_events():
+            log.append(**record)
+        output = io.StringIO()
+        with patch("fab.log.now", return_value=ts(4)), redirect_stdout(output):
+            self.assertEqual(cli.main(["page", "clear", "red-1", "Investigated", "--by", "free"]), 0)
+        cleared = event(4, "signal.cleared", signal="red-1", by="free", text="Investigated")
+        self.assertEqual(log.read()[-1], cleared)
+        self.assertIn("cleared red-1", output.getvalue())
+        self.assertIn("## Open signals\n\n(none)", (self.fab_home / channel.PAGE).read_text())
+        self.assertEqual((self.fab_home / "tick.want").read_text(), "clear red-1\n")
+        self.assertEqual(tier_reds.closures(log.read()), [("red-1", "cleared", "")])
+        closed, = tier_reds.close_reds(log.read())
+        self.assertEqual((closed["ev"], closed["reason"]), ("red.closed", "cleared"))
+        log.append("tiers.run", tip="still-red", reds=['["browser-jig","pkg::bin","case"]'], faults=[])
+        self.assertEqual(channel.signals(log.read()), [])
+        self.assertEqual(channel.landing_lines(log.read())[1:], [])
+
+    def test_red_clear_before_signal_transition_does_not_hide_a_later_raise(self):
+        events = foreman_events()
+        events.insert(1, event(1, "signal.cleared", signal="red-1"))
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["red-1"])
+
+    def test_fault_signals_count_runs_keep_first_time_and_latest_text_and_log(self):
+        events = [event(1, "tiers.run", faults=["live-temper: exit 4", "browser-jig: exit 75"],
+                        log="/al/first.log"),
+                  event(2, "signal.cleared", signal="fault:live-temper"),
+                  self.rejection(3),
+                  event(4, "tiers.run", faults=["live-temper: no login", "live-temper: no login"],
+                        log="/al/newest.log")]
+        self.assertEqual(channel.signals(iter(events)), [
+            channel.Signal("fault:live-temper", "after-landing pair cannot run", ts(1),
+                           ("- Fault: live-temper: no login", "- Runs: 2"),
+                           "after-landing:/al/newest.log", False),
+            channel.signals([self.rejection(3)])[0]])
+        page = channel.compose([], events, ts(5))
+        self.assertNotIn("fab page clear fault:", page)
+        events.append(event(5, "tiers.run", faults=[]))
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["queue:hand/pushed"])
+        events.append(event(6, "tiers.run", faults=["live-temper: exit 4"], log="/al/reopened.log"))
+        signal = next(signal for signal in channel.signals(events) if signal.id.startswith("fault:"))
+        self.assertEqual((signal.since, signal.facts[-1]), (ts(6), "- Runs: 1"))
+        events.append(event(7, "tiers.run"))
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["queue:hand/pushed"])
+
+    def test_fault_signal_skips_malformed_fault_fields(self):
+        for faults in (None, "live-temper: exit 4", [None, 3, {}, "missing separator", ": no profile"]):
+            with self.subTest(faults=faults):
+                self.assertEqual(channel.signals([event(1, "tiers.run", faults=faults)]), [])
+        self.assertEqual(channel.signals([{"ev": "tiers.run", "faults": ["p: exit 4"]}]), [])
+
+    def test_fault_clear_command_is_refused_without_writing_or_waking(self):
+        log.append(**event(1, "tiers.run", faults=["live-temper: exit 4"], log="/al/run.log"))
+        before = log.read()
+        with redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main(["page", "clear", "fault:live-temper", "done"]), 1)
+        self.assertIn("cannot be cleared", errors.getvalue())
+        self.assertEqual(log.read(), before)
+        self.assertFalse((self.fab_home / channel.PAGE).exists())
         self.assertFalse((self.fab_home / "tick.want").exists())
 
     def test_asks_plans_first_in_given_order_and_whitespace_answer_open(self):
