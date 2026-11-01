@@ -1,7 +1,7 @@
 +++
 id = "triage-shell"
 part = "triage-call"
-kind = "feature"
+kind = "interface"
 needs = []
 files = ["fab/calls.py", "fab/tests/test_calls.py", "fab/roles/triager.md"]
 effort = "medium"
