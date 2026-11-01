@@ -66,13 +66,49 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     no `call.answered` after it and no `chain.settled`. Its next plan tick
     settles it; its ask stays open until then. Reviews-off plans
     (integration.md 3) still finish unreviewed chains and never reach
-    a hold.
+    a hold, except through a `fab land` refusal (below).
   - A `call.answered` naming the subject (channel.md 2) starts the
     chain's counts and its settle allowance afresh: the branch's tip is
     reviewed again, and may be amended once more.
   - While a subject's chain is open, no call starts for that subject; no
     answer call starts while an answer chain is open, and no review call
     while a review chain is open.
+  - **A `fab land` refusal counts as a refusal of the chain** (11-01:
+    paper-cuts' retire ran done, but `fab land` refused its branch at
+    rebase on a status file another plan's retire had just changed; the
+    tick logged `call.finished` failed and nothing took it up again, so the
+    plan stayed unretired until an operator rebased it by hand; agents-rebuild's
+    flow and surveys skeletons, 10-30 and 10-31, ended the same way). For a
+    call that lands through `fab land` (this repository), the finish action
+    reads the step of the `branch.rejected` that `fab land` logged during it:
+    - `rebase`, `test` or `paths`: no `call.finished` is logged. The
+      refusal counts as a refusal of the chain, as fabrig's queue rejections
+      do (integration.md 2; `_fold_review` already counts a `branch.rejected`
+      carrying the chain's branch and a step): the first since the chain's
+      reset is amended, the next holds it for settle, under the chain's one
+      amend count.
+    - `fetch` or `push` (main moved under it, the network): no
+      `call.finished` either; the finish is tried again on the next tick.
+    - The amend brief carries the refusal's `log` (the last 20 lines of
+      `fab land`'s output, whose `CONFLICT` lines name the paths), under a
+      heading naming `fab land`'s refusal, not a queue rejection. For
+      `rebase`, the amender (`fab/roles/amender.md`) rebases the branch onto
+      `origin/main`, resolves each conflict keeping both sides' intent
+      (main's side is others' landed work) and pushes with
+      `--force-with-lease` (its worktree tracks `origin/calls/<root>`); its
+      "one commit" and `git push origin HEAD` rules give way for this case.
+      A Claude amend rather than the Codex foreman (execution-modes.md's
+      rebases) because the conflict is in text the call wrote and the amend
+      chain already exists. For a retire, the brief also lists the designs
+      the rebased tip adds to `changed_designs` and asks it to check their
+      status files.
+    - A hold from a `fab land` refusal has the reason `refused by fab land
+      after its amendment`; its settle brief says a land verdict would be
+      refused again, so its verdict is amend or user.
+    - Chains finished before this lands stay finished; nothing replays
+      them.
+    Calls landing through fabrig's queue (integration.md 2) or merged into
+    an integration trunk (integration.md 3) keep their own paths.
 - **Acceptance is the test-writer's, at the level of the design.** When a
   part's skeleton lands, one test-writer run (Codex, high, kind `tests`)
   writes the part's acceptance tests from its design section and its
@@ -285,7 +321,7 @@ before it lands (2).
   design is listed instead, as the cut's design index does: `- <path> (<n>
   lines, diff <m> lines): read it in your worktree`, `<n>` its line count at
   rev (0 when removed). So the brief passes the limit only if its other
-  sections alone do.
+  sections and the list lines alone do.
   Quoting every design whole did (11-01: trunk-overlaps' retire, 216k
   characters of fab.md and fab.status.md before the split; the tick
   started the failing call again every tick, nine units in three minutes,

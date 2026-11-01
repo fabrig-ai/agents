@@ -44,6 +44,10 @@
 
 ## Gaps and departures
 
+- **A `fab land` refusal counts as a refusal of the chain** (2, 11-01):
+  designed, to be built by plan `docs/plan/call-rebase`. Until then such a
+  chain ends `call.finished` failed and an operator rebases and lands it by
+  hand (paper-cuts' retire, 11-01).
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
