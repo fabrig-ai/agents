@@ -14,10 +14,10 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, tier_reds, wake
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, overlaps, plan, repairs, run as runs, rust_gates, state, tier_reds, wake
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
-from fab.sh import Result, run, ssh
+from fab.sh import Failed, Result, run, ssh
 from fab.tests import wakes
 from fab.tests.buffer_order import ids, sliced, spec, specs
 from fab.tests.test_repairs import (TASK as REPAIR_TASK, foreman_run, rejected, report,
@@ -2319,6 +2319,91 @@ class MultiPlanTickTest(unittest.TestCase):
 
     def queries(self):
         return [argv for argv in self.fake.argvs() if argv[:len(self.queue_prefix)] == self.queue_prefix]
+
+    def overlap_plans(self):
+        directories = [self.plan_dir(draft, tasks=("a",)) for draft in ("one", "two")]
+        for directory in directories:
+            path = directory / "plan.toml"
+            write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
+        self.fake.on(["git", "rev-parse", "--verify"],
+                     lambda call: Result(0, {"origin/main": "1" * 40,
+                                            "origin/one/integration": "a" * 40,
+                                            "origin/two/integration": "b" * 40}[call.argv[-1]]))
+        self.fake.on(["git", "merge-tree"], lambda call: Result(
+            1, "c" * 40 + "\0shared.py\0") if "--name-only" in call.argv else Result(0, "d" * 40))
+        return directories
+
+    def test_overlap_probe_once_per_round_after_both_ready_plans_tick(self):
+        one, two = self.overlap_plans()
+        ticked = []
+        tick_loaded = dispatch._tick_loaded
+
+        def tick_plan(plan, *args, **kwargs):
+            actions = tick_loaded(plan, *args, **kwargs)
+            ticked.append(plan.draft)
+            return actions
+
+        probe = overlaps.probe
+
+        def probed(*args, **kwargs):
+            self.assertEqual(ticked, ["two", "one"])
+            self.assertTrue(args[2])
+            return probe(*args, **kwargs)
+
+        with patch.object(dispatch, "_tick_loaded", side_effect=tick_plan), patch.object(
+                overlaps, "probe", side_effect=probed) as probes:
+            self.tick(two, one)
+            probes.assert_called_once()
+            ticked.clear()
+            self.tick(two, one)
+            self.assertEqual(probes.call_count, 2)
+        self.assertEqual(len([argv for argv in self.fake.argvs() if argv[:2] == ["git", "merge-tree"]]), 3)
+        records = [event for event in log.read() if event["ev"] == "trunks.overlap"]
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["drafts"], ["one", "two"])
+        self.assertIn("overlap one two 1", self.out.getvalue())
+
+    def test_overlap_probe_is_not_called_with_only(self):
+        one, two = self.overlap_plans()
+        with patch.object(overlaps, "probe", wraps=overlaps.probe) as probe:
+            dispatch.tick(one, two, sh=self.fake, hosts=self.hosts, only=True)
+            probe.assert_not_called()
+        self.assertFalse(any(argv[:2] == ["git", "merge-tree"] for argv in self.fake.argvs()))
+
+    def test_overlap_probe_failed_load_defers_closing_pairs(self):
+        one, two = self.overlap_plans()
+        self.tick(one, two)
+        self.fake.calls.clear()
+        actions = self.tick(one, self.home / "missing")
+        self.assertTrue(any(action.kind == "load" for action in actions))
+        self.assertEqual(len([event for event in log.read() if event["ev"] == "trunks.overlap"]), 1)
+        self.assertFalse(any(argv[:2] == ["git", "merge-tree"] for argv in self.fake.argvs()))
+        self.tick(one)
+        self.assertEqual([event["reason"] for event in log.read() if event["ev"] == "trunks.overlap"],
+                         ["probe", "gone"])
+
+    def test_overlap_probe_closes_pairs_when_no_plans_remain(self):
+        one, two = self.overlap_plans()
+        self.tick(one, two)
+        self.tick()
+        self.assertEqual([event["reason"] for event in log.read() if event["ev"] == "trunks.overlap"],
+                         ["probe", "gone"])
+
+    def test_overlap_probe_checkout_errors_print_and_the_round_refreshes_page(self):
+        one, two = self.overlap_plans()
+        for error in (OSError("checkout unavailable"), ValueError("checkout unavailable"),
+                      Failed(["git", "rev-parse"], Result(128, err="checkout unavailable"))):
+            with self.subTest(error=type(error).__name__):
+                def revision(call):
+                    raise error
+                self.fake.rules[-2] = (["git", "rev-parse", "--verify"], revision)
+                self.out.truncate(0)
+                self.out.seek(0)
+                with patch.object(dispatch, "_page") as page:
+                    self.tick(one, two)
+                    page.assert_called_once()
+                self.assertIn("overlap - failed:", self.out.getvalue())
+                self.assertIn("checkout unavailable", self.out.getvalue())
 
     def test_listed_plan_then_given_plan_fetch_and_page_once(self):
         one = self.plan_dir("one", tasks=("a",))

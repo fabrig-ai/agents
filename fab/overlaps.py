@@ -1,11 +1,21 @@
-"""Pure decisions for the overlap probe (docs/design/fab.md, 13.17)."""
+"""Overlap decisions and the tick's probe (docs/design/fab.md, 13.17).
+
+FAB_HOME/overlaps.json holds two JSON objects, trees and pairs. Their keys are
+JSON lists of repository, checkout, main SHA, then one trunk tip (trees) or
+both name-ordered tips (pairs). Values are a tree ID or {files: [...], more: n}.
+Checkout scoping keeps tree IDs in their object store. Only successful results
+are cached; missing, unreadable or malformed caches are empty.
+"""
 
 from __future__ import annotations
 
+import json
 from collections.abc import Sequence
+from pathlib import Path
 
-from fab import integration
-from fab.plan import Plan
+from fab import atomic, integration, log
+from fab.plan import Plan, Task
+from fab.sh import Failed, Result, Runner, run
 
 FILES = 40  # conflicting paths retained in one trunks.overlap record (13.17)
 
@@ -122,3 +132,130 @@ def overlap_fields(pair: tuple[str, str], tips: Sequence[str], files: Sequence[s
 def _object_id(value: str) -> bool:
     """A full SHA-1 or SHA-256 hex object id from merge-tree (docs/design/fab.md, 13.17)."""
     return len(value) in (40, 64) and all(char in "0123456789abcdefABCDEF" for char in value)
+
+
+def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Sequence[dict],
+          all_loaded: bool, *, sh: Runner = run, log_path: Path | None = None) -> list[str]:
+    """Probe loaded trunks, log news and return printed lines (docs/design/fab.md, 13.17).
+
+    Use one checkout per repository, chosen by draft name, and cache successful
+    merges. Conflicted or failed catch-ups keep their pairs current but unprobed.
+    Close absent open pairs only when all listed plans loaded. Repositories with
+    no possible pair need no git commands. Checkout and cache-write errors may
+    escape for the tick to print.
+    """
+    cache_path = log.home() / "overlaps.json"
+    cache = _read_cache(cache_path)
+    records = list(events)
+    lines = []
+    current = []
+    checkouts = {plan.draft: checkout for plan, _, _, checkout in loaded}
+    repositories = {}
+    for plan in probe_plans([plan for plan, _, _, _ in loaded], records):
+        repositories.setdefault(plan.repo, []).append(plan)
+    for repo, candidates in repositories.items():
+        if len(candidates) < 2:
+            continue
+        checkout = str(checkouts[candidates[0].draft])
+        main = sh(["git", "rev-parse", "--verify", "origin/main"], cwd=checkout)
+        if not main.ok:
+            raise Failed(["git", "rev-parse", "--verify", "origin/main"], main)
+        if not main.out.strip():
+            raise ValueError(f"overlap {repo}: origin/main did not resolve")
+        tips = {}
+        present = []
+        for plan in candidates:
+            tip = sh(["git", "rev-parse", "--verify", f"origin/{plan.trunk}"], cwd=checkout)
+            if tip.ok and tip.out.strip():
+                tips[plan.draft] = tip.out.strip()
+                present.append(plan)
+        repo_pairs = pairs(present)
+        current.extend(repo_pairs)
+        if not repo_pairs:
+            continue
+        trees = {}
+        tree_keys = {}
+        for plan in present:
+            key = json.dumps([repo, checkout, main.out.strip(), tips[plan.draft]])
+            tree_keys[plan.draft] = key
+            tree = cache["trees"].get(key)
+            if tree is None:
+                result = _merge(["git", "merge-tree", "--write-tree", "--no-messages",
+                                 "origin/main", f"origin/{plan.trunk}"], checkout, sh)
+                status, tree = parse_catch_up(result.code, result.out)
+                if status == "failure":
+                    lines.append(_failure((plan.draft,), result, records, log_path))
+                if tree is None:
+                    continue
+                cache["trees"][key] = tree
+            trees[plan.draft] = tree
+        for pair in repo_pairs:
+            a, b = pair
+            if a not in trees or b not in trees:
+                continue
+            pair_tips = [tips[a], tips[b]]
+            key = json.dumps([repo, checkout, main.out.strip(), *pair_tips])
+            answer = cache["pairs"].get(key)
+            if answer is None:
+                result = _merge(["git", "merge-tree", "--write-tree", "--name-only",
+                                 "--no-messages", "-z", "--merge-base=origin/main",
+                                 trees[a], trees[b]], checkout, sh)
+                parsed = parse_pair(result.code, result.out)
+                if parsed is None:
+                    for draft in pair:
+                        cache["trees"].pop(tree_keys[draft], None)
+                    lines.append(_failure(pair, result, records, log_path))
+                    continue
+                files, more = parsed
+                answer = dict(files=files, more=more)
+                cache["pairs"][key] = answer
+            if is_news(pair, answer["files"], answer["more"], records):
+                records.append(log.append("trunks.overlap", path=log_path,
+                                          **overlap_fields(pair, pair_tips, **answer)))
+                lines.append(f"overlap {a} {b} {len(answer['files']) + answer['more']}")
+    if all_loaded:
+        for fields in gone_pairs(current, records):
+            records.append(log.append("trunks.overlap", path=log_path, **fields))
+            lines.append(f"overlap {' '.join(fields['drafts'])} gone")
+    atomic.write(cache_path, json.dumps(cache) + "\n")
+    return lines
+
+
+def _read_cache(path: Path) -> dict:
+    """Read valid cached results; losing any malformed cache costs only merges."""
+    try:
+        cache = json.loads(path.read_text(encoding="utf-8"))
+        if (isinstance(cache, dict) and isinstance(cache.get("trees"), dict)
+                and isinstance(cache.get("pairs"), dict)
+                and all(isinstance(tree, str) and _object_id(tree)
+                        for tree in cache["trees"].values())
+                and all(isinstance(answer, dict) and isinstance(answer.get("files"), list)
+                        and len(answer["files"]) <= FILES
+                        and all(isinstance(path, str) for path in answer["files"])
+                        and type(answer.get("more")) is int and answer["more"] >= 0
+                        for answer in cache["pairs"].values())):
+            return cache
+    except (OSError, ValueError, UnicodeError):
+        pass
+    return {"trees": {}, "pairs": {}}
+
+
+def _merge(argv: list[str], checkout: str, sh: Runner) -> Result:
+    """Run a merge without allowing a checkout failure to discard other pairs."""
+    try:
+        return sh(argv, cwd=checkout)
+    except Failed as error:
+        return error.result
+    except (OSError, ValueError) as error:
+        return Result(-1, err=str(error))
+
+
+def _failure(drafts: Sequence[str], result: Result, events: list[dict],
+             log_path: Path | None) -> str:
+    """Return the failure line every tick, appending its note only when news."""
+    prefix = failure_prefix(drafts)
+    detail = result.err.splitlines()[0] if result.err else "unreadable merge-tree output"
+    text = f"{prefix}exit {result.code}: {detail}"
+    if failure_is_news(prefix, text, events):
+        events.append(log.append("note", path=log_path, text=text))
+    return text

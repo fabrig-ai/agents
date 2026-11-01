@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, wake
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -906,7 +906,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
-    loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
+    loaded, load_actions = _load_plans(directories, log.read(log_path), sh=sh)
+    actions = list(load_actions)
     hosts = machines.load() if hosts is None else hosts
     after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
     openings_deferred = bool(actions) and after_host is not None
@@ -931,18 +932,27 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
         folded = [*folded, *tier_reds.reds(opened)] if opened else folded
+    if loaded:
+        plan_tasks = {key: task for plan, tasks, _, _ in loaded
+                      for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
+        calm = flow.measure(hosts, log.now(), sh=sh)
+        for plan, tasks, directory, checkout in loaded:
+            taken = _tick_loaded(plan, tasks, directory, checkout, hosts, calm, folded, plan_tasks,
+                                 sh=sh, log_path=log_path, openings_deferred=openings_deferred, only=only)
+            actions.extend(taken)
+            calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
+    if not only:
+        try:
+            for line in overlaps.probe(loaded, log.read(log_path),
+                                       not any(action.kind == "load" for action in load_actions),
+                                       sh=sh, log_path=log_path):
+                print(line)
+        except (OSError, ValueError, Failed) as error:
+            print("overlap - failed: " + " ".join(str(error).splitlines()))
     if not loaded:
         if not only:
             _page(plan_dirs, log_path)
         return actions
-    plan_tasks = {key: task for plan, tasks, _, _ in loaded
-                  for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
-    calm = flow.measure(hosts, log.now(), sh=sh)
-    for plan, tasks, directory, checkout in loaded:
-        taken = _tick_loaded(plan, tasks, directory, checkout, hosts, calm, folded, plan_tasks,
-                             sh=sh, log_path=log_path, openings_deferred=openings_deferred, only=only)
-        actions.extend(taken)
-        calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
     events = log.read(log_path)
     # With only, fab's own tick collects the strays: this tick's hosts may not name their builder.
     for record in ([] if only else drafts.strays([plan.draft for plan, _, _, _ in loaded], in_flight(events), events)):
