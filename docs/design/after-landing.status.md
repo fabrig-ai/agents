@@ -21,10 +21,12 @@
     remedy and settle (2, calls.md 2);
   - the tick: reds closed and opened each round (deferred after a failed
     load, never in a replay, against an empty owner map with no plan
-    loaded), red foremen started and settled, `<draft>/red-<n>` tasks run
+    loaded), red foremen started and settled through the
+    `examine-fix`/`remedy-fix` pair and `fab/fix.py`'s shared steps (qa.md
+    2, plan findings-repair, retired 11-01), `<draft>/red-<n>` tasks run
     from `origin/main` in both landing modes, sorted with the repairs and
     readied to the queue, `RED_RUNS`, answer calls listing them in both
-    modes; the specless refusal foreman, for integration.md 3's repairs too; a fabrig
+    modes (`RED_RUNS` is `fab.fix.RUNS`); the specless refusal foreman, for integration.md 3's repairs too; a fabrig
     plan's retire waiting for its verdict; `red.settled` and `red.closed`
     waking the tick again; the lost-event note counting after-landing
     records as one entry (2, calls.md 2, tick.md 5, tick.md 6, tick.md 7, integration.md 3);

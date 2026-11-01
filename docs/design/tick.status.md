@@ -22,6 +22,12 @@
   `rung.passed`, then readies its backlog branch, before `decide`, and
   starts the triage call when due; `fab qa result` wakes the tick
   (`qa <walk>`). Tested with fake runners and fixture logs.
+- **A ladder plan's repairs in the tick** (qa.md 2, 6; plan findings-repair,
+  retired 11-01): after the refusal settlements, `red_actions` and
+  `finding_actions` give one `examine-fix`/`remedy-fix` pair, which
+  `_fix_steps` sends to each kind's start or settle; the plan's tasks are
+  joined with its finding repairs; `finding.settled` wakes the tick again.
+  Tested with fake runners and fixture logs.
 
 ## Gaps and departures
 

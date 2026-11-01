@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of findings-repair: the repair path of QA findings in fab
 # (docs/design/qa.md, 2, "Built in this order", "After red-routing's tick

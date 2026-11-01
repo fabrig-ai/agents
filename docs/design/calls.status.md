@@ -33,7 +33,9 @@
   reads a design whole when it needs more. Tested against real git
   repositories (`fab/tests/test_designer.py`). Live once: paper-cuts' own
   retire (11-01, ~106k characters, every design quoted, none listed), and
-  findings-loop's (~194 KB with six designs listed; ~404k quoted whole).
+  findings-loop's (~194 KB with six designs listed; ~404k quoted whole),
+  and findings-repair's (~195 KB, eleven listed: the designs' rename,
+  477b3e0, made every design changed in its window).
 - **The tick drives the calls of 2 and 3:** call reviews and amend calls
   (`fab/call_review.py`), the foreman's answers (`fab/foreman.py`), the
   refusal foreman's repairs and rebases (`fab/repairs.py`,
@@ -41,6 +43,11 @@
   retire chain reviewed by the consistency pass (`fab/designer.py`,
   `fab/roles/consistency.md`); the tick skips a retired plan and ticks a
   plan being cut. Until 11-01 these lines still called them skeletons.
+- **The foreman reads a QA finding** (2, qa.md 2; plan findings-repair,
+  retired 11-01): `fab/fixes.py` and `fab/roles/foreman-finding.md`, the
+  red foreman's form through `fab/fix.py`; its fix makes the specless
+  `<draft>/finding-<n>`, whose questions skip the foreman and queue for
+  the answerer as a red task's do.
 
 ## Gaps and departures
 

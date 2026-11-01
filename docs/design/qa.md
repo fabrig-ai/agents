@@ -251,9 +251,9 @@ session still walks by hand; walks run by fab are the section's last part.
   suspects, tiers runs, coverage), while what follows the decision is the
   same.
   - **What moves out of `fab/tier_reds.py`** into `fab/fix.py`, Fix mode's
-    shared steps, so both kinds call one copy (red-routing owns
-    `tier_reds.py` and is wiring it now; this is one task after its wiring
-    lands, behaviour unchanged, its tests kept):
+    shared steps, so both kinds call one copy (factored out after
+    red-routing's wiring landed, red's behaviour unchanged, its tests
+    kept):
     - `fab.fix.launch(task_id, host, tip, brief, events, **fields)`: the
       tail of `tier_reds.start` (`fab.run.next_run` over
       `fab.foreman.task_field(task_id)`, the report path under
@@ -277,6 +277,10 @@ session still walks by hand; walks run by fab are the section's last part.
       body, answers)`: `tier_reds.repair_tasks`' scan of `question.answered`
       and its `Task` (repo fabrig, no needs, files `**`, effort high, 20
       minutes, no path, `## Answers` appended);
+    - `fab.fix.sections(events)`: each task's `refusal.settled` fix
+      sections in log order, which a repair's body carries after its
+      foreman's (a finding's repair goes to the specless refusal foreman
+      as a red's does);
     - `FIX_KINDS = ("red", "finding")` and `RUNS = 2`
       (`tier_reds.RED_RUNS` kept as its name for it).
     `fab/fixes.py` then holds only the finding's: its foreman's brief, its
@@ -284,9 +288,13 @@ session still walks by hand; walks run by fab are the section's last part.
   - **One action pair for both kinds:** `Action("examine-fix", task=<repair id>,
     detail=<red or finding id>, run_kind=<kind>)` and `Action("remedy-fix",
     run=<foreman run>, run_kind=<kind>)`; `fab.dispatch.red_actions` and
-    `finding_actions` (both pure) make them, and `_take` sends each to its
-    kind's start or settle: after-landing.md 2's `examine-red` and `remedy-red`,
-    renamed with the move.
+    `finding_actions` (both pure) make them, and `fab.dispatch._fix_steps`
+    sends each to its kind's start or settle against one log snapshot,
+    reading main's tip once for the round's finding foremen (a round that
+    cannot read it notes so and starts none): after-landing.md 2's
+    `examine-red` and `remedy-red`, renamed with the move. Its foreman
+    runs and their ends are folded by `fab.fixes.foremen(events)`, which
+    the tick and the page read.
   - **Its foreman** (Codex, medium, read-only;
     `fab/roles/foreman-finding.md`): a finding routed starts one through
     `fab.fix.launch`, run `<draft>/finding-<n>/foreman-1`, its run.started
@@ -469,7 +477,8 @@ session still walks by hand; walks run by fab are the section's last part.
     waits at its foreman, holding its rung.
   - **After red-routing's tick wiring lands** (`red_actions`, red tasks run
     from main and readied, `RED_RUNS`, the specless refusal foreman, the
-    answer call seeing red tasks): `fab/fix.py` factored out of
+    answer call seeing red tasks; built by plan `docs/plan/findings-repair`,
+    retired 11-01): `fab/fix.py` factored out of
     `fab/tier_reds.py`, then `fab/fixes.py` and
     `fab/roles/foreman-finding.md`, `finding_actions` and the
     `examine-fix`/`remedy-fix` pair in `fab/dispatch.py`, and the page's

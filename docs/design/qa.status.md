@@ -21,8 +21,7 @@
     `# Reporting to fab` and `# Open findings`, `result.toml`'s refusals and
     limits, `walk.ended` last, a cut intake retried whole.
   - **The fold** (`fab/findings.py`): every state of 2 including the repair
-    states, which only the second plan's records reach (tested on synthetic
-    records); merges and `again`, holding, rung states (a walk in flight
+    states, which the repair path's records reach; merges and `again`, holding, rung states (a walk in flight
     for under `WALK_HOURS`), `passes` and the shared rung line.
   - **The triage call** (`fab/triage.py`, `fab/roles/triager.md`): report-only
     through `fab.calls.start(report_only=True)`, effort medium, no chain; its
@@ -39,19 +38,36 @@
     `backlog:<draft>`, `## The ladder` with each rung's line and the
     backlog's count.
   - **The landing report's QA figures** (reports.md 2).
+- **The repair path** (2, "After red-routing's tick wiring lands"; plan
+  `docs/plan/findings-repair`, retired 11-01), on findings-loop's fold and
+  triage. Tested with temporary homes, fake runners and synthetic logs.
+  - **Fix mode's shared steps** (`fab/fix.py`): `launch`, `report_path`,
+    `parse`, `section`, `settle`, `answers`, `sections`, `task`,
+    `FIX_KINDS` and `RUNS`, factored out of `fab/tier_reds.py`
+    (`RED_RUNS = fix.RUNS`), red's records and tests unchanged.
+  - **The finding's foreman** (`fab/fixes.py`,
+    `fab/roles/foreman-finding.md`): `repair_id`, the `foremen` fold, the
+    brief (the walk's report cut at `WALK_REPORT_BYTES`, 15 KiB, and
+    marked), `start`, `settle` (`finding.settled` fix, left or none) and
+    `tasks`, the `<draft>/finding-<n>` repair with 2's body and
+    acceptance, from a fix, a none or a foreman ending otherwise.
+  - **The tick** (`fab/dispatch.py`): `red_actions` and `finding_actions`
+    make the `examine-fix`/`remedy-fix` pair, `_fix_steps` sends each to
+    its kind, main's tip read once a round for finding foremen (a failed
+    read noted and the foremen deferred); finding repairs joined to the
+    plan's tasks, the queue import (their landing marked `into` main) and
+    after-landing's owners; `FIX_KINDS` wherever the red wiring read kind
+    `red` (`fab/buffer.py`, `fab/integration.py`, the run limit, the trunk
+    a repair starts from); `finding.settled` in `fab.wake.AGAIN`.
+  - **The page's `finding-<n>`** (`fab/channel.py`, channel.md 2): open from
+    `finding.settled` left until its rung's next `rung.passed`, or a hand
+    clear, which drops the finding.
 
 ## Gaps and departures
 
-- **The repair path is being built** by plan `docs/plan/findings-repair`
-  (2, "After red-routing's tick wiring lands"; red-routing's wiring is on
-  main). On main now: `fab/fix.py` factored out of `fab/tier_reds.py`
-  (`RED_RUNS = fix.RUNS`), the `examine-fix`/`remedy-fix` pair (red only so
-  far), `fab/fixes.py` and `fab/roles/foreman-finding.md`. Not yet: the
-  tick's `finding_actions`, joining `fab.fixes.tasks` to the plan's tasks
-  (the tick still keeps only red's), and the page's `finding-<n>` signal.
-  Until they land a finding triaged `path` stops in state `foreman`; a
-  blocking one, or one from a failed or void walk, holds its rung there.
-  That plan's retire brings this line current.
+- **Neither build has met a real ladder:** both plans' code is tested on
+  fake runners and synthetic logs only; the first walk by hand on hel8
+  will be the first finding to reach a foreman and a repair.
 - **Walks run by fab: not built** (2's last part; 3): a session still walks
   by hand with `fab qa walk` and `fab qa result`.
 - **Stale citations:** `fab/spec_edit.py` (`commit_path`) and

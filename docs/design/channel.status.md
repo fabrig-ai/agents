@@ -22,11 +22,14 @@
   render, cleared as the render changes, a backlog branch lands, or by hand; `## The ladder` per plan
   with rungs, each rung's `fab.findings.line` and the backlog's count.
   Tested with fixture logs and ladder plans.
+- **`finding-<n>`** (2, qa.md 2; plan findings-repair, retired 11-01):
+  `fab.channel._finding_signals` opens a QA finding its foreman left at its
+  `finding.settled` left (`- Rung`, `- Why`, `- Title`, `- Read:` the walk's
+  report and the foreman's) and clears it at the rung's next `rung.passed`
+  or by `fab page clear`, which drops the finding with the clear's text.
+  Tested with fixture logs.
 
 ## Gaps and departures
 
-- **`finding-<n>` is not built** (2): the signal of a finding its foreman
-  left waits for the repair path (qa.md 2, plan
-  `docs/plan/findings-repair`), as no finding is settled before it.
 - **Where else the user reads the page** is the user's (4): it is a file on
   hel8, and its questions are on the forge (3).

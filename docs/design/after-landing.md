@@ -305,10 +305,11 @@ which folds where each red stands, and the tick.
   (`red.closed`), then opens the new ones against every loaded plan's tasks
   (evidence, then `red.opened`). Then each plan, after its refusal actions,
   takes its reds' (`fab.dispatch.red_actions`, pure, the reds whose `draft`
-  is the plan's): state foreman, `Action("examine-red", task=<draft>/red-<n>,
-  detail=<red>)`, which starts the foreman; decided, `Action("remedy-red",
-  run=<foreman run>)`, which settles it (calls.md 2); renamed `examine-fix` and
-  `remedy-fix` when `fab/fix.py` is factored out (qa.md 2). A closed red takes no
+  is the plan's): state foreman, `Action("examine-fix", task=<draft>/red-<n>,
+  detail=<red>, run_kind="red")`, which starts the foreman; decided,
+  `Action("remedy-fix", run=<foreman run>, run_kind="red")`, which settles it
+  (calls.md 2); the pair a QA finding's foreman shares (qa.md 2, `fab/fix.py`;
+  `examine-red` and `remedy-red` before the move). A closed red takes no
   action: a foreman still deciding ends and is collected, and nothing
   settles it. A red task that exists is one of the plan's tasks, so
   `decide` starts, readies and parks it as any.
