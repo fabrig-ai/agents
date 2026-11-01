@@ -10,6 +10,7 @@ landing = "queue"
 # part, one task; the spec in tasks/, the standing rules in notes/common.md,
 # the decisions and the critical path in notes/decisions.md.
 
+retired = true
 [buffer]
 low = 1.0
 high = 2.0
