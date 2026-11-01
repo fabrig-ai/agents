@@ -30,14 +30,19 @@
   design.
 - **Every call works from main once the trunk has landed** (3, "It then
   works from main"; plans `docs/plan/dogfood-faults`, retired 11-01, 600f5a4,
-  and `docs/plan/df-followups`, retired 11-01, 009d591):
+  `docs/plan/df-followups`, retired 11-01, 009d591, and
+  `docs/plan/acceptance-fixes`):
   `fab.integration.call_base` is `main` for an integration plan once
   `trunk_landed` (this draft's queue `branch.landed` for
   `<draft>/integration`), else `plan.trunk`; `fab.designer.main` (every
   role, the retire among them), `fab.calls.main` (skeleton, answer, review,
   amend, settle), `fab.triage.main`, and `fab.dispatch`'s `_start` (tasks),
   `_foreman` and `_examine` (refusal repairs) start from it, a fix kind
-  keeping `main`.
+  keeping `main`. `_settle` and `_remedy` also use `call_base` when
+  committing answers and repair sections, and deliver them through the queue
+  after the landing. For a task started from main after the landing,
+  `_landing_actions` lands it (agents) or readies it (fabrig), and compares
+  its amendment rebase with `origin/main`.
   `fab.dispatch._integration` returns after `_lift_catch_up` once the trunk
   has landed, before any `_contains` or `rev-parse` of `origin/<trunk>`, so
   the tick logs no `failed:` note for the gone trunk. `fab.dispatch._deliver`
@@ -98,7 +103,8 @@
 - **A rebase onto the trunk consumes the amendment** (2, "Optimistic
   start"; plan dogfood-faults; f19f942): `fab.call_review.task_rebase`
   takes `trunk` (default `main`) and counts a done rebase run from
-  `origin/<trunk>`; `fab.dispatch` passes `plan.trunk`. Tested in
+  `origin/<trunk>`; `fab.dispatch` passes `integration.call_base(plan, events)`
+  (`main` after the trunk lands). Tested in
   `test_call_review.py` and `test_dispatch.py`.
 - **Code writes the cut's inputs and options** (3, "The cut's inputs"; the
   user, 11-01; plan `docs/plan/mechanisms-out`, retired 11-01; 3806c34).
@@ -149,14 +155,6 @@
   has stopped since the stop's records were built. The other calls, foremen
   and repairs from main after the landing (df-followups, 11-01) are untried
   live: no trunk has landed since.
-- **A foreman's answer or a repair's section after the landing still
-  commits from the trunk** (3, "so does every other call, foreman and
-  repair"): `fab.dispatch._settle` and `_remedy` pass `trunk=plan.trunk` to
-  `fab.foreman.commit` and `fab.repairs.commit`, whose `fab.spec_edit.commit`
-  adds its worktree at `origin/<trunk>`; once the queue deleted the trunk
-  and the clone pruned it, that settle fails each tick. Only a question or
-  refusal still open when the trunk lands reaches it (every task has merged
-  by then); df-followups' request named the starts, not the settles.
 - **The start commands are unused live** (3, start-commands, 11-01): hel8's
   log holds no `trunk.made` at the plan's retire, and no plan's `inputs/`
   has gone through `fab plan inputs`; the next replay or `ready` probe is

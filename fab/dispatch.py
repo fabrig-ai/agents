@@ -1671,7 +1671,7 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     answer = foreman.answer((log.home() / "runs" / action.run / "report.md").read_text())
     branch = pending if ready else foreman.commit(
         question, tasks[action.task], answer, checkout,
-        run_id=action.run, day=log.now()[:10], sh=sh, trunk=plan.trunk)
+        run_id=action.run, day=log.now()[:10], sh=sh, trunk=integration.call_base(plan, events))
     if branch is not None and not _deliver(branch, plan, checkout, sh=sh, log_path=log_path):
         return
     report = (log.home() / "runs" / action.run / "report.md").read_text()
@@ -1761,7 +1761,8 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
             section = ready.get("section", section)
         checkout = _spec_checkout(plan_dir, sh=sh)
         branch = pending if ready else repairs.commit(
-            refusal, tasks[action.task], section, checkout, run_id=action.run, sh=sh, trunk=plan.trunk)
+            refusal, tasks[action.task], section, checkout, run_id=action.run, sh=sh,
+            trunk=integration.call_base(plan, events))
         if branch is not None:
             if queued and ready is None:
                 relative = Path(tasks[action.task].path).resolve().relative_to(checkout.resolve())
@@ -2048,12 +2049,13 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
             # An early start merges only after what it built on has (fab-integration.md 3).
             continue
         if view.status == "done":
-            amendment = call_review.task_rebase(tasks[identifier], events, trunk=plan.trunk)
+            amendment = call_review.task_rebase(tasks[identifier], events, trunk=integration.call_base(plan, events))
             if amendment is not None:
                 rebases.append(identifier)
                 events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]
                 continue
-            kind = "merge" if plan.landing == "integration" and tasks[identifier].kind not in fix.FIX_KINDS else (
+            kind = "merge" if (plan.landing == "integration" and not integration.trunk_landed(plan, events)
+                               and tasks[identifier].kind not in fix.FIX_KINDS) else (
                 "land" if tasks[identifier].repo == "agents" else "ready")
             actions.append(Action(kind, task=identifier, branch=view.branch, detail=view.branch or ""))
 

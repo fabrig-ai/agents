@@ -4615,6 +4615,21 @@ class OptimisticStartTest(unittest.TestCase):
         self.assertEqual([action for action in actions if action.kind == "merge"],
                          [Action("merge", task="draft/a", branch="draft/a", detail="draft/a")])
 
+    def test_integration_task_from_main_lands_or_readies_after_trunk_landing(self):
+        """Tasks started from main use their repository's landing path after the trunk lands."""
+        the_plan = replace(make_plan(part("core")), landing="integration")
+        for repo in ("agents", "fabrig"):
+            tasks = {"draft/a": task("a", repo=repo)}
+            events = [dict(started(), kind="implement", base="origin/main"), ended()]
+            for landed in (False, True):
+                with self.subTest(repo=repo, landed=landed):
+                    history = events + ([dict(ev="branch.landed", task="draft/integration", queue_ts="001")]
+                                        if landed else [])
+                    actions = dispatch.decide(the_plan, tasks, history, {})
+                    kind = ("land" if repo == "agents" else "ready") if landed else "merge"
+                    deliveries = [action for action in actions if action.kind in ("merge", "land", "ready")]
+                    self.assertEqual(deliveries, [Action(kind, task="draft/a", branch="draft/a", detail="draft/a")])
+
     def test_amended_skeleton_requires_rebase_with_its_diff_then_lands(self):
         self.checked()
         self.task_done()
@@ -4646,19 +4661,23 @@ class OptimisticStartTest(unittest.TestCase):
                   dict(ev="call.started", call="amend", role="amend", amends="root"),
                   dict(ev="call.ended", call="amend", outcome="done"),
                   dict(ev="call.finished", call="amend", outcome="done", tip="amended-tip")]
-        for base in ("origin/main", f"origin/{the_plan.trunk}"):
-            with self.subTest(base=base):
-                rebased = [*events, dict(started(n=2, branch="draft/a-r1"), kind="rebase", base=base), ended(n=2)]
-                actions = dispatch.decide(the_plan, tasks, rebased, self.hosts)
-                merges = [action for action in actions if action.kind == "merge"]
-                starts = [action for action in actions if action.kind == "start"]
-                if base == f"origin/{the_plan.trunk}":
-                    self.assertEqual(merges, [Action("merge", task="draft/a", branch="draft/a-r1",
-                                                    detail="draft/a-r1")])
-                    self.assertEqual(starts, [])
-                else:
-                    self.assertEqual(merges, [])
-                    self.assertEqual([action.run_kind for action in starts], ["rebase"])
+        for landed in (False, True):
+            history = events + ([dict(ev="branch.landed", task="draft/integration", queue_ts="001")]
+                                if landed else [])
+            for base in ("origin/main", f"origin/{the_plan.trunk}"):
+                with self.subTest(landed=landed, base=base):
+                    rebased = [*history, dict(started(n=2, branch="draft/a-r1"), kind="rebase", base=base), ended(n=2)]
+                    actions = dispatch.decide(the_plan, tasks, rebased, self.hosts)
+                    deliveries = [action for action in actions if action.kind in ("merge", "land", "ready")]
+                    starts = [action for action in actions if action.kind == "start"]
+                    expected_base = "origin/main" if landed else f"origin/{the_plan.trunk}"
+                    if base == expected_base:
+                        self.assertEqual(deliveries, [Action("land" if landed else "merge", task="draft/a",
+                                                            branch="draft/a-r1", detail="draft/a-r1")])
+                        self.assertEqual(starts, [])
+                    else:
+                        self.assertEqual(deliveries, [])
+                        self.assertEqual([action.run_kind for action in starts], ["rebase"])
 
     def test_parked_chain_holds_started_tasks_and_resets_after_answer(self):
         self.checked()
@@ -5849,40 +5868,54 @@ class IntegrationDeliveryTest(unittest.TestCase):
 
     def test_foremen_start_on_trunk_then_main_after_queue_landing(self):
         hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}
-        for history, kind, module in ((question_history(), "foreman", foreman),
-                                       (refusal_history("a"), "examine", repairs)):
-            for landed in (False, True):
-                with self.subTest(kind=kind, landed=landed):
-                    self.path = self.home / f"{kind}-{landed}.jsonl"
-                    self.append(*history)
-                    if landed:
-                        self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
-                    action, = (dispatch.foreman_actions if kind == "foreman" else dispatch.repair_actions)(
-                        self.tasks, log.read(self.path))
-                    with patch.object(module, "start") as start:
-                        self.take(action, hosts=hosts)
-                    self.assertEqual(start.call_args.kwargs["trunk"], "main" if landed else self.plan.trunk)
+        for task_kind in ("feature", *fix.FIX_KINDS):
+            self.tasks["draft/a"] = replace(self.tasks["draft/a"], kind=task_kind)
+            for history, kind, module in ((question_history(), "foreman", foreman),
+                                           (refusal_history("a"), "examine", repairs)):
+                for landed in (False, True):
+                    with self.subTest(task_kind=task_kind, kind=kind, landed=landed):
+                        self.path = self.home / f"{task_kind}-{kind}-{landed}.jsonl"
+                        self.append(*history)
+                        if landed:
+                            self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+                        action, = (dispatch.foreman_actions if kind == "foreman" else dispatch.repair_actions)(
+                            self.tasks, log.read(self.path))
+                        with patch.object(module, "start") as start:
+                            self.take(action, hosts=hosts)
+                        base = "main" if landed or task_kind in fix.FIX_KINDS else self.plan.trunk
+                        self.assertEqual(start.call_args.kwargs["trunk"], base)
 
     def test_answer_and_repair_specs_use_trunk_and_settle_only_after_merge(self):
         for kind, module, history, text, prefix, settled_ev in (
                 ("settle", foreman, question_history(status="settled"), "Done: Choose A\n", "answers", "question.answered"),
                 ("remedy", repairs, refusal_history("a", "decided"), report("fix", "Fix the spec."), "repairs", "refusal.settled")):
-            for merged in (False, True):
-                with self.subTest(kind=kind, merged=merged):
-                    self.path = self.home / f"{kind}-{merged}.jsonl"
-                    self.append(*history)
-                    run_id = "draft/a/foreman-1"
-                    branch = f"{prefix}/{run_id}"
-                    write(log.home() / "runs" / run_id / "report.md", text)
-                    action = Action(kind, task="draft/a", run=run_id)
-                    with patch.object(module, "commit", return_value=branch) as commit, \
-                         patch.object(dispatch, "_merge_branch", return_value=merged) as merge:
-                        self.take(action)
-                    self.assertEqual(commit.call_args.kwargs["trunk"], self.plan.trunk)
-                    merge.assert_called_once_with(branch, self.plan, self.home, sh=self.fake, log_path=self.path)
-                    self.assertEqual(any(entry["ev"] == settled_ev for entry in log.read(self.path)), merged)
+            for landed in (False, True):
+                for delivered in (False, True):
+                    with self.subTest(kind=kind, landed=landed, delivered=delivered):
+                        self.queue.reset_mock()
+                        self.path = self.home / f"{kind}-{landed}-{delivered}.jsonl"
+                        self.append(*history)
+                        run_id = "draft/a/foreman-1"
+                        branch = f"{prefix}/{run_id}"
+                        if landed:
+                            self.append(dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+                            if delivered:
+                                self.append(dict(ev="branch.landed", branch=branch, queue_ts="002"))
+                        write(log.home() / "runs" / run_id / "report.md", text)
+                        action = Action(kind, task="draft/a", run=run_id)
+                        with patch.object(module, "commit", return_value=branch) as commit, \
+                             patch.object(dispatch, "_merge_branch", return_value=delivered) as merge:
+                            self.take(action)
+                        self.assertEqual(commit.call_args.kwargs["trunk"], "main" if landed else self.plan.trunk)
+                        if landed:
+                            merge.assert_not_called()
+                            self.queue.assert_called_once()
+                            self.assertEqual(self.queue.call_args.args, (branch, self.home))
+                        else:
+                            merge.assert_called_once_with(branch, self.plan, self.home, sh=self.fake, log_path=self.path)
+                            self.queue.assert_not_called()
+                        self.assertEqual(any(entry["ev"] == settled_ev for entry in log.read(self.path)), delivered)
         self.land.assert_not_called()
-        self.queue.assert_not_called()
 
 
 class AfterLandingImportTest(unittest.TestCase):
