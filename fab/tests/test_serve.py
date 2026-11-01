@@ -183,6 +183,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(current["landed"], {"last_hour": 2, "today": 2})
         self.assertEqual(current["merged"], {"last_hour": 5, "today": 3})
         self.assertEqual(current["drafts"], {
+            "by-hand": {"runs_in_flight": 0, "landed_today": 1, "merged_today": 0},
             "draft": {"runs_in_flight": 1, "landed_today": 1, "merged_today": 2},
         })
         page = serve.render(current)
@@ -202,6 +203,22 @@ class SnapshotTest(unittest.TestCase):
         self.assertIn('<tr><td>by-hand</td>', serve.render(current))
         self.assertNotIn('"other"', json.dumps(current["drafts"]))
 
+    def test_serve_main_landings_without_known_drafts_are_by_hand(self):
+        tasks = [{}, {"task": None}, {"task": ""}, {"task": "-"},
+                 {"task": "draft"}, {"task": "fab/live-unit"}, {"task": "al/fab-cpu"},
+                 {"task": "unseen<secret>/private"}]
+        for fields in tasks:
+            with self.subTest(fields=fields):
+                events = [event("run.started", 90000, task="draft/old"),
+                          event("run.started", 90000, task="-"),
+                          event("branch.landed", branch="fl/triage-shell-kind", **fields)]
+                current = serve.snapshot(events, NOW, [])
+                self.assertEqual(current["drafts"], {
+                    "by-hand": {"runs_in_flight": 0, "landed_today": 1, "merged_today": 0},
+                })
+                self.assertEqual(current["landed"], {"last_hour": 1, "today": 1})
+                self.assertIn('<tr><td>by-hand</td>', serve.render(current))
+
     def test_serve_drafts_are_bounded_public_names(self):
         valid = ["a", "release-1.2", "a" * 64, "other"]
         invalid = ["a" * 65, "Upper", "-dash", "path<secret>", "", "../hidden"]
@@ -215,7 +232,10 @@ class SnapshotTest(unittest.TestCase):
                    event("branch.landed", task="unseen<secret>/private")]
         current = serve.snapshot(events, NOW, [])
         self.assertEqual(current["drafts"]["other"], {
-            "runs_in_flight": 0, "landed_today": 9, "merged_today": 7,
+            "runs_in_flight": 0, "landed_today": 7, "merged_today": 7,
+        })
+        self.assertEqual(current["drafts"]["by-hand"], {
+            "runs_in_flight": 0, "landed_today": 4, "merged_today": 0,
         })
         for name in valid[:-1]:
             self.assertEqual(current["drafts"][name], {

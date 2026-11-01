@@ -172,7 +172,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     fold the user's log asks through channel.asks, and bound runs to 24 h and calls to
     calls.TIMEOUT. Include recent account subscriptions with opaque labels and pace.
     Separate main landings from trunk merges; drafts come from run starts, with
-    by-hand for main landings without a task.
+    by-hand for main landings without a known draft.
     Today runs from UTC midnight through now. Only public fields leave the fold."""
     now = now.astimezone(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -195,7 +195,9 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
 
     def count_draft(event: dict, figure: str) -> None:
         name = _draft(event)
-        if event.get("ev") == "branch.landed" and "into" not in event and event.get("task") is None:
+        task = event.get("task")
+        if (event.get("ev") == "branch.landed" and "into" not in event
+                and (not isinstance(task, str) or "/" not in task or name not in known_drafts)):
             public = "by-hand"
         elif name in known_drafts:
             public = name if DRAFT.fullmatch(name) else "other"

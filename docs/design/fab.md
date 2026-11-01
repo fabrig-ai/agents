@@ -1904,15 +1904,16 @@ login that still works reused across them before more are signed in.
 - **Drafts come from run starts.** Only prefixes of `run.started` tasks in
   the log qualify. Those with a run in flight, a main landing or a trunk
   merge today show `runs_in_flight`, `landed_today` and `merged_today`.
-  A main landing belongs to its task's prefix; a trunk merge to the prefix
-  of `into` (`<draft>/integration`). A main landing with no task (missing or
-  null) belongs to `by-hand`, even without a run start. Call branches do not
-  create drafts.
+  A main landing belongs to its task's prefix only when that prefix is a
+  known draft from a run start; otherwise it belongs to `by-hand`. Missing,
+  null, empty, `-` or slash-less tasks and unknown prefixes are `by-hand`.
+  A trunk merge belongs to the prefix of `into` (`<draft>/integration`),
+  only when that draft is known. Call branches do not create drafts.
 - **Only public labels leave the fold.** Known host names, call roles from
   `fab.calls.ROLES` (others become `other`), and draft names matching
-  `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A prefix ends at the
-  first `/`; a task without `/` becomes `other`. Draft qualification uses
-  the prefix before this public classification. Subscription labels are
+  `[a-z0-9][a-z0-9.-]{0,63}` (known drafts failing the pattern become
+  `other`). A prefix ends at the first `/`; draft qualification uses this
+  prefix before public classification. Subscription labels are
   stable opaque account labels, never emails or full hashes. No task, run or call
   ids, branches, shas, paths, question or answer text, notes, reports,
   emails or holders in HTML or JSON; subscriptions never expose hosts.
