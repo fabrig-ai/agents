@@ -93,3 +93,15 @@ Update edition-reader patches in `fab/tests/test_channel.py` to patch that local
 Preserve current-edition rendering and unreadable-plan handling required by `docs/design/fab.md`, sections 13.6 and 13.15.
 Keep changes within those two authorized files; do not weaken the dispatch assertion.
 Run the channel tests and the failing dispatch test with Python `-B`, then `bin/fab test` and the size gate.
+
+## Rebase (2026-11-01, step rebase, foreman findings-loop/ladder-page/foreman-3)
+
+resolve both fab/channel.py conflicts while preserving main’s design references and the finding-page additions
+Replaying `896f26d` conflicts with main’s `3e202cc` (“fab: split fab.md into one design per subsystem”).
+Only `fab/channel.py` has content conflicts; forge, serve and serve tests merged automatically.
+At `PLANS`/`KINDS`, retain main’s `PLANS` comment citing `fab-tick.md 5` and include `"finding"` in `KINDS`.
+In `clear`’s docstring, retain the branch’s backlog-signals explanation and main’s reference to `docs/design/fab-channel.md`, section 2.
+Preserve the automatically merged finding asks, answers, backlog signals and ladder rendering.
+Continue replaying both repair commits, including the channel-local `read_editions` binding and its test patches.
+Keep resolution changes within the task’s authorized files; no design changes are needed.
+Run the channel, forge and serve tests with Python `-B`, then `bin/fab test` and the size gate.
