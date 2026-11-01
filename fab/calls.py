@@ -632,6 +632,21 @@ def _call_result(report_path: Path) -> str:
     return outcome(report_text)
 
 
+def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse arguments for roles run here, excluding delegated roles and issue replies."""
+    from fab import designer
+
+    parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
+    commands = parser.add_subparsers(dest="role", required=True)
+    for role in (name for name in ROLES if name not in (*designer.ROLES, "reply", "triage")):
+        command = commands.add_parser(role)
+        if role in ("skeleton", "amend"):
+            command.add_argument("part" if role == "skeleton" else "root")
+        command.add_argument("--plan", type=Path, required=True)
+        command.add_argument("--brief-only", action="store_true")
+    return parser.parse_args(argv)
+
+
 def main(argv: list[str]) -> int:
     """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
     Delegate cut, contract, decision and retire to fab.designer.main, and triage
@@ -647,15 +662,7 @@ def main(argv: list[str]) -> int:
         return triage.main(argv[1:])
     if argv and argv[0] in designer.ROLES:
         return designer.main(argv)
-    parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
-    commands = parser.add_subparsers(dest="role", required=True)
-    for role in (name for name in ROLES if name not in (*designer.ROLES, "reply", "triage")):
-        command = commands.add_parser(role)
-        if role in ("skeleton", "amend"):
-            command.add_argument("part" if role == "skeleton" else "root")
-        command.add_argument("--plan", type=Path, required=True)
-        command.add_argument("--brief-only", action="store_true")
-    args = parser.parse_args(argv)
+    args = _parse_args(argv)
     try:
         directory = args.plan.resolve()
         plan = load_plan(directory / "plan.toml")
