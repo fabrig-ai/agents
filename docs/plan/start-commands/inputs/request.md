@@ -39,6 +39,14 @@ small ones now"). The designs now say what to build, each marked "the user, 11-0
      - a parked ask with no report shows no excerpt and no "Read:" in the forge body
        (`fab/forge.py`).
    - `fab.channel.asks` already shows a `call.parked` as a parked ask: test it, don't rebuild it.
+4. **A retired plan's last landing is imported** (`docs/design/tick.md` 5, "A plan that cannot
+   load"; found by the probe `phase-case`, 11-01 17:32Z).
+   - The queue landed its retire (`calls/retire-2c39…`) on fabrig main, but the tick then read
+     `retired = true` and skipped the plan in `_load_plans`. Its draft left `plan_drafts`, so
+     `_import_queue` never owned the record: no `branch.landed`, no `call.finished`.
+   - Build: a retired plan's draft stays in the import's drafts (owners and cursor), and the
+     finish of its retire chain records `call.finished` from the imported landing. Nothing else
+     runs for a retired plan. A test uses a fixture log and queue record.
 
 Tests for each in `fab/tests/`: fakes and fixture logs, and real git in a temporary directory for
 the two commands, as `test_overlaps_git.py` does.

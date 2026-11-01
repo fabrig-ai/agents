@@ -140,7 +140,13 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   plan owns are collected after every plan has ticked.
 - **A plan that cannot load** (its plan.toml, a fetch, a second plan of the
   same draft) is printed and skipped; the others tick. It logs nothing,
-  and `fab tick` exits 1. A retired plan is skipped.
+  and `fab tick` exits 1. A retired plan is skipped, but its draft still
+  owns its branches for the queue's import (landing.md 3), so the record
+  of the landing that retired it, a queue plan's or an integration plan's
+  retire through fabrig's queue, is imported (`branch.landed`, then the
+  finish's `call.finished`) and nothing else runs for it (fixed 11-01, the
+  probe `phase-case`: its retire landed on fabrig main at fc1651448b, and
+  the log never said so).
 - **A tick with no loaded plan** (none listed or named, or none that
   loads) imports the queue's unowned records (landing.md 3) and the after-landing
   records (after-landing.md 2), closes reds, and, when no listed plan failed to
