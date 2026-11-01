@@ -888,29 +888,16 @@ def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = 
                 print(line)
 
 
-def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] | None,
-           log_path: Path | None, only: bool = False) -> list[Action]:
-    """Load and run listed then given plans, sharing imports and builder measurements.
+def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
+                    load_actions: Sequence[Action], hosts: Mapping[str, Host], *, sh: Runner,
+                    log_path: Path | None, only: bool) -> tuple[list[dict], list[tier_reds.Red], bool]:
+    """Import queue and after-landing records, then reconcile reds (docs/design/fab.md, 13.8).
 
-    Fetch each checkout once; print load failures and skip retired plans. Import queue
-    and after-landing records, close recovered reds, then open new reds against all loaded
-    owners, unless any plan failed to load; with an after-landing host, fabrig retirement
-    waits in that round too. With only, open no reds and do not hold retirement for them.
-    With no loaded plan, refresh the page and return without measuring or starting work.
-    With no owners, new reds are signals. Decide each plan on fresh events and spend calm
-    extras once. Question, refusal and red actions share a log snapshot before fresh call
-    decisions. Collect unowned runs last and refresh the page.
+    Return fresh events, folded reds and whether failed loads defer openings.
+    With only, close recovered reds but open none.
     """
-    # only: the given plans alone, no strays and no page (a replay's own tick beside fab's,
-    # coord/fab-replay).
-    directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
-    if not directories:
-        print("plans - none")
-    loaded, load_actions = _load_plans(directories, log.read(log_path), sh=sh)
-    actions = list(load_actions)
-    hosts = machines.load() if hosts is None else hosts
     after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
-    openings_deferred = bool(actions) and after_host is not None
+    openings_deferred = bool(load_actions) and after_host is not None
     events = log.read(log_path)
     folded = tier_reds.reds(events)
     tasks = {key: task for plan, plan_tasks, _, _ in loaded
@@ -932,6 +919,32 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
         folded = [*folded, *tier_reds.reds(opened)] if opened else folded
+    return events, folded, openings_deferred
+
+
+def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] | None,
+           log_path: Path | None, only: bool = False) -> list[Action]:
+    """Load and run listed then given plans, sharing imports and builder measurements.
+
+    Fetch each checkout once; print load failures and skip retired plans. Import queue
+    and after-landing records, close recovered reds, then open new reds against all loaded
+    owners, unless any plan failed to load; with an after-landing host, fabrig retirement
+    waits in that round too. With only, open no reds and do not hold retirement for them.
+    With no loaded plan, refresh the page and return without measuring or starting work.
+    With no owners, new reds are signals. Decide each plan on fresh events and spend calm
+    extras once. Question, refusal and red actions share a log snapshot before fresh call
+    decisions. Collect unowned runs last and refresh the page.
+    """
+    # only: the given plans alone, no strays and no page (a replay's own tick beside fab's,
+    # coord/fab-replay).
+    directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
+    if not directories:
+        print("plans - none")
+    loaded, load_actions = _load_plans(directories, log.read(log_path), sh=sh)
+    actions = list(load_actions)
+    hosts = machines.load() if hosts is None else hosts
+    events, folded, openings_deferred = _reconcile_reds(
+        loaded, load_actions, hosts, sh=sh, log_path=log_path, only=only)
     if loaded:
         plan_tasks = {key: task for plan, tasks, _, _ in loaded
                       for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}

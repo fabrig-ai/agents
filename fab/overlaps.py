@@ -173,51 +173,83 @@ def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Se
         current.extend(repo_pairs)
         if not repo_pairs:
             continue
-        trees = {}
-        tree_keys = {}
-        for plan in present:
-            key = json.dumps([repo, checkout, main.out.strip(), tips[plan.draft]])
-            tree_keys[plan.draft] = key
-            tree = cache["trees"].get(key)
-            if tree is None:
-                result = _merge(["git", "merge-tree", "--write-tree", "--no-messages",
-                                 "origin/main", f"origin/{plan.trunk}"], checkout, sh)
-                status, tree = parse_catch_up(result.code, result.out)
-                if status == "failure":
-                    lines.append(_failure((plan.draft,), result, records, log_path))
-                if tree is None:
-                    continue
-                cache["trees"][key] = tree
-            trees[plan.draft] = tree
-        for pair in repo_pairs:
-            a, b = pair
-            if a not in trees or b not in trees:
-                continue
-            pair_tips = [tips[a], tips[b]]
-            key = json.dumps([repo, checkout, main.out.strip(), *pair_tips])
-            answer = cache["pairs"].get(key)
-            if answer is None:
-                result = _merge(["git", "merge-tree", "--write-tree", "--name-only",
-                                 "--no-messages", "-z", "--merge-base=origin/main",
-                                 trees[a], trees[b]], checkout, sh)
-                parsed = parse_pair(result.code, result.out)
-                if parsed is None:
-                    for draft in pair:
-                        cache["trees"].pop(tree_keys[draft], None)
-                    lines.append(_failure(pair, result, records, log_path))
-                    continue
-                files, more = parsed
-                answer = dict(files=files, more=more)
-                cache["pairs"][key] = answer
-            if is_news(pair, answer["files"], answer["more"], records):
-                records.append(log.append("trunks.overlap", path=log_path,
-                                          **overlap_fields(pair, pair_tips, **answer)))
-                lines.append(f"overlap {a} {b} {len(answer['files']) + answer['more']}")
+        key_prefix = (repo, checkout, main.out.strip())
+        trees, tree_keys, failures = _catch_up_trees(
+            present, tips, key_prefix, cache, records, sh=sh, log_path=log_path)
+        lines.extend(failures)
+        lines.extend(_pair_results(repo_pairs, tips, key_prefix, trees, tree_keys,
+                                   cache, records, sh=sh, log_path=log_path))
     if all_loaded:
         for fields in gone_pairs(current, records):
             records.append(log.append("trunks.overlap", path=log_path, **fields))
             lines.append(f"overlap {' '.join(fields['drafts'])} gone")
     atomic.write(cache_path, json.dumps(cache) + "\n")
+    return lines
+
+
+def _catch_up_trees(plans: Sequence[Plan], tips: dict[str, str],
+                    key_prefix: tuple[str, str, str], cache: dict, records: list[dict], *,
+                    sh: Runner, log_path: Path | None) -> tuple[dict[str, str], dict[str, str], list[str]]:
+    """Return usable catch-up trees, cache keys and failure lines (docs/design/fab.md, 13.17).
+
+    key_prefix is (repository, checkout, main SHA). Update the shared cache
+    and records so failures deduplicate across all merges in this probe.
+    """
+    checkout = key_prefix[1]
+    lines = []
+    trees = {}
+    tree_keys = {}
+    for plan in plans:
+        key = json.dumps([*key_prefix, tips[plan.draft]])
+        tree_keys[plan.draft] = key
+        tree = cache["trees"].get(key)
+        if tree is None:
+            result = _merge(["git", "merge-tree", "--write-tree", "--no-messages",
+                             "origin/main", f"origin/{plan.trunk}"], checkout, sh)
+            status, tree = parse_catch_up(result.code, result.out)
+            if status == "failure":
+                lines.append(_failure((plan.draft,), result, records, log_path))
+            if tree is None:
+                continue
+            cache["trees"][key] = tree
+        trees[plan.draft] = tree
+    return trees, tree_keys, lines
+
+
+def _pair_results(repo_pairs: Sequence[tuple[str, str]], tips: dict[str, str],
+                  key_prefix: tuple[str, str, str], trees: dict[str, str], tree_keys: dict[str, str],
+                  cache: dict, records: list[dict], *, sh: Runner, log_path: Path | None) -> list[str]:
+    """Return pair news and failure lines, updating shared records and cache (docs/design/fab.md, 13.17).
+
+    key_prefix is (repository, checkout, main SHA). Skip unavailable trees;
+    on pair failure evict its trees from the cache while retaining them for this tick.
+    """
+    checkout = key_prefix[1]
+    lines = []
+    for pair in repo_pairs:
+        a, b = pair
+        if a not in trees or b not in trees:
+            continue
+        pair_tips = [tips[a], tips[b]]
+        key = json.dumps([*key_prefix, *pair_tips])
+        answer = cache["pairs"].get(key)
+        if answer is None:
+            result = _merge(["git", "merge-tree", "--write-tree", "--name-only",
+                             "--no-messages", "-z", "--merge-base=origin/main",
+                             trees[a], trees[b]], checkout, sh)
+            parsed = parse_pair(result.code, result.out)
+            if parsed is None:
+                for draft in pair:
+                    cache["trees"].pop(tree_keys[draft], None)
+                lines.append(_failure(pair, result, records, log_path))
+                continue
+            files, more = parsed
+            answer = dict(files=files, more=more)
+            cache["pairs"][key] = answer
+        if is_news(pair, answer["files"], answer["more"], records):
+            records.append(log.append("trunks.overlap", path=log_path,
+                                      **overlap_fields(pair, pair_tips, **answer)))
+            lines.append(f"overlap {a} {b} {len(answer['files']) + answer['more']}")
     return lines
 
 
