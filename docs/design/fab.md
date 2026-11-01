@@ -1594,7 +1594,10 @@ only as tweaks once a replay matches its run.
   unmerged needs of its own (one level). Its slot is set up from the trunk,
   then each such need's `origin/<branch>` is merged in, in needs order; a
   conflict aborts the start and logs `early.refused` (it then waits as any
-  task). Its brief gains `# Started early`, naming those branches and saying
+  task). A task starts early once at most: after a question, an answered
+  task whose needs are not all merged waits for them (r6: fe-playground-forge
+  started early on fe-remove and asked four times for the same unfinished
+  removal before it parked). Its brief gains `# Started early`, naming those branches and saying
   to merge them again before it pushes; `run.started` carries `early`. A
   done task of an integration plan merges only after every need has merged.
   The tick reads origin's branches of the draft from the plan checkout after

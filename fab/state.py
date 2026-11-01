@@ -34,7 +34,8 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
     - run.ended: outcome done -> done; question -> parked; failed -> parked, question is
       "Failed: " plus the event's report path; infra -> runnable.
     - question.asked: parked, question = text. question.answered: a parked task becomes
-      runnable, or done when the answer has accept (keeping branch); every task's question = None.
+      runnable (waiting while a need is not landed), or done when the answer has accept (keeping
+      branch); every task's question = None.
     - branch.ready: ready, tip. branch.landed: landed, tip, main. branch.rejected: rejected.
     - refusal.settled: retry -> done, keeping branch and tip; fix and none change no status.
     A task never started is waiting while any need is not landed, otherwise runnable.
@@ -67,7 +68,7 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                 # An answer unparks a parked task; a task already past its question stays put.
                 # An accepted one (the foreman's Accept) makes it done, its pushed branch kept.
                 if view.status == "parked":
-                    view.status = "done" if event.get("accept") else "runnable"
+                    view.status = "done" if event.get("accept") else "answered"
                 view.question = None
             case "branch.ready":
                 view.status = "ready"
@@ -82,6 +83,12 @@ def fold(tasks: Mapping[str, Task], events: Iterable[dict]) -> dict[str, TaskVie
                 if event.get("verdict") == "retry":
                     view.status = "done"
     for identifier, view in views.items():
+        # An answered task runs again once its needs are in: one that started early on a need
+        # still running waits for it (the playground replay, 11-01: four reruns, each asking
+        # for the same unfinished need).
+        if view.status == "answered":
+            view.status = "runnable" if all(
+                need in views and views[need].status == "landed" for need in tasks[identifier].needs) else "waiting"
         if view.status == "waiting" and all(
             need in views and views[need].status == "landed" for need in tasks[identifier].needs):
             view.status = "runnable"

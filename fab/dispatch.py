@@ -298,7 +298,9 @@ def early_starts(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, stat
     (early.refused) waits as usual. Pure."""
     if plan.landing != "integration" or not plan.early:
         return {}
-    refused = {event.get("task") for event in events if event.get("ev") == "early.refused"}
+    # One early start per task: one that was refused, or that already started early, waits.
+    refused = {event.get("task") for event in events if event.get("ev") == "early.refused"
+               or (event.get("ev") == "run.started" and event.get("early"))}
     result = {}
     for identifier, view in views.items():
         if view.status != "waiting" or identifier in refused:

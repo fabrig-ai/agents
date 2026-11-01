@@ -4418,6 +4418,16 @@ class EarlyStartTest(unittest.TestCase):
         start, = [action for action in actions if action.kind == "start"]
         self.assertEqual((start.task, start.early), ("draft/b", (("draft/a", "draft/a"),)))
 
+    def test_one_early_start_per_task_and_an_answer_waits_for_the_need(self):
+        events = [started(branch="draft/a"), dict(started("b", branch="draft/b"), early=["draft/a"]),
+                  ended("b", outcome="question"), event("question.asked", "b", text="Is a done?"),
+                  event("question.answered", "b")]
+        views = state.fold(self.tasks, events)
+        self.assertEqual(views["draft/b"].status, "waiting")
+        self.assertEqual(dispatch.early_starts(self.PLAN, self.tasks, views, events, frozenset({"draft/a"})), {})
+        landed = events + [ended("a"), event("branch.landed", "a", tip="t", main="m", into="draft/integration")]
+        self.assertEqual(state.fold(self.tasks, landed)["draft/b"].status, "runnable")
+
     def test_one_level_only(self):
         # b runs early on a; c may not start on b while b still waits for a.
         events = [started(branch="draft/a"), started("b", branch="draft/b")]
