@@ -48,3 +48,15 @@ Tests in `fab/tests/test_serve.py`:
 ## Report
 
 The key's shape as built, and the 13.14 line changed.
+
+## Repair (2026-11-01, step gate:size, foreman trunk-overlaps/overlaps-page/foreman-1)
+
+Extract overlap folding and panel rendering into private helpers so existing oversized functions do not grow.
+`gate:size` reports `fab/serve.py:172` snapshot at 114 lines and `fab/serve.py:308` render at 154 lines (cap 60).
+The size ratchet permits existing long functions only when they do not grow (`docs/design/fab.md`, “The gates”, `size`).
+In `fab/serve.py`, extract the `public_overlaps` loop, label sanitization and sorting into a private helper accepting dated events and known drafts; call it directly for the returned `overlaps` key.
+Extract the Overlaps panel into a private helper and append its result alongside the existing Drafts append, keeping `render` at or below its base length.
+Move shared HTML helpers to module scope only as needed; preserve escaping and public signatures. Keep every new helper within 60 lines.
+Preserve the overlap shape, filtering, counts, empty state and panel order required by `docs/design/fab.md`, 13.14 and 13.17.
+Keep the existing design order-line change and acceptance tests in `fab/tests/test_serve.py`.
+Run the serve tests with Python `-B`, then `bin/fab test` and the landing size gate.
