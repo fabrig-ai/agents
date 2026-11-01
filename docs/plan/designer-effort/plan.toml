@@ -1,0 +1,5 @@
+draft = "designer-effort"
+repo = "agents"
+sources = ["docs/plan/designer-effort/inputs/request.md", "docs/design/draft/execution-modes.md"]
+# Plan options, written by fab call cut --set; keep them
+landing = "queue"
