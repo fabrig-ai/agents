@@ -237,6 +237,30 @@ class InstallSyncTest(unittest.TestCase):
                     self.assertEqual(git(install, "branch", "--show-current"),
                                      "" if before == ancestor else "builder-state")
 
+    def test_pinned_install_skips_fetch_and_allows_the_start(self):
+        with tmp_home() as home:
+            root = home / "builder home"
+            root.mkdir()
+            pin = root / "install.pinned"
+            sibling = pin.with_suffix(".writing")
+            sibling.write_text("replay owns this pin\n")
+            sibling.replace(pin)
+            fake = FakeRunner().on(["git"], Result(0, "a" * 40 + "\n"))
+            fallback = starter().rules[0][1]
+            def answer(call):
+                if command(call)[0] == "flock":
+                    return execute(command(call), timeout=5)
+                return fallback(call)
+            fake.on(["ssh"], answer)
+            errors = io.StringIO()
+            with patch.object(run, "remote_home", return_value=str(root)), redirect_stderr(errors):
+                self.assertEqual(run.start(TASK, HOST, sh=fake), "draft/task-1")
+            self.assertEqual(errors.getvalue(), "fab run: builder: install pinned\n")
+            self.assertEqual(pin.read_text(), "replay owns this pin\n")
+            self.assertFalse((root / "install").exists())
+            self.assertEqual(log.read()[-1]["ev"], "run.started")
+            self.assertEqual(command(fake.calls[-1])[:3], ["fab", "codex", "start"])
+
     def test_sync_failures_note_one_line_and_allow_the_start(self):
         def unavailable(call):
             raise OSError("ssh unavailable\nsecond line")

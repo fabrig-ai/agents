@@ -190,7 +190,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
 
     With checkout, an absolute task.path inside it is repository-relative in the brief;
     paths outside it, paths already relative and checkout=None keep their given spelling.
-    First move the builder install forward to this package's HEAD; a sync failure only notes
+    First move an unpinned builder install forward to this package's HEAD; failures only note
     stderr. Dispatcher hosts are skipped (docs/design/fab-tick.md, 3).
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
@@ -259,7 +259,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
 
 
 def _sync_install(host: Host, *, sh: Runner) -> None:
-    """Advance only an ancestor builder install; any failure leaves the start free to proceed."""
+    """Advance an unpinned ancestor install; any failure leaves the start free to proceed."""
     if "dispatcher" in host.roles:
         return
     try:
@@ -269,13 +269,17 @@ def _sync_install(host: Host, *, sh: Runner) -> None:
             raise ValueError("package HEAD is not a commit hash")
         root = Path(remote_home(host))
         git = shlex.join(["git", "-C", str(root / "install")])
-        script = (f'{git} fetch origin && head=$({git} rev-parse HEAD) && '
+        script = (f'if test -e {shlex.quote(str(root / "install.pinned"))}; then '
+                  "printf '%s\\n' 'install pinned'; exit 0; fi; "
+                  f'{git} fetch origin && head=$({git} rev-parse HEAD) && '
                   f'if test "$head" = {tip}; then :; else '
                   f'{git} merge-base --is-ancestor "$head" {tip}; ancestry=$?; '
                   f'if test "$ancestry" = 0; then {git} checkout -q --detach {tip}; '
                   'elif test "$ancestry" != 1; then exit "$ancestry"; fi; fi')
-        sh(ssh(host.ssh, ["flock", "-w", "60", str(root / "install.lock"),
-                          "bash", "-c", script]), check=True, timeout=120)
+        result = sh(ssh(host.ssh, ["flock", "-w", "60", str(root / "install.lock"),
+                                 "bash", "-c", script]), check=True, timeout=120)
+        if result.out.strip() == "install pinned":
+            print(f"fab run: {host.name}: install pinned", file=sys.stderr)
     except (OSError, Failed, ValueError) as error:
         detail = (error.result.err or error.result.out or f"exit {error.result.code}"
                   if isinstance(error, Failed) else str(error))

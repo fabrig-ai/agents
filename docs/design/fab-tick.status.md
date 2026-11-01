@@ -10,7 +10,9 @@
   codex-run is no longer called). A failed start gives back what it took.
   Before a start's builder work, its fab install follows the running
   dispatcher's commit under `install.lock`, only forward; a sync failure
-  notes stderr and the start continues. Dispatcher hosts are skipped.
+  notes stderr and the start continues. `FAB_HOME/install.pinned`, owned
+  by a person or replay setup, skips sync before the fetch under the same
+  lock and notes `install pinned`. Dispatcher hosts are skipped.
   Services still move and restart only with `bin/install.sh`.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
   run by hand, live since 20:27Z.

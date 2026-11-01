@@ -61,9 +61,12 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `codex-run task` there.
 - **Builders follow the dispatcher:** before any builder command, `fab run
   start` reads the running fab package's checkout `HEAD` and, over one ssh
-  under `flock -w 60 FAB_HOME/install.lock`, fetches origin in
-  `FAB_HOME/install`. An install already at that commit stays; an ancestor
-  moves to it with `git checkout -q --detach`; an ahead or diverged install
+  under `flock -w 60 FAB_HOME/install.lock`, checks for
+  `FAB_HOME/install.pinned` before fetching origin in `FAB_HOME/install`.
+  If the pin exists, sync does nothing and notes `install pinned` on stderr;
+  a person or replay setup owns creating and removing the pin. Otherwise,
+  an install already at that commit stays; an ancestor moves to it with
+  `git checkout -q --detach`; an ahead or diverged install
   stays. This moves only forward, so a dispatcher pinned for a replay never
   downgrades a builder. Any sync failure is a one-line note on stderr and
   never fails the start. A host with the `dispatcher` role is skipped: its

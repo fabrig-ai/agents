@@ -14,8 +14,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **Builder installs follow the dispatcher:** a run's start fetches origin
   in `FAB_HOME/install` under `FAB_HOME/install.lock` (waiting up to 60 s)
   and moves an ancestor install to the running dispatcher's commit,
-  detached. An install at that commit, ahead or diverged stays; sync
-  failures only note stderr and never fail a start. Dispatcher hosts are
+  detached. Under the same lock, `FAB_HOME/install.pinned` is checked
+  before the fetch: when it exists, sync does nothing and notes
+  `install pinned` on stderr. A person or replay setup creates and removes
+  the pin; fab does neither. An install at that commit, ahead or diverged
+  stays; sync failures only note stderr and never fail a start. Dispatcher hosts are
   skipped (docs/design/fab-tick.md, 3). This updates the fab commands on
   the builder's PATH without changing the links, worktrees, slots or units.
   Long-running queue and after-landing services still need
