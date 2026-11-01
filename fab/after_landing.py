@@ -25,9 +25,10 @@ from fab import atomic, cpu, hosts, log, logins, nextest, slots, tiers, units
 from fab.sh import Runner, run, ssh
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
-# live pairs (real providers, the user's sign-ins) nor process-temper (its owner's).
-TIER_SET = ("exhaustive-skein", "qa-skein", "qa-smith", "qa-jig", "process-jig",
-            "browser-skein", "browser-jig", "browser-temper", "qa-temper")
+# live pairs (real providers, the user's sign-ins). The qa, exhaustive and process-jig pairs
+# ended on 11-01 (the user: provenance is not a tier); process-temper joined once within its
+# 360 CPU-s (decision 0028).
+TIER_SET = ("browser-jig", "browser-temper", "browser-skein", "process-temper")
 # The live pairs `--live` adds: each variable its tests read, and the kind of login fab lends
 # for it, borrowed from the shelf on the dispatcher for the pair and returned after it
 # (docs/design/fab.md, 13.13). Not live-smith: its tests need `SMITH_LIVE`, a whole live root

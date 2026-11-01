@@ -338,11 +338,12 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `tools/tiers/packages.toml` until fabrig moves it). `fab tiers run TREE
   TIER` builds the pair's browser bundle and binaries, then runs its packages'
   tests; `fab tiers verify` checks the map against the workspace's listing.
-- **The tier set** is a list in the code: `exhaustive-skein`, `qa-skein`,
-  `qa-smith`, `qa-jig`, `process-jig`, `browser-skein`, `browser-jig`,
-  `browser-temper`, `qa-temper`, in that order. Not `process-temper` (its
-  owner's), nor by default the live pairs (real providers, the user's
-  sign-ins): `--live` adds those, on logins borrowed from the shelf (13.13).
+- **The tier set** is a list in the code: `browser-jig`, `browser-temper`,
+  `browser-skein`, `process-temper`, in that order (since 11-01: the qa,
+  exhaustive and process-jig pairs ended, their tests re-tiered; process-temper
+  joined within its 360 CPU-s). Not by default the live pairs (real
+  providers, the user's sign-ins): `--live` adds those, on logins borrowed
+  from the shelf (13.13).
 - **One tip at a time, the newest:** each cycle fetches main. A tip that is
   not the cursor (the last tip run without a fault) gets one run of the tier
   set. Its **suspects** are the first-parent commits since the cursor; a queue
