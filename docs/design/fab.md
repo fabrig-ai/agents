@@ -1914,19 +1914,24 @@ login that still works reused across them before more are signed in.
   `[a-z0-9][a-z0-9.-]{0,63}` (known drafts failing the pattern become
   `other`). A prefix ends at the first `/`; draft qualification uses this
   prefix before public classification. Subscription labels are
-  stable opaque account labels, never emails or full hashes. No task, run or call
-  ids, branches, shas, paths, question or answer text, notes, reports,
-  emails or holders in HTML or JSON; subscriptions never expose hosts.
+  masked emails. No task, run or call ids, branches, shas, paths, question
+  or answer text, notes, reports, full emails or holders in HTML or JSON;
+  subscriptions never expose hosts.
 - **Subscriptions:** group nonretired Claude and Codex logins whose latest
   `login.checked` is within 24 hours and successful (no error), with a
   nonempty email, by `(kind, email)`. Each login's latest check decides its
   current account; a failed check or one without an email leaves that login
-  out. Email is only an internal grouping key. The snapshot's `subscriptions`
-  list has one entry per group, sorted by kind then label. Each has
-  `subscription` (the first eight hex characters of SHA-256 of
-  `kind + "\0" + email`, encoded as UTF-8), `kind`, `plan` matching
-  `[a-z0-9_]{1,40}` or empty, `logins` (the sign-in count), `checked_age_s`
-  and `limits`. The group's newest successful check supplies its plan,
+  out. Full email is only an internal grouping key; groups sharing a mask
+  stay separate. The snapshot's `subscriptions` list has one entry per group,
+  sorted by kind then label. Each has `subscription` (the masked email),
+  `kind`, `plan` matching `[a-z0-9_]{1,40}` or empty, `logins` (the sign-in
+  count), `checked_age_s` and `limits`. For `local@domain`, the mask keeps
+  the local's first and last characters around `***`, followed by `@` and
+  the lowercased domain. A local of one or two characters keeps only its
+  first character before `***`. Local characters keep their case; the domain
+  is otherwise unchanged. Without exactly one `@` and two nonempty parts,
+  the label is `***`. For example, `free.ekanayaka@gmail.com` becomes
+  `f***a@gmail.com`. The group's newest successful check supplies its plan,
   age and limits. The three scalar log lists are zipped back to `name`,
   `used`, `resets`; old checks without them have no limits. Fable is omitted;
   `5 h` appears only above 80% use. Each limit also has `rate_per_h`,

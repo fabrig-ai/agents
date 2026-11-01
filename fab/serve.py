@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import html
 import json
 import math
@@ -157,7 +156,11 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
                         limit["at_reset"] = round(used + rate * (resets - stamp.timestamp()) / 3600, 1)
                     break
             limits.append(limit)
-        label = hashlib.sha256((kind + "\0" + email).encode()).hexdigest()[:8]
+        label = "***"
+        parts = email.split("@")
+        if len(parts) == 2 and all(parts):
+            local, domain = parts
+            label = f"{local[0]}***{local[-1] if len(local) > 2 else ''}@{domain.lower()}"
         subscriptions.append({"subscription": label, "kind": kind, "logins": len(names),
                               "plan": plan if isinstance(plan, str) and re.fullmatch(r"[a-z0-9_]{1,40}", plan)
                               else "",
@@ -170,7 +173,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     """Public counts and ages at now, in UTC, with only known hosts, call roles and safe
     draft names. Skip invalid timestamps and future events; pair ids across the log,
     fold the user's log asks through channel.asks, and bound runs to 24 h and calls to
-    calls.TIMEOUT. Include recent account subscriptions with opaque labels and pace.
+    calls.TIMEOUT. Include recent account subscriptions with masked emails and pace.
     Separate main landings from trunk merges; drafts come from run starts, with
     by-hand for main landings without a known draft.
     Today runs from UTC midnight through now. Only public fields leave the fold."""
