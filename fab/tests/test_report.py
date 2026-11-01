@@ -1,11 +1,12 @@
 import io
 import json
+import os
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from unittest.mock import patch
 
-from fab import atomic, hosts, log, report
+from fab import atomic, channel, hosts, log, report, units
 from fab.heavy import EX_TEMPFAIL
 from fab.sh import Result, ssh
 from fab.tests.support import FakeRunner, tmp_home
@@ -233,6 +234,84 @@ Implement the task.
         self.assertEqual(text, path.read_text() + str(path) + "\n")
         self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
 
+    def test_report_command_daily_install(self):
+        runner = FakeRunner().on(["loginctl"], Result(0, "yes\n"))
+        directory = self.home / "units"
+        known = {"here": hosts.Host("here", "fake", ("dispatcher",))}
+        install = units.cli_install
+
+        def isolated(command, files, **options):
+            return install(command, files, sh=runner, directory=directory, known=known, **options)
+
+        with patch.dict(os.environ, {"FAB_HOST": "here"}), \
+                patch.object(units, "cli_install", side_effect=isolated) as installing:
+            code, text, err = self.command(["daily", "--install"])
+        installing.assert_called_once_with("report daily", units.report_daily_units(),
+                                            primary="fab-report-daily.timer", restartable=False)
+        self.assertEqual((code, err), (0, ""))
+        files = units.report_daily_units()
+        self.assertEqual(text.splitlines(),
+                         [*(str(directory / name) for name in files), "enabled fab-report-daily.timer"])
+        for name, content in files.items():
+            self.assertEqual((directory / name).read_text(), content)
+        self.assertIn(["systemctl", "--user", "enable", "--now", "fab-report-daily.timer"], runner.argvs())
+        self.load_hosts.assert_not_called()
+        self.gather.assert_not_called()
+
+    def test_report_command_daily_install_rejects_plan_dirs(self):
+        with redirect_stderr(io.StringIO()), patch.object(units, "cli_install") as installing:
+            with self.assertRaises(SystemExit) as error:
+                report.main(["daily", "--install", str(self.home / "plan")])
+        self.assertEqual(error.exception.code, 2)
+        installing.assert_not_called()
+        self.load_hosts.assert_not_called()
+        self.gather.assert_not_called()
+
+    def test_report_command_daily_install_rejects_invalid_home(self):
+        with patch.dict(os.environ, {"FAB_HOME": str(self.home / "bad%home")}), \
+                patch.object(units, "cli_install") as installing:
+            code, text, err = self.command(["daily", "--install"])
+        self.assertEqual((code, text), (1, ""))
+        self.assertTrue(err.startswith("fab report daily: invalid unit argument "))
+        self.assertEqual(len(err.splitlines()), 1)
+        installing.assert_not_called()
+        self.load_hosts.assert_not_called()
+        self.gather.assert_not_called()
+
+    def test_report_command_daily_discovers_plans_and_skips_unready_and_retired(self):
+        valid = self.plan()
+        cutting = self.home / "cutting"
+        cutting.mkdir()
+        retired = self.home / "retired"
+        atomic.write(retired / "plan.toml", 'draft = "retired"\nrepo = "agents"\nretired = true\n')
+        atomic.write(self.home / "fab" / channel.PLANS, f"{valid}\n{cutting}\n{retired}\n")
+        code, text, err = self.command(["daily"])
+        paths = [report.report_path(name, "2026-10-29") for name in ("sample", "landing")]
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(text.splitlines(), [f"{paths[0]} written", f"{cutting} skipped",
+                                            f"{retired} skipped", f"{paths[1]} written"])
+        self.assertTrue(paths[0].read_text().startswith("# Code report: sample, 2026-10-29\n"))
+        self.assertTrue(paths[1].read_text().startswith("# Landing report, 2026-10-29\n"))
+        self.assertFalse((self.home / "fab" / "reports" / "retired").exists())
+        self.gather.assert_called_once_with(self.selected, "2026-10-21T00:00:00.000Z")
+
+    def test_report_command_daily_without_list_still_writes_landing(self):
+        code, text, err = self.command(["daily"])
+        path = report.report_path(report.LANDING, "2026-10-29")
+        self.assertEqual((code, err), (0, ""))
+        self.assertEqual(text, f"{path} written\n")
+        self.assertTrue(path.is_file())
+
+    def test_report_command_daily_explicit_retired_plan_is_reported(self):
+        retired = self.plan("retired")
+        path = retired / "plan.toml"
+        atomic.write(path, 'retired = true\n' + path.read_text())
+        atomic.write(self.home / "fab" / channel.PLANS, str(self.home / "ignored") + "\n")
+        code, text, err = self.command(["daily", str(retired)])
+        self.assertEqual((code, err), (0, ""))
+        self.assertNotIn("skipped", text)
+        self.assertTrue(report.report_path("retired", "2026-10-29").is_file())
+
     def test_report_command_daily_keeps_existing_reports(self):
         directories = [self.plan(), self.plan("another")]
         argv = ["daily", *(str(path) for path in directories)]
@@ -281,7 +360,7 @@ Implement the task.
 
     def test_report_command_bad_arguments(self):
         for argv in (["landing", "--day", "bad"], ["landing", "--day", "2026-10-31"],
-                     ["code", "missing", "--day", "2026-02-30"], [], ["daily"],
+                     ["code", "missing", "--day", "2026-02-30"], [],
                      ["code"], ["daily", "missing", "--write"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()):
                 with self.assertRaises(SystemExit) as error:

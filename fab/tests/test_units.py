@@ -53,6 +53,43 @@ class UnitTextTest(unittest.TestCase):
             self.assertEqual(units.timer("the user's questions as forge issues", "every 2 minutes",
                                         "*:1/2", SERVICE), expected[TIMER])
 
+    def test_logins_check_texts_timer_then_service(self):
+        with tmp_home():
+            expected = {
+                "fab-logins-check.timer": (
+                    "[Unit]\nDescription=fab: the logins' checks, at :05 and :35\n\n"
+                    "[Timer]\nOnCalendar=*:5/30\nUnit=fab-logins-check.service\n\n"
+                    "[Install]\nWantedBy=timers.target\n"),
+                "fab-logins-check.service": (
+                    "[Unit]\nDescription=fab: the logins' checks\n\n[Service]\nType=oneshot\n"
+                    "Environment=FAB_HOME=/fab\nKillSignal=SIGINT\nTimeoutStartSec=1800\n"
+                    "StandardOutput=null\nStandardError=journal\n"
+                    'ExecStart=/usr/bin/bash -lc "exec /fab/install/bin/fab logins check --all"\n')}
+            actual = units.logins_check_units(home=Path("/fab"))
+            self.assertEqual(actual, expected)
+            self.assertEqual(list(actual), list(expected))
+            self.assertEqual(units.logins_check_units(), units.logins_check_units(home=log.home()))
+            custom = units.logins_check_units(checkout=Path("/other"))
+            self.assertIn("/other/bin/fab logins check --all", custom["fab-logins-check.service"])
+
+    def test_report_daily_texts_timer_then_service(self):
+        with tmp_home():
+            expected = {
+                "fab-report-daily.timer": (
+                    "[Unit]\nDescription=fab: yesterday's reports, daily at 00:33 UTC\n\n"
+                    "[Timer]\nOnCalendar=*-*-* 00:33:00 UTC\nPersistent=true\n"
+                    "Unit=fab-report-daily.service\n\n[Install]\nWantedBy=timers.target\n"),
+                "fab-report-daily.service": (
+                    "[Unit]\nDescription=fab: yesterday's reports\n\n[Service]\nType=oneshot\n"
+                    "Environment=FAB_HOME=/fab\nKillSignal=SIGINT\nTimeoutStartSec=1800\n"
+                    'ExecStart=/usr/bin/bash -lc "exec /fab/install/bin/fab report daily"\n')}
+            actual = units.report_daily_units(home=Path("/fab"))
+            self.assertEqual(actual, expected)
+            self.assertEqual(list(actual), list(expected))
+            self.assertEqual(units.report_daily_units(), units.report_daily_units(home=log.home()))
+            custom = units.report_daily_units(checkout=Path("/other"))
+            self.assertIn("/other/bin/fab report daily", custom["fab-report-daily.service"])
+
     def test_quiet_and_persistent_text(self):
         with tmp_home():
             self.assertEqual(units.timer_service("checks", "logins check --all", "1800", quiet=True,
@@ -69,7 +106,8 @@ class UnitTextTest(unittest.TestCase):
         with tmp_home():
             for character in '\n\r%$"\\':
                 bad = "bad" + character
-                for build in (units.status_units, units.issues_units):
+                for build in (units.status_units, units.issues_units,
+                          units.logins_check_units, units.report_daily_units):
                     for option in ("home", "checkout"):
                         with self.subTest(character=character, build=build, option=option):
                             with self.assertRaises(ValueError):
@@ -88,7 +126,8 @@ class UnitTextTest(unittest.TestCase):
 
     def test_percent_in_fab_home_is_rejected(self):
         with tmp_home() as root, patch.dict(os.environ, {"FAB_HOME": str(root / "bad%home")}):
-            for build in (units.status_units, units.issues_units):
+            for build in (units.status_units, units.issues_units,
+                          units.logins_check_units, units.report_daily_units):
                 with self.assertRaises(ValueError):
                     build()
 

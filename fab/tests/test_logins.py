@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import cli, log, logins
+from fab import cli, log, logins, units
 from fab.hosts import Host
 from fab.sh import Result, run
 from fab.tests.support import FakeRunner, tmp_home
@@ -461,6 +461,63 @@ Current week [extra]: 0% used""", now)
                 self.assertEqual(logins.account("claude")["limits"], [])
         with patch.object(logins, "run", side_effect=OSError("absent")):
             self.assertEqual(logins.account("claude")["limits"], [])
+
+    def test_check_install_without_opening_shelf(self):
+        runner = FakeRunner().on(["loginctl"], Result(0, "yes\n"))
+        directory = self.home / "units"
+        install = units.cli_install
+
+        def isolated(command, files, **options):
+            return install(command, files, sh=runner, directory=directory,
+                           known=self.hosts, **options)
+
+        with patch.dict(os.environ, {"FAB_HOST": "hel8"}), \
+                patch.object(units, "cli_install", side_effect=isolated) as installing, \
+                patch.object(logins, "Shelf") as shelf, \
+                redirect_stdout(io.StringIO()) as out, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(logins.main(["check", "--install"]), 0)
+        shelf.assert_not_called()
+        installing.assert_called_once_with("logins check", units.logins_check_units(),
+                                            primary="fab-logins-check.timer", restartable=False)
+        files = units.logins_check_units()
+        for name, text in files.items():
+            self.assertEqual((directory / name).read_text(), text)
+        self.assertEqual(out.getvalue().splitlines(),
+                         [*(str(directory / name) for name in files), "enabled fab-logins-check.timer"])
+        self.assertEqual(err.getvalue(), "")
+        self.assertIn(["systemctl", "--user", "enable", "--now", "fab-logins-check.timer"], runner.argvs())
+        self.assertFalse((self.home / "shelf").exists())
+
+    def test_check_install_rejects_ids_and_all_and_normal_check_requires_one(self):
+        for options in (["--install", "codex-1"], ["--install", "--all"],
+                        [], ["--all", "codex-1"]):
+            with self.subTest(options=options), redirect_stderr(io.StringIO()), \
+                    patch.object(logins, "Shelf") as shelf, \
+                    patch.object(units, "cli_install") as installing:
+                with self.assertRaises(SystemExit) as error:
+                    logins.main(["check", *options])
+                self.assertEqual(error.exception.code, 2)
+                shelf.assert_not_called()
+                installing.assert_not_called()
+
+    def test_check_ids_still_returns_failure_for_a_failed_account(self):
+        with patch.object(logins, "Shelf", return_value=self.shelf), \
+                patch.object(self.shelf, "check", side_effect=[{"limits": []}, {"error": "expired"}]) as check, \
+                redirect_stdout(io.StringIO()) as out:
+            self.assertEqual(logins.main(["check", "codex-1", "claude-1"]), 1)
+        self.assertEqual([call.args[0] for call in check.call_args_list], ["codex-1", "claude-1"])
+        self.assertEqual([json.loads(line) for line in out.getvalue().splitlines()],
+                         [{"id": "codex-1", "limits": []}, {"id": "claude-1", "error": "expired"}])
+
+    def test_check_install_rejects_invalid_home_before_opening_shelf(self):
+        with patch.dict(os.environ, {"FAB_HOME": str(self.home / "bad%home")}), \
+                patch.object(logins, "Shelf") as shelf, \
+                patch.object(units, "cli_install") as installing, redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(logins.main(["check", "--install"]), 1)
+        self.assertTrue(err.getvalue().startswith("fab logins check: invalid unit argument "))
+        self.assertEqual(len(err.getvalue().splitlines()), 1)
+        shelf.assert_not_called()
+        installing.assert_not_called()
 
     def test_check_all_skips_refused_logins_and_continues_after_failed_checks(self):
         entries = [logins.Login(name, kind, "", "") for name, kind in

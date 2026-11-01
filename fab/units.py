@@ -168,6 +168,30 @@ def issues_units(*, home: Path | None = None, checkout: Path | None = None) -> d
                                                 home=home, checkout=checkout)}
 
 
+def logins_check_units(*, home: Path | None = None, checkout: Path | None = None) -> dict[str, str]:
+    """The login check timer then service; quiet checks at :05 and :35, limited to 1800 s.
+
+    Pure; paths and unsafe argument checks follow timer_service.
+    """
+    what = "the logins' checks"
+    return {"fab-logins-check.timer": timer(what, "at :05 and :35", "*:5/30",
+                                            "fab-logins-check.service"),
+            "fab-logins-check.service": timer_service(what, "logins check --all", "1800",
+                                                      quiet=True, home=home, checkout=checkout)}
+
+
+def report_daily_units(*, home: Path | None = None, checkout: Path | None = None) -> dict[str, str]:
+    """The daily report timer then service; persistent at 00:33 UTC, limited to 1800 s.
+
+    Pure; paths and unsafe argument checks follow timer_service.
+    """
+    what = "yesterday's reports"
+    return {"fab-report-daily.timer": timer(what, "daily at 00:33 UTC", "*-*-* 00:33:00 UTC",
+                                            "fab-report-daily.service", persistent=True),
+            "fab-report-daily.service": timer_service(what, "report daily", "1800",
+                                                      home=home, checkout=checkout)}
+
+
 def _remove_transients(files: dict[str, str], primary: str, sh: Runner) -> None:
     transients = []
     for name in sorted(files, key=lambda name: not name.endswith(".timer")):

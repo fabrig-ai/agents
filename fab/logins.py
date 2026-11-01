@@ -26,7 +26,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fab import hosts as fab_hosts
-from fab import log
+from fab import log, units
 from fab.sh import Runner, run, ssh
 
 
@@ -592,11 +592,7 @@ def table(logins: Iterable[Login]) -> list[str]:
     return ["  ".join(cell.ljust(width) for cell, width in zip(row, widths)).rstrip() for row in rows]
 
 
-def main(argv: list[str]) -> int:
-    """`fab logins list [--json]`, `capture HOST KIND [--path P] [--free]`, `lend ID HOST
-    [--path P] [--holder RUN]`, `borrow KIND HOST [--path P] --holder RUN` (prints the id lent),
-    `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID... | --all`
-    (on the shelf's machine); `account KIND [--home DIR] [--validate]` (on the login's)."""
+def _arguments(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(prog="fab logins", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
     listing = commands.add_parser("list")
@@ -626,13 +622,34 @@ def main(argv: list[str]) -> int:
     checking = commands.add_parser("check")
     checking.add_argument("id", nargs="*")
     checking.add_argument("--all", action="store_true")
+    checking.add_argument("--install", action="store_true")
     accounting = commands.add_parser("account")
     accounting.add_argument("kind", choices=["claude", "codex"])
     accounting.add_argument("--home")
     accounting.add_argument("--validate", action="store_true")
     args = parser.parse_args(argv)
-    if args.command == "check" and (bool(args.id) == args.all):
-        parser.error("check requires IDs or --all")
+    if args.command == "check":
+        if args.install:
+            if args.id or args.all:
+                parser.error("check --install takes no IDs or --all")
+        elif bool(args.id) == args.all:
+            parser.error("check requires IDs or --all")
+    return args
+
+
+def main(argv: list[str]) -> int:
+    """`fab logins list [--json]`, `capture HOST KIND [--path P] [--free]`, `lend ID HOST
+    [--path P] [--holder RUN]`, `borrow KIND HOST [--path P] --holder RUN` (prints the id lent),
+    `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID... | --all | --install`
+    (on the shelf's machine); `account KIND [--home DIR] [--validate]` (on the login's)."""
+    args = _arguments(argv)
+    if args.command == "check" and args.install:
+        try:
+            return units.cli_install("logins check", units.logins_check_units(),
+                                     primary="fab-logins-check.timer", restartable=False)
+        except (OSError, ValueError) as error:
+            print("fab logins check: " + " ".join(str(error).splitlines()), file=sys.stderr)
+            return 1
     if args.command == "account":
         print(json.dumps(account(args.kind, home=args.home, validate=args.validate), sort_keys=True))
         return 0

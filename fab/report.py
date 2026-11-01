@@ -8,6 +8,7 @@ figures' formatting, and the command that writes the reports under FAB_HOME/repo
 
 from __future__ import annotations
 
+import argparse
 import math
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
@@ -198,26 +199,7 @@ def report_path(name: str, day: str) -> Path:
     return log.home() / "reports" / name / f"{day}.md"
 
 
-def main(argv: list[str]) -> int:
-    """`fab report code PLAN_DIR [--day DAY] [--write]`, `fab report landing [--day DAY]
-    [--write]` and `fab report daily PLAN_DIR...`.
-
-    code and landing: the window is day_window(DAY, fab.log.now()); gather from fab.hosts.load()
-    with since = the window's previous().start less LOOKBACK_DAYS days; print the report
-    (fab.code_report.render with the plan and tasks loaded from PLAN_DIR as `fab status` loads
-    them, or fab.landing_report.render); with --write also write it to report_path(<draft> or
-    LANDING, <the window's day>) through fab.atomic.write and print that path last.
-    daily: for yesterday (UTC), write each plan's code report and the landing report whose
-    report_path does not exist yet, gathering once; print one line per report, `<path> written`
-    or `<path> kept`. Exit 0; 1 when a plan does not load or has problems (the message on
-    stderr, nothing written for it, the other reports still written); 2 on bad arguments or a
-    bad day."""
-    import argparse
-    import sys
-
-    from fab import code_report, hosts, landing_report
-    from fab.plan import PlanError, load
-
+def _arguments(argv: list[str]) -> tuple[argparse.ArgumentParser, argparse.Namespace]:
     parser = argparse.ArgumentParser(prog="fab report")
     commands = parser.add_subparsers(dest="command", required=True)
     code = commands.add_parser("code")
@@ -227,8 +209,78 @@ def main(argv: list[str]) -> int:
         command.add_argument("--day")
         command.add_argument("--write", action="store_true")
     daily = commands.add_parser("daily")
-    daily.add_argument("plan_dirs", type=Path, nargs="+", metavar="PLAN_DIR")
+    daily.add_argument("plan_dirs", type=Path, nargs="*", metavar="PLAN_DIR")
+    daily.add_argument("--install", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "daily" and args.install and args.plan_dirs:
+        parser.error("daily --install takes no plan dirs")
+    return parser, args
+
+
+def _daily(directories: list[Path], sources: Sources, selected: dict[str, Host],
+           window: Window) -> int:
+    import sys
+
+    from fab import channel, code_report, landing_report
+    from fab.plan import PlanError, load, load_plan
+
+    day = window.start[:10]
+    failed = False
+    for directory in directories or channel.plan_dirs():
+        try:
+            if not directories:
+                if not (directory / "plan.toml").is_file() or load_plan(directory / "plan.toml").retired:
+                    print(f"{directory} skipped")
+                    continue
+            plan, tasks = load(directory)
+        except PlanError as error:
+            print(error, file=sys.stderr)
+            failed = True
+            continue
+        path = report_path(plan.draft, day)
+        if path.exists():
+            print(f"{path} kept")
+        else:
+            atomic.write(path, code_report.render(plan, tasks, sources, selected, window))
+            print(f"{path} written")
+    path = report_path(LANDING, day)
+    if path.exists():
+        print(f"{path} kept")
+    else:
+        atomic.write(path, landing_report.render(sources, selected, window))
+        print(f"{path} written")
+    return 1 if failed else 0
+
+
+def main(argv: list[str]) -> int:
+    """`fab report code PLAN_DIR [--day DAY] [--write]`, `fab report landing [--day DAY]
+    [--write]` and `fab report daily [PLAN_DIR...] [--install]`.
+
+    code and landing: the window is day_window(DAY, fab.log.now()); gather from fab.hosts.load()
+    with since = the window's previous().start less LOOKBACK_DAYS days; print the report
+    (fab.code_report.render with the plan and tasks loaded from PLAN_DIR as `fab status` loads
+    them, or fab.landing_report.render); with --write also write it to report_path(<draft> or
+    LANDING, <the window's day>) through fab.atomic.write and print that path last.
+    daily: for yesterday (UTC), write each plan's code report and the landing report whose
+    report_path does not exist yet, gathering once; print one line per report, `<path> written`
+    or `<path> kept`. Without plan dirs, use fab.channel.plan_dirs(), printing `<dir> skipped`
+    for directories without plan.toml and retired plans. Explicit dirs are reported as given.
+    daily --install takes no plan dirs and installs the persistent timer. Exit 0; 1 on a plan
+    load or validation error (stderr; other reports still written); 2 on bad arguments or day.
+    """
+    import sys
+
+    from fab import code_report, hosts, landing_report, units
+    from fab.plan import load
+
+    parser, args = _arguments(argv)
+    if args.command == "daily" and args.install:
+        try:
+            return units.cli_install("report daily", units.report_daily_units(),
+                                     primary="fab-report-daily.timer", restartable=False)
+        except (OSError, ValueError) as error:
+            print("fab report daily: " + " ".join(str(error).splitlines()), file=sys.stderr)
+            return 1
     now = log.now()
     day = (stamp(moment(now) - timedelta(days=1))[:10] if args.command == "daily"
            else args.day)
@@ -243,27 +295,7 @@ def main(argv: list[str]) -> int:
         selected = hosts.load()
         sources = gather(selected, since)
         if args.command == "daily":
-            failed = False
-            for directory in args.plan_dirs:
-                try:
-                    plan, tasks = load(directory)
-                except PlanError as error:
-                    print(error, file=sys.stderr)
-                    failed = True
-                    continue
-                path = report_path(plan.draft, day)
-                if path.exists():
-                    print(f"{path} kept")
-                else:
-                    atomic.write(path, code_report.render(plan, tasks, sources, selected, window))
-                    print(f"{path} written")
-            path = report_path(LANDING, day)
-            if path.exists():
-                print(f"{path} kept")
-            else:
-                atomic.write(path, landing_report.render(sources, selected, window))
-                print(f"{path} written")
-            return 1 if failed else 0
+            return _daily(args.plan_dirs, sources, selected, window)
         if args.command == "code":
             plan, tasks = load(args.plan_dir)
             name = plan.draft
