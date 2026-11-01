@@ -5,6 +5,16 @@
 
 ## Present
 
+- **After-landing CPU and starvation** (11-01): every pair and rerun uses
+  the tested checkout's CPU collector, with one heavy-built wrapper per tip.
+  Pair/test/run records and the page report CPU, wall, starvation and possible
+  hangs. Optional `[after-landing]` limits have no default figures; per-pair
+  budgets are diagnostic. Wall timeout passes as starved, unstarted tests
+  stay unobserved, and removed profiles retire without a fault. Tests use
+  fake services/JUnit/records; real slot-5 qa-smith and browser-jig checks
+  and a scratch five-second total wall limit exercised the integration.
+  The lead deploys the branch after landing; no live unit was changed here.
+
 - **Package and tests:** `bin/fab`, the runner seam, the test runner with its
   30 s budget, the test helpers; about 250 tests in about 3 s.
 - **The event log** on hel8 (`~/src/fabrig/fab/log.jsonl`) holds every run,

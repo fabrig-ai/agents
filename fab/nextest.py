@@ -24,7 +24,7 @@ class Case:
     profile: str
     binary: str  # nextest's binary id: the JUnit testsuite's name
     test: str  # the JUnit testcase's name
-    result: str  # "pass", "fail" or "skipped"
+    result: str  # "pass", "fail", "starved" or "skipped"
     error: str  # the failure's first non-blank line, at most ERROR_LINE characters; "" otherwise
 
     @property
@@ -38,7 +38,8 @@ def junit(path: Path, profile: str) -> list[Case]:
     """The cases of a nextest JUnit report, in file order. The root must be `testsuites`; each
     `testsuite`'s name is the binary id and each `testcase`'s name the test. A case with a
     `failure` or `error` child failed (error: the first non-blank line of that child's text,
-    else its `message` attribute); with a `skipped` child it was skipped; otherwise it passed.
+    else its `message` attribute), except a timeout type is starved; with a `skipped`
+    child it was skipped; otherwise it passed.
     ValueError when the file is missing or does not parse, the root is wrong, a name is
     missing, an identity repeats, or the root's `tests` attribute (when present) differs from
     the cases counted."""
@@ -60,7 +61,7 @@ def junit(path: Path, profile: str) -> list[Case]:
                     first = failure.text or failure.get("message", "")
                     error = next((line[:ERROR_LINE] for line in first.splitlines()
                                   if line.strip()), "")
-                    result = "fail"
+                    result = "starved" if "timeout" in failure.get("type", "").lower() else "fail"
                 elif element.find("skipped") is not None:
                     result = "skipped"
                 else:

@@ -15,12 +15,13 @@ import json
 import re
 import sys
 import time
+import tomllib
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import atomic, hosts, log, logins, nextest, slots, tiers, units
+from fab import atomic, cpu, hosts, log, logins, nextest, slots, tiers, units
 from fab.sh import Runner, run, ssh
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
@@ -81,14 +82,21 @@ def suspects(repo: Path, previous: str | None, tip: str, *, sh: Runner = run) ->
 
 
 def state(first: str, rerun: str | None, last: dict | None) -> str:
-    """A test's state at a tip, from its first result there ("pass", "fail" or "skipped"), its
-    rerun alone ("pass" or "fail"; None when it was not rerun) and its history entry (last:
+    """A test's state from its first result (pass/fail/skipped/starved), its rerun
+    alone (pass/fail/starved; None when it was not rerun) and its history entry (last:
     {"result": "pass" or "red", "commit": ...}, None when it never executed).
-    skipped: "unobserved". pass: "recovered" when last was red, else "passing".
+    Starved preserves history without a rerun; an observed fail stays red if its rerun
+    starves. skipped: "unobserved". pass: "recovered" when last was red, else "passing".
     fail then pass: "flake". fail then fail: "unattributed" with no history, "standing" when
     last was red, "new" when it was pass. ValueError for a fail without a rerun or a rerun
     after a pass or a skip."""
+    if first == "starved":
+        if rerun is not None:
+            raise ValueError("a starved test cannot have a rerun")
+        return "starved"
     if first == "fail":
+        if rerun == "starved":
+            rerun = "fail"  # an observed failure cannot be cleared by starvation
         if rerun is None:
             raise ValueError("a failed test needs a rerun")
         if rerun == "pass":
@@ -133,33 +141,34 @@ class AfterLanding:
         self.sh = sh
         self.tier_set = tier_set + tuple(profile for profile in LIVE if live and profile not in tier_set)
         self.known = known
+        self.wrapper = None
+        self.limits = {}
+        self.diagnostics = {}
+        self.wall_s = 0.0
         self.log_path = self.home / RECORD
         self.state_path = self.home / STATE / "state.json"
         self.state = (json.loads(self.state_path.read_text(encoding="utf-8"))
                       if self.state_path.exists() else {"cursor": None, "last": None, "tests": {}})
 
+    def remaining(self) -> float | None:
+        """The remaining total test wall allowance; builds and admission are outside it."""
+        hard = self.limits.get("wall_hard_s")
+        return None if hard is None else hard - self.wall_s
+
     def pair(self, profile: str, tip: str, directory: Path) -> dict:
-        """Run one pair at tip (already checked out) and classify its tests.
+        """Run one configured pair with fab's prerequisites and the checkout's collector.
 
-        The first invocation: write fab.nextest.overlay(<the slot's fab.tiers.NEXTEST_CONFIG
-        text>, profile, directory/<profile>.xml) to directory/<profile>.toml, then
-        fab.tiers.run_pair (the pair from fab.tiers.load of the slot) with extra
-        `--config-file <that file>` and log directory/<profile>.log. Its code must be 0 with no
-        failed case or fab.tiers.TEST_FAILED with at least one, and the JUnit must hold at
-        least one case. Then each failed case, in order, alone: the same with a fresh overlay
-        and log named <profile>-<n> (n from 1) and extra `-E <fab.nextest.exact_filter>`; its
-        code must be 0 or TEST_FAILED and its JUnit exactly one case, the same identity, not
-        skipped. Each case's state comes from `state` with the history entry for its key.
-
-        Return {"profile", "status": "ran" or "faulted", "reason" (why it faulted, else ""),
-        "selected" (cases), "failed" (failed first results), "seconds" (wall time of its
-        invocations), "log" (the first log), "cases": [(Case, state, rerun log or "")]}.
-        Any of the conditions above failing, a ValueError from fab.nextest or fab.tiers, or an
-        OSError faults the pair with the reason (`exit <code>`, `junit: ...`, `rerun: ...`) and
-        no cases: a faulted pair says nothing about its tests."""
+        Absent profiles retire; after total wall expiry they stay unobserved. Every
+        invocation has a fresh collector directory. Only actual failures get exact
+        reruns; observed failures survive a starved or wall-prevented confirmation.
+        Malformed/missing reports or a failed prerequisite fault the pair. CPU and
+        test wall include reruns, even when classification later faults.
+        """
         first_log = directory / f"{profile}.log"
         result = {"profile": profile, "status": "faulted", "reason": "", "selected": 0,
-                  "failed": 0, "seconds": 0.0, "log": str(first_log), "cases": []}
+                  "failed": 0, "seconds": 0.0, "wall_s": 0.0, "cpu_s": 0.0,
+                  "starved_run": False, "measurements": {},
+                  "budget": self.diagnostics.get(profile, {}), "log": str(first_log), "cases": []}
         stage = "junit"
 
         def invoke(name, extra):
@@ -170,32 +179,58 @@ class AfterLanding:
             atomic.write(config, nextest.overlay(config_text, profile, report))
             started = time.monotonic()
             try:
-                code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
-                                      directory / f"{name}.log", sh=self.sh, env=env)
+                remaining = self.remaining()
+                if remaining is not None and remaining <= 0:
+                    return None, [], {}
+                if self.wrapper is None:
+                    self.wrapper = cpu.build_wrapper(self.repo, directory, sh=self.sh)
+                code, measured = cpu.run_pair(
+                    self.repo, target, ["--config-file", str(config), *extra],
+                    directory / f"{name}.log", directory=directory / f"{name}-cpu",
+                    wrapper=self.wrapper, wall_hard_s=remaining, sh=self.sh, env=env)
+                if measured:
+                    suite = measured["suite"]
+                    self.wall_s += suite["wall_s"]
+                    result["wall_s"] += suite["wall_s"]
+                    result["cpu_s"] += suite["cpu_s"]
+                    result["starved_run"] |= suite["starved_run"]
+                    for item in measured["tests"]:
+                        identity = (item["binary_id"], item["test_name"])
+                        values = result["measurements"].setdefault(identity, dict(cpu_s=0.0, wall_s=0.0, starved=0, incomplete=0))
+                        values["cpu_s"] += item["cpu_s"]
+                        values["wall_s"] += item["wall_s"]
+                        values["starved"] += item["starved"]
+                        values["incomplete"] += item["incomplete"]
             finally:
                 result["seconds"] += time.monotonic() - started
-            return code, report
+            return code, cpu.cases(directory / f"{name}-cpu", profile, measured) if measured else [], measured
 
         borrowed: list[str] = []
         env: dict[str, str] = {}
         try:
+            config_text = (self.repo / tiers.NEXTEST_CONFIG).read_text(encoding="utf-8")
+            if profile not in tomllib.loads(config_text).get("profile", {}):
+                result.update(status="retired", reason="profile removed from checkout")
+                return result
+            configured = tiers.load(self.repo)
+            if profile not in configured:
+                result.update(status="retired", reason="profile removed from checkout")
+                return result
+            target = configured[profile]
+            if self.remaining() is not None and self.remaining() <= 0:
+                result.update(status="unobserved", reason="total wall hard limit")
+                return result
             if profile in LIVE:
                 stage = "logins"
                 env = self.borrow(profile, tip, directory, borrowed)
                 stage = "junit"
-            config_text = (self.repo / tiers.NEXTEST_CONFIG).read_text(encoding="utf-8")
-            configured = tiers.load(self.repo)
-            if profile not in configured:
-                raise ValueError(f"unknown tier profile: {profile}")
-            target = configured[profile]
-            code, report = invoke(profile, [])
+            code, cases, measured = invoke(profile, [])
             if code not in (0, tiers.TEST_FAILED):
                 result["reason"] = f"exit {code}"
                 return result
-            cases = nextest.junit(report, profile)
             result["selected"] = len(cases)
             result["failed"] = sum(case.result == "fail" for case in cases)
-            if not cases or (code == tiers.TEST_FAILED) != bool(result["failed"]):
+            if (not cases and not result["starved_run"]) or (code == tiers.TEST_FAILED) != bool(result["failed"]):
                 raise ValueError(f"exit {code} inconsistent with JUnit results")
             classified = []
             number = 0
@@ -207,15 +242,18 @@ class AfterLanding:
                     number += 1
                     name = f"{profile}-{number}"
                     expression = nextest.exact_filter(case.binary, case.test)
-                    code, report = invoke(name, ["-E", expression])
+                    code, selected, rerun_measured = invoke(name, ["-E", expression])
+                    if code is None:
+                        # The failure was observed before the budget stopped confirmation.
+                        classified.append((case, state("fail", "fail", self.state["tests"].get(case.key)), ""))
+                        continue
                     if code not in (0, tiers.TEST_FAILED):
                         raise ValueError(f"exit {code}")
-                    selected = nextest.junit(report, profile)
                     if (len(selected) != 1 or selected[0].key != case.key
                             or selected[0].result == "skipped"):
                         raise ValueError("JUnit must select exactly the failed test, not skipped")
                     rerun = selected[0].result
-                    if (code == tiers.TEST_FAILED) != (rerun == "fail"):
+                    if rerun != "starved" and (code == tiers.TEST_FAILED) != (rerun == "fail"):
                         raise ValueError(f"exit {code} inconsistent with JUnit results")
                     rerun_log = str(directory / f"{name}.log")
                 classified.append((case, state(case.result, rerun,
@@ -281,65 +319,82 @@ class AfterLanding:
                 log.append("error", path=self.log_path, error=f"login {name} not returned: {error}")
 
     def check(self, tip: str) -> dict:
-        """One run of the tier set at tip, recorded, the state saved; return the run record.
+        """Check out tip, run the set, record CPU/states, save conclusive history.
 
-        Steps: the run directory FAB_HOME/after-landing/<tip[:12]>-<YYYYMMDDTHHMMSSZ>/; in the
-        slot `git switch --detach --force <tip>` and `git clean -fd` (target/ is ignored, so it
-        stays warm); `pair` for each profile of tier_set; then append to FAB_HOME/RECORD
-        (fab.log.append with path), first one `test` record per case whose state is neither
-        passing nor unobserved: tip, profile, binary, test, state, error, log (the pair's first
-        log), rerun (its rerun log, or ""), good (the history entry's commit when its result is
-        pass, else ""), and for a new red branches (the branch names of suspects(good, tip), in
-        order) and commits (their count); then one `run` record: tip, previous (the cursor, or
-        ""), branches (the branch names of suspects(cursor, tip)), commits (their count),
-        verdict, the counts new, standing, unattributed, flake and recovered, pairs (one
-        "<profile>:<status>:<selected>:<failed>:<seconds, 1 decimal>" per pair), faults (one
-        "<profile>: <reason>" per faulted pair), log (the run directory), freed. freed: the bytes
-        of fab.slots.remove(fab.slots.sweep_plan(<slot>/target, <the run's start in ns>)), as
-        the queue bounds its target.
-
-        Then update the state and save it (fab.atomic.write, sibling and rename): every case of
-        a ran pair that executed sets its key's history to "pass" (passing, recovered, flake)
-        or "red" (confirmed) with the tip; unobserved ones keep theirs. "last" becomes this
-        tip and verdict; the cursor becomes tip only when no pair faulted. A crash before the
-        save redoes the run whole at the next cycle."""
+        Records are scalar/list fields (docs/design/fab.md, 11): pair diagnostics,
+        every selected test's result and CPU, then the run's totals, optional budget
+        and verdict. Starved and unobserved tests preserve history. A fault keeps
+        the cursor; a crash before saving causes a whole new run on the next cycle.
+        """
         started_ns = time.time_ns()
-        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
         directory = self.home / STATE / f"{tip[:12]}-{stamp}"
         directory.mkdir(parents=True, exist_ok=True)
         self.sh(["git", "switch", "--detach", "--force", tip], cwd=str(self.repo), check=True)
         self.sh(["git", "clean", "-fd"], cwd=str(self.repo), check=True)
+        self.limits, self.diagnostics = cpu.budgets(self.repo)
+        self.wrapper = None
+        self.wall_s = 0.0
         pairs = [self.pair(profile, tip, directory) for profile in self.tier_set]
         previous = self.state["cursor"]
         landed = suspects(self.repo, previous, tip, sh=self.sh)
-        counts = dict.fromkeys((*CONFIRMED, "flake", "recovered"), 0)
+        counts = dict.fromkeys((*CONFIRMED, "flake", "recovered", "starved", "unobserved", "passing"), 0)
+        hangs = []
+        over = []
+        total_cpu = sum(pair["cpu_s"] for pair in pairs)
+        if "cpu_total_s" in self.limits and total_cpu > self.limits["cpu_total_s"]:
+            contributors = ", ".join(
+                f"{pair['profile']} {binary} {name}={values['cpu_s']:.6f}s"
+                for pair in pairs for (binary, name), values in pair["measurements"].items())
+            over.append(f"total CPU {total_cpu:.6f}s > {self.limits['cpu_total_s']}s; tests: {contributors}")
         tests = dict(self.state["tests"])
         states = []
         for pair in pairs:
+            log.append("pair", path=self.log_path, tip=tip, profile=pair["profile"],
+                       status=pair["status"], cpu_s=pair["cpu_s"], wall_s=pair["wall_s"],
+                       budget=[f"{key}={json.dumps(value)}" for key, value in pair["budget"].items()],
+                       reason=pair["reason"], log=pair["log"])
+            for (binary, name), measured in pair["measurements"].items():
+                counts["starved"] += bool(measured["starved"])
+                if "cpu_test_s" in self.limits and measured["cpu_s"] > self.limits["cpu_test_s"]:
+                    over.append(f"{pair['profile']} {binary} {name}: CPU {measured['cpu_s']:.6f}s > {self.limits['cpu_test_s']}s")
             for case, current, rerun_log in pair["cases"]:
                 states.append(current)
-                if current not in ("passing", "unobserved"):
+                if current != "starved":
                     counts[current] += 1
-                    last = self.state["tests"].get(case.key)
-                    good = last["commit"] if last and last["result"] == "pass" else ""
-                    attribution = {}
-                    if current == "new":
-                        changed = suspects(self.repo, good, tip, sh=self.sh)
-                        attribution = {"branches": [item.branch for item in changed if item.branch],
-                                       "commits": len(changed)}
-                    log.append("test", path=self.log_path, tip=tip, profile=case.profile,
-                               binary=case.binary, test=case.test, state=current, error=case.error,
-                               log=pair["log"], rerun=rerun_log, good=good, **attribution)
-                if current != "unobserved":
+                measured = pair["measurements"].get((case.binary, case.test), {})
+                used = measured.get("cpu_s", 0.0)
+                wall = measured.get("wall_s", 0.0)
+                possible_hang = current == "starved" and wall > 0 and used < wall * 0.1
+                if possible_hang:
+                    hangs.append(f"{case.profile} {case.binary} {case.test}: CPU {used:.3f}s / wall {wall:.3f}s")
+                last = self.state["tests"].get(case.key)
+                good = last["commit"] if last and last["result"] == "pass" else ""
+                attribution = {}
+                if current == "new":
+                    changed = suspects(self.repo, good, tip, sh=self.sh)
+                    attribution = {"branches": [item.branch for item in changed if item.branch],
+                                   "commits": len(changed)}
+                log.append("test", path=self.log_path, tip=tip, profile=case.profile,
+                           binary=case.binary, test=case.test, state=current, error=case.error,
+                           cpu_s=used, wall_s=wall, starved=bool(measured.get("starved")),
+                           incomplete=measured.get("incomplete", 0), possible_hang=possible_hang,
+                           log=pair["log"], rerun=rerun_log, good=good, **attribution)
+                if current not in ("unobserved", "starved"):
                     tests[case.key] = {"result": "red" if current in CONFIRMED else "pass",
                                        "commit": tip}
         faulted = any(pair["status"] == "faulted" for pair in pairs)
-        outcome = verdict(states, faulted)
+        outcome = "red" if over else verdict(states, faulted)
         freed = slots.remove(slots.sweep_plan(self.repo / "target", started_ns))
         record = log.append(
             "run", path=self.log_path, tip=tip, previous=previous or "",
             branches=[item.branch for item in landed if item.branch], commits=len(landed),
-            verdict=outcome, **counts,
+            verdict=outcome, **counts, cpu_s=total_cpu, wall_s=self.wall_s,
+            wall_starved=((self.remaining() is not None and self.remaining() <= 0)
+                          or any(pair["starved_run"] or pair["status"] == "unobserved" for pair in pairs)),
+            possible_hangs=hangs, budget=[f"{key}={value}s" for key, value in self.limits.items()],
+            over_budget=over,
+            cpu_pairs=[f"{pair['profile']}:{pair['cpu_s']:.6f}:{pair['wall_s']:.6f}" for pair in pairs],
             pairs=[f'{pair["profile"]}:{pair["status"]}:{pair["selected"]}:{pair["failed"]}:'
                    f'{pair["seconds"]:.1f}' for pair in pairs],
             faults=[f'{pair["profile"]}: {pair["reason"]}' for pair in pairs
@@ -385,7 +440,8 @@ def imported(entry: dict) -> dict | None:
     log), a `test` whose state is new becomes tiers.red (tip, profile, binary, test,
     branches, log); anything else is left on the machine. Pure."""
     if entry.get("ev") == "run":
-        fields = ("tip", "verdict", *CONFIRMED, "flake", "recovered", "branches", "faults", "log")
+        fields = ("tip", "verdict", *CONFIRMED, "flake", "recovered", "starved", "unobserved", "cpu_s", "wall_s",
+                  "wall_starved", "possible_hangs", "budget", "over_budget", "branches", "faults", "log")
         return {"ev": "tiers.run", **{key: entry[key] for key in fields if key in entry}}
     if entry.get("ev") == "test" and entry.get("state") == "new":
         fields = ("tip", "profile", "binary", "test", "branches", "log")

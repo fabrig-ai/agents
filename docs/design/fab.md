@@ -354,33 +354,84 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   confirmed red is **new** (it last passed), **standing** (it was last red)
   or **unattributed** (never executed before); a pass after a red is
   **recovered**. A new red names the branches merged since its last pass.
+- **CPU measured on every pair:** `fab/cpu.py` loads the checkout's
+  `tools/tiers/cpu.py` with `runpy`, as `tools/tiers/design.md`, 7.1 permits.
+  It builds that tip's static `cpu-wrapper.c` once through heavy in the run
+  directory, keeps fab's prerequisite steps, and calls `prepare`/`execute`
+  for each nextest invocation, including exact-test reruns. Calling
+  `tools/tiers/run --cpu` instead would reserve the config selection fab
+  needs and apply its per-pair budgets as verdicts. An isolated Python
+  worker runs the collector through fab's runner seam; `collect` accepts
+  the caller's profile, command and package selection, for later queue reuse.
+  The queue's default/fuzzy accounting is not enrolled by this change.
+  The collector verifies JUnit attempt coverage and descendant accounting
+  (`tools/tiers/design.md`, 7.2–7.3); incomplete CPU on a stopped attempt
+  remains a lower bound. A separate nextest listing inventories selected
+  tests, so cancellation cannot turn unstarted tests into passes.
+- **One optional budget for the set:** the checkout's
+  `tools/tiers/budgets.toml` may have `[after-landing]` with any of
+  `cpu_total_s`, `cpu_test_s`, `wall_hard_s`, each finite positive seconds.
+  There are no defaults or initial figures: only the user sets them.
+  CPU is user plus system time of tests and accounted descendants, summed
+  across pairs and reruns; compilation, admission and wrapper overhead are
+  excluded. Total wall is the sum of pairs' test execution spans, including
+  reruns and settlement, excluding prerequisites and admission. With no
+  limits, numbers are report only. Exceeded total or per-test CPU is red,
+  naming the contributing tests. Per-pair budget tables are retained only
+  as diagnostics in pair records, never as verdicts or enforced wall limits.
+- **Wall expiry is starved:** nextest slow-timeout termination, global-timeout
+  cancellation and collector-starved tests are passes reported as `starved`,
+  counted separately and never confirmed with a rerun. The remaining total
+  wall allowance caps each invocation's private `global-timeout`, keeping
+  any shorter configured timeout. Nextest owns termination and JUnit;
+  its cancellation line and terminated/pending records reconcile global
+  cancellation, which JUnit otherwise calls an abort. Completed signal failures
+  reported before cancellation stay red. This also works with
+  fab's plain heavy, whose CLI has no token cancellation. Stop and descendant
+  settlement can add cleanup time to the hard limit. Subsequent pairs are
+  `unobserved`; selected tests never started are `unobserved`, never passed.
+  An assertion or bad exit already observed remains red if wall expiry
+  prevents confirmation or starves its rerun. Starved/unobserved results
+  do not replace the last conclusive history or declare a red recovered.
+  Starved tests using less than a tenth of their wall time in CPU are
+  flagged as possible hangs, a diagnostic to investigate when repeated
+  (`skein/docs/foundation/testing-strategy.md`, 2.10 and 8.1 in fabrig).
+- **A retired pair is skipped:** a profile absent from the checkout's config
+  is recorded as `retired`, without builds or login borrowing. The enrolled
+  tier set stays explicit until the lead trims it.
 - **A pair that cannot run faults:** an exit other than pass or test failure
   (heavy's 75 for disk among them), a missing or inconsistent JUnit, a rerun
   that does not select exactly its test. A faulted pair says nothing about
   its tests. A run is **red** with any confirmed red, else **partial** with a
-  fault, else **green**. The cursor moves only past a run without a fault; a
+  fault, else **green**. Exceeded CPU budgets also make it red; starvation
+  alone stays green. The cursor moves only past a run without a fault; a
   partial tip is not run again, the next tip's run takes its suspects.
 - **Records, not posts:** each run appends to
-  `FAB_HOME/after-landing.jsonl` on its builder one `test` record per test
-  that is not plainly passing, then one `run` record (tip, suspects'
-  branches, verdict, counts, pairs, faults, logs). `fab after-landing log
-  --since` serves them over ssh, as `fab queue log` does. The state (cursor,
+  `FAB_HOME/after-landing.jsonl` on its builder one `pair` record per pair
+  (status, CPU, wall, diagnostic budgets), one `test` record per observed
+  or inventoried test (state, CPU, wall, starvation and incomplete counts,
+  possible-hang flag), then one `run` record (tip, suspects' branches,
+  verdict, counts including starved and unobserved, total CPU and wall,
+  optional budget, named budget excesses, possible hangs, pairs, faults,
+  logs). Fields remain scalars or lists of scalars: budgets are `key=value`
+  strings, `cpu_pairs` entries are `profile:cpu_s:wall_s` alongside the
+  existing pair status summaries. `fab after-landing log --since` serves
+  them over ssh, as `fab queue log` does. The state (cursor,
   last run, each test's last executed result) is
   `FAB_HOME/after-landing/state.json`, saved after the records; a run cut
   short is redone whole.
 - **The user hears the verdict:** each tick imports the after-landing
   machine's `run` records and its new reds into the log, as `tiers.run` and
   `tiers.red` (`al_ts` the record's time, read from the newest imported), and
-  the user's page shows the newest run's verdict, counts and faults and its
-  new reds with their suspects' branches, under `## After landing`.
+  the user's page shows the newest run's verdict, counts, total CPU, test
+  wall, starved count, possible hangs, any configured budget and excesses,
+  faults and its new reds with their suspects' branches, under `## After landing`.
 - **The slot stays bounded:** a run ends by sweeping the slot's target as the
   queue sweeps its own (section 7).
 - **Left out from the old tool:** posts to coordinators and its resolver,
   bisection to a culprit commit, hourly coverage posts, the records writer and
-  its detail files, heavy cancellation and wall bounds beyond the steps'
-  timeout, the guardian and replay of a half-run pair, and the tier runner's
-  CPU accounting and budgets (still fabrig's `tools/tiers --cpu`). Each
-  attaches to the records above when numbers show it is needed (section 14).
+  its detail files, heavy token cancellation, the guardian and replay of a
+  half-run pair. Each attaches to the records above when numbers show it is needed (section 14).
 
 ## 12. Gates and the structure review
 
@@ -1250,8 +1301,10 @@ login that still works reused across them before more are signed in.
 - after-landing live: its unit on a builder and its slot, the old tool
   stopped, fabrig's package map moved to `.config/tiers/`; then new reds
   reaching their tasks through the dispatcher, bisection when several
-  branches are suspects, CPU accounting against the tiers' budgets, and the
-  landing report's after-landing figures. QA walks as a run kind.
+  branches are suspects, and the landing report's after-landing figures.
+  CPU accounting is present (11); the user sets the one total CPU budget
+  from measurements after re-tiering lands. Default/fuzzy queue CPU reuses
+  the collector entry point in a later task. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
 - Logins (13.13), next: after-landing `--live` run on the
   queue's machine as well as builders (the user, 10-31); `tools/qa/logins`

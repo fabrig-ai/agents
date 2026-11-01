@@ -253,9 +253,9 @@ def listed(output: str) -> set[tuple[str, str, str]]:
     suite its "package-name" and "binary-id", per testcase name whose
     "filter-match"."status" is "matches". ValueError when no line holds a listing."""
     listing = None
-    for line in output.splitlines():
+    for match in re.finditer(r"(?m)^\s*\{", output):
         try:
-            value = json.loads(line)
+            value, _ = json.JSONDecoder().raw_decode(output[match.start():].lstrip())
         except ValueError:
             continue
         if isinstance(value, dict) and "rust-suites" in value:

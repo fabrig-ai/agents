@@ -178,7 +178,7 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
 
 
 def landing_lines(events: Iterable[dict]) -> list[str]:
-    """The page's after-landing lines: for the newest tiers.run, `<verdict> at
+    r"""The page's after-landing lines: for the newest tiers.run, `<verdict> at
     \`<tip[:12]>\`, <its ts>: new N, standing N, unattributed N, flakes N`, then `; faults:
     <faults joined by "; ">` when it has any; then one `new red: <profile> <test>, since
     <branches joined by ", ", or "unknown branches">` per tiers.red at that tip. Empty
@@ -193,10 +193,19 @@ def landing_lines(events: Iterable[dict]) -> list[str]:
                 ("flakes", "flake"))))
     if last.get("faults"):
         line += "; faults: " + "; ".join(last["faults"])
+    if "cpu_s" in last:
+        line += f"; CPU {last['cpu_s']:.3f}s, wall {last.get('wall_s', 0):.3f}s, starved {last.get('starved', 0)}"
+        if last.get("wall_starved"):
+            line += "; wall limit: starved"
+    details = []
+    if last.get("budget"):
+        details.append("budget: " + ", ".join(last["budget"]))
+    details.extend("over budget: " + value for value in last.get("over_budget", []))
+    details.extend("possible hang: " + value for value in last.get("possible_hangs", []))
     reds = [f"new red: {event.get('profile')} {event.get('test')}, since "
             + (", ".join(event.get("branches") or []) or "unknown branches")
             for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")]
-    return [line, *reds]
+    return [line, *details, *reds]
 
 
 def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: str,

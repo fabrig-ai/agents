@@ -11,7 +11,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import after_landing, atomic, hosts, log, nextest, slots, tiers
+from fab import after_landing, atomic, cpu, hosts, log, nextest, slots, tiers
 from fab.hosts import Host
 from fab.after_landing import AfterLanding, Suspect, state, suspects, verdict
 from fab.sh import Failed, Result
@@ -130,7 +130,8 @@ class AfterLandingTest(unittest.TestCase):
         self.configured = {profile: tiers.Pair(profile, *profile.rsplit("-", 1), ("pkg",), ())
                            for profile in self.profiles}
         self.load = self.enterContext(patch.object(tiers, "load", return_value=self.configured))
-        self.enterContext(patch.object(tiers, "run_pair", side_effect=self.run_pair))
+        self.enterContext(patch.object(cpu, "run_pair", side_effect=self.run_pair))
+        self.enterContext(patch.object(cpu, "build_wrapper", return_value=self.home / "wrapper"))
         self.runner = self.make_runner()
 
     def make_runner(self, **kwargs):
@@ -149,7 +150,7 @@ class AfterLandingTest(unittest.TestCase):
         commits = self.timeline[self.timeline.index(previous) + 1:self.timeline.index(tip) + 1]
         return Result(0, "\n".join(commits))
 
-    def run_pair(self, repo, target, extra, path, *, sh, env=None):
+    def run_pair(self, repo, target, extra, path, *, sh, env=None, directory=None, wrapper=None, wall_hard_s=None):
         self.assertEqual(repo, self.repo)
         self.assertIs(sh, self.sh)
         self.assertIs(target, self.configured[target.profile])
@@ -181,7 +182,13 @@ class AfterLandingTest(unittest.TestCase):
                 elif result == "skipped":
                     ET.SubElement(case, "skipped")
             atomic.write(report, ET.tostring(root, encoding="unicode"))
-        return code
+        if report.exists():
+            atomic.write(directory / "junit.xml", report.read_text())
+        measured = dict(suite=dict(cpu_s=0.0, wall_s=0.0, starved_run=False), tests=[], failures=[])
+        # Invalid/missing JUnit is still rejected by cpu.cases, or the exit check.
+        if not report.exists() and code == 0:
+            raise ValueError("invalid/missing nextest JUnit")
+        return code, measured
 
     def response(self, cases, *, profile="qa-skein", code=None, alone=None):
         expression = nextest.exact_filter(self.binary, alone) if alone else None
@@ -191,7 +198,8 @@ class AfterLandingTest(unittest.TestCase):
 
     def records(self, event=None):
         return [entry for entry in log.read(self.runner.log_path)
-                if event is None or entry["ev"] == event]
+                if (event is None or entry["ev"] == event)
+                and entry.get("state") not in ("passing", "unobserved") and entry["ev"] != "pair"]
 
     def history(self, name="works", profile="qa-skein"):
         return self.runner.state["tests"].get(nextest.Case(profile, self.binary, name, "pass", "").key)
@@ -246,7 +254,7 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual(self.history(), {"result": "pass", "commit": tip})
         self.assertEqual(self.make_runner().state, self.runner.state)
         self.assertEqual(json.loads(self.runner.state_path.read_text()), self.runner.state)
-        self.assertRegex(Path(record["log"]).name, rf"^{tip[:12]}-\d{{8}}T\d{{6}}Z$")
+        self.assertRegex(Path(record["log"]).name, rf"^{tip[:12]}-\d{{8}}T\d{{12}}Z$")
         self.assertEqual(self.sh.argvs()[call_count:call_count + 4], [
             ["git", "fetch", "-q", "origin", "main"], ["git", "rev-parse", "origin/main"],
             ["git", "switch", "--detach", "--force", tip], ["git", "clean", "-fd"]])
@@ -417,7 +425,7 @@ class AfterLandingTest(unittest.TestCase):
             self.assertIn("bad map", self.runner.pair("qa-skein", self.tip, directory)["reason"])
         self.responses["qa-skein", None] = OSError("cannot run")
         self.assertIn("cannot run", self.runner.pair("qa-skein", self.tip, directory)["reason"])
-        self.assertEqual(self.runner.pair("missing", self.tip, directory)["status"], "faulted")
+        self.assertEqual(self.runner.pair("missing", self.tip, directory)["status"], "retired")
         atomic.write(self.repo / tiers.NEXTEST_CONFIG, "bad toml [")
         self.assertEqual(self.runner.pair("qa-skein", self.tip, directory)["status"], "faulted")
 
@@ -617,6 +625,113 @@ class AfterLandingTest(unittest.TestCase):
                      ["once", "--slot", "1", "--since", "now"]]:
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(after_landing.main(args), 2)
+
+
+    def cpu_response(self, *, result="pass", used=1.0, wall=2.0, stopped=False,
+                     later=None, rerun_result=None):
+        def invoke(repo, target, extra, path, **kwargs):
+            if later is not None:
+                later.append(kwargs["wall_hard_s"])
+            rerun = "-E" in extra
+            outcome = rerun_result if rerun else result
+            report = kwargs["directory"] / "junit.xml"
+            failure = '<failure type="test timeout"/>' if outcome == "starved" else (
+                '<failure>assertion failed</failure>' if outcome == "fail" else "")
+            atomic.write(report, f'<testsuites><testsuite name="{self.binary}">'
+                         f'<testcase name="works">{failure}</testcase></testsuite></testsuites>')
+            return (100 if outcome == "fail" else 0), dict(
+                suite=dict(cpu_s=used, wall_s=wall, starved_run=stopped),
+                tests=[dict(binary_id=self.binary, test_name="works", cpu_s=used,
+                            wall_s=wall, starved=int(outcome == "starved"), incomplete=int(stopped))],
+                failures=[f"{self.binary} works"] if outcome == "fail" else [])
+        return patch.object(cpu, "run_pair", side_effect=invoke)
+
+    def test_starved_has_cpu_no_rerun_no_history_recovery_and_possible_hang(self):
+        key = nextest.Case("qa-skein", self.binary, "works", "pass", "").key
+        self.runner.state["tests"][key] = dict(result="red", commit="old")
+        with self.cpu_response(result="starved", used=.01, wall=5) as invoke:
+            record = self.runner.check(self.tip)
+        self.assertEqual(invoke.call_count, 2)  # once per pair, no confirmation
+        self.assertEqual((record["verdict"], record["starved"], record["cpu_s"], record["wall_s"]),
+                         ("green", 2, .02, 10))
+        self.assertEqual(self.history(), dict(result="red", commit="old"))
+        self.assertEqual(len(record["possible_hangs"]), 2)
+        tests = [row for row in log.read(self.runner.log_path) if row["ev"] == "test"]
+        self.assertTrue(all(row["state"] == "starved" and row["cpu_s"] == .01 for row in tests))
+
+    def test_total_wall_stops_later_pairs_without_fault_or_confirmation(self):
+        atomic.write(self.repo / cpu.BUDGETS, '[after-landing]\nwall_hard_s=5\n')
+        with self.cpu_response(result="starved", wall=5, stopped=True) as invoke:
+            record = self.runner.check(self.tip)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual((record["verdict"], record["starved"], record["wall_starved"]), ("green", 1, True))
+        self.assertEqual(record["faults"], [])
+        pair = [row for row in log.read(self.runner.log_path) if row["ev"] == "pair"][-1]
+        self.assertEqual((pair["profile"], pair["status"]), ("qa-jig", "unobserved"))
+        self.assertIsNone(self.history())
+
+    def test_remaining_total_wall_covers_pairs_and_reruns(self):
+        atomic.write(self.repo / cpu.BUDGETS, '[after-landing]\nwall_hard_s=10\n')
+        remaining = []
+        with self.cpu_response(result="fail", used=1, wall=2, rerun_result="pass", later=remaining):
+            record = self.runner.check(self.tip)
+        self.assertEqual(remaining, [10, 8, 6, 4])
+        self.assertEqual((record["cpu_s"], record["wall_s"], record["flake"]), (4, 8, 2))
+        tests = [row for row in log.read(self.runner.log_path) if row["ev"] == "test"]
+        self.assertTrue(all(row["cpu_s"] == 2 for row in tests))
+
+    def test_final_pair_passing_during_cleanup_still_reports_total_wall_expiry(self):
+        self.runner.tier_set = ("qa-skein",)
+        atomic.write(self.repo / cpu.BUDGETS, '[after-landing]\nwall_hard_s=5\n')
+        with self.cpu_response(result="pass", wall=5.1):
+            record = self.runner.check(self.tip)
+        self.assertEqual((record["verdict"], record["wall_starved"]), ("green", True))
+
+    def test_observed_failure_survives_wall_stopped_confirmation(self):
+        atomic.write(self.repo / cpu.BUDGETS, '[after-landing]\nwall_hard_s=5\n')
+        with self.cpu_response(result="fail", wall=5, stopped=True) as invoke:
+            record = self.runner.check(self.tip)
+        self.assertEqual(invoke.call_count, 1)
+        self.assertEqual((record["verdict"], record["unattributed"]), ("red", 1))
+
+    def test_starved_confirmation_cannot_clear_an_observed_failure(self):
+        with self.cpu_response(result="fail", rerun_result="starved"):
+            record = self.runner.check(self.tip)
+        self.assertEqual((record["verdict"], record["unattributed"], record["starved"]), ("red", 2, 2))
+
+    def test_pair_budgets_diagnostic_total_and_test_cpu_budgets_red_without_reruns(self):
+        atomic.write(self.repo / cpu.BUDGETS, '[qa-skein]\ncpu_suite_s=0.1\n'
+                     '[after-landing]\ncpu_total_s=1.5\ncpu_test_s=0.5\n')
+        with self.cpu_response(used=1) as invoke:
+            record = self.runner.check(self.tip)
+        self.assertEqual(invoke.call_count, 2)
+        self.assertEqual(record["verdict"], "red")
+        self.assertEqual(len(record["over_budget"]), 3)
+        self.assertIn("qa-skein pkg::bin works", record["over_budget"][1])
+        atomic.write(self.repo / cpu.BUDGETS, '[qa-skein]\ncpu_suite_s=0.1\ncpu_test_s=0.1\nwall_hard_s=0.1\n')
+        with self.cpu_response(used=1):
+            self.assertEqual(self.runner.check(self.tip)["verdict"], "green")
+        pairs = [row for row in log.read(self.runner.log_path) if row["ev"] == "pair"]
+        self.assertIn("cpu_suite_s=0.1", pairs[-2]["budget"])
+
+    def test_retired_pair_is_recorded_and_does_not_borrow_or_build(self):
+        self.runner.tier_set = ("removed-tree",)
+        with patch.object(cpu, "build_wrapper") as build, patch.object(self.runner, "borrow") as borrow:
+            record = self.runner.check(self.tip)
+        self.assertEqual((record["verdict"], record["faults"]), ("green", []))
+        pair = list(log.read(self.runner.log_path))[0]
+        self.assertEqual((pair["ev"], pair["status"]), ("pair", "retired"))
+        build.assert_not_called()
+        borrow.assert_not_called()
+
+    def test_wrapper_build_once_per_tip_and_passing_cpu_records(self):
+        with patch.object(cpu, "build_wrapper", return_value=self.home / "wrapper") as build, self.cpu_response():
+            self.runner.check(self.tip)
+            self.assertEqual(build.call_count, 1)
+            self.runner.check(self.advance())
+            self.assertEqual(build.call_count, 2)
+        tests = [row for row in log.read(self.runner.log_path) if row["ev"] == "test"]
+        self.assertTrue(all(row["state"] == "passing" and row["cpu_s"] == 1 for row in tests))
 
 
 class InstallTest(unittest.TestCase):
