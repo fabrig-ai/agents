@@ -2647,6 +2647,17 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertFalse(any(a.run_kind == "retire" and a.task == "one/retire" for a in actions))
         self.assertNotIn(drafts.unit("retire", "one/retire"), units(self.fake))
 
+    def test_fetch_failure_without_after_landing_does_not_hold_retirement(self):
+        one = self.plan_dir("one", tasks=("a",), repo="fabrig")
+        two = self.fabrig_plan(draft="two", tasks=("a",))
+        self.append(dict(ev="branch.landed", task="one/a", branch="one/a", tip="tip", main="main"))
+        self.fake.rules.insert(0, (["git", "fetch", "origin"], lambda call:
+            Result(1, err="fetch failed") if call.cwd == str(self.fabrig_checkout) else Result(0)))
+        actions = self.tick(one, two)
+        self.assertTrue(any(a.kind == "load" and "fetch failed" in a.detail for a in actions))
+        self.assertEqual([a.task for a in actions if a.run_kind == "retire"], ["one/retire"])
+        self.assertIn(drafts.unit("retire", "one/retire"), units(self.fake))
+
     def test_retired_among_plans_is_skipped(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         path = one / "plan.toml"
@@ -4700,6 +4711,7 @@ class RedDispatchTest(unittest.TestCase):
         self.enterContext(patch.object(flow, "measure", return_value={}))
         self.enterContext(patch.object(dispatch, "_check_calls"))
         self.enterContext(patch.object(dispatch, "_integration"))
+        self.enterContext(patch.object(dispatch, "_page"))
         self.enterContext(patch.object(runs, "collect", return_value=None))
         self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
         self.enterContext(redirect_stdout(io.StringIO()))
@@ -4726,11 +4738,11 @@ class RedDispatchTest(unittest.TestCase):
             return Result(0, "codex-red /state/red\n")
         return Result(0)
 
-    def tick(self):
+    def tick(self, *, only=False):
         loaded = [(self.plan, self.tasks, self.directory, self.home)]
         with patch.object(dispatch, "_load_plans", return_value=(loaded, [])):
             return dispatch._round([self.directory], sh=self.fake, hosts=self.hosts,
-                                   log_path=self.path, only=True)
+                                   log_path=self.path, only=only)
 
     def red_records(self, count=1, *, tip="tip"):
         records = [dict(ev="tiers.red", key=f"key-{n}", tip=tip, branches=["draft/a"])
@@ -4924,6 +4936,21 @@ class RedDispatchTest(unittest.TestCase):
         self.assertIn("correct the reproduction", body)
         self.assertIn("add a regression test", body)
 
+    def test_red_dispatch_only_opens_no_reds_and_retires_without_a_verdict(self):
+        records = self.red_records()
+        for record in records:
+            record["branches"] = ["live/a"]
+        self.append(*records)
+        actions = self.tick(only=True)
+        self.assertFalse(any(e["ev"] == "red.opened" for e in log.read(self.path)))
+        self.assertFalse(any(a.kind == "examine-red" for a in actions))
+        self.assertTrue(any(a.run_kind == "retire" for a in actions))
+
+    def test_red_dispatch_only_retires_despite_an_open_red(self):
+        self.open()
+        self.assertFalse(any(a.run_kind == "retire" for a in self.tick()))
+        self.assertTrue(any(a.run_kind == "retire" for a in self.tick(only=True)))
+
     def test_red_dispatch_retire_waits_for_verdict_and_open_reds(self):
         actions = self.tick()
         self.assertFalse(any(a.run_kind == "retire" for a in actions))
@@ -4943,4 +4970,4 @@ class RedDispatchTest(unittest.TestCase):
         imported = [e for e in records if "al_ts" in e]
         self.assertEqual([e["ev"] for e in imported], ["tiers.run", "tiers.red"])
         wake.settle("backstop", None, imported, log_path=self.path)
-        self.assertIn("lost event: tiers.red default::b::t", log.read(self.path)[-1]["text"])
+        self.assertEqual("lost event: after-landing: 1 records", log.read(self.path)[-1]["text"])

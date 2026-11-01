@@ -137,17 +137,23 @@ def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
     <reason>` per taken reason (a want no event round started for); then, in records' order,
     `run.ended <run>` per run.ended record (a builder's wake did not arrive) and `<ev> <task>`
     per record carrying queue_ts, falling back to branch when task is absent (a record
-    imported from the queue, whose wake did not arrive). records are those the log gained
-    during the round. A run that ends just as the backstop collects it reads the same;
+    imported from the queue, whose wake did not arrive). Imported tiers.red and
+    tiers.recovered records (carrying al_ts) follow as one `after-landing: <n> records`
+    count, regardless of the import cursor, so the first import does not list its history.
+    records are those the log gained during the round.
+    A run that ends just as the backstop collects it reads the same;
     that race is rare. Pure."""
     found = [f"wake {reason}" for reason in taken or ()]
+    after_records = 0
     for record in records:
         if record.get("ev") == "run.ended":
             found.append(f"run.ended {record['run']}")
         if record.get("ev") in ("tiers.red", "tiers.recovered") and "al_ts" in record:
-            found.append(f"{record['ev']} {record.get('key', '')}")
+            after_records += 1
         if "queue_ts" in record:
             found.append(f"{record['ev']} {record.get('task', record.get('branch'))}")
+    if after_records:
+        found.append(f"after-landing: {after_records} records")
     return found
 
 

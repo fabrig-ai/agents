@@ -22,7 +22,7 @@ class ExemplarTest(WakeTestCase):
                    dict(ev="red.settled"), dict(ev="red.closed"), dict(ev="red.opened")]
         self.assertEqual(wake.wanted(records), ["red.settled", "red.closed"])
         wake.settle("backstop", None, records, path=self.want, log_path=self.log_path)
-        self.assertEqual(self.notes(), ["lost event: tiers.red default::b::t; tiers.recovered default::b::t"])
+        self.assertEqual(self.notes(), ["lost event: after-landing: 2 records"])
         self.assertWanted("tick 1: red.settled, red.closed")
 
     def test_an_event_reaches_the_tick_once_and_a_lost_one_is_noted(self):
@@ -196,6 +196,19 @@ class RoundTest(WakeTestCase):
                           "branch.landed demo/b", "run.ended demo/c-1", "branch.rejected demo/d"])
         self.assertEqual(wake.lost(None, [landed("demo/a")]), [])
         self.assertEqual(wake.lost([], []), [])
+
+    def test_lost_after_landing_imports_are_counted_at_any_cursor(self):
+        for cursor in ("", "100"):
+            with self.subTest(cursor=cursor):
+                records = [dict(ev="tiers.run", al_ts=cursor + "1"),
+                           dict(ev="tiers.red", key="old", al_ts=cursor + "2"),
+                           dict(ev="tiers.recovered", key="old", al_ts=cursor + "3"),
+                           dict(ev="tiers.red", key="new", al_ts=cursor + "4"),
+                           dict(ev="tiers.red", key="local")]
+                self.assertEqual(wake.lost(None, iter(records)), ["after-landing: 3 records"])
+                self.assertEqual(wake.settle("backstop", None, records),
+                                 ["lost - lost event: after-landing: 3 records"])
+        self.assertNoWant()
 
     def test_lost_queue_records_without_a_task_name_the_branch(self):
         records = [dict(ev=kind, branch="hand/pushed", queue_ts="001") for kind in
