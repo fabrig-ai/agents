@@ -34,8 +34,11 @@ TIER_SET = ("browser-jig", "browser-temper", "browser-skein", "process-temper")
 # (docs/design/fab.md, 13.13). Not live-smith: its tests need `SMITH_LIVE`, a whole live root
 # (smith's configuration, host id, a ChatGPT record of smith's own signed in by `smith login
 # chatgpt`, and programs/claude), which no shelf kind holds yet (11-01, red on hetzner8).
+# Not live-temper: all its live stories are owner-run and ignored; since fabrig eb6c40aaf
+# the live binaries have no harness unit tests, so nextest exits 4 (no tests to run),
+# faulting every run and holding the cursor. It returns only once the user decides which
+# ignored stories, if any, should run under `--live` with `--run-ignored`.
 LIVE = {
-    "live-temper": (("TEMPER_LIVE_ACCOUNT", "chatgpt"), ("TEMPER_LIVE_CLAUDE", "claude-box")),
     "live-skein": (("SKEIN_TEST_LIVE_OPENAI_AUTH", "codex"), ("SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS", "claude")),
 }
 # The cheapest models, for live pairs whose tests take theirs from the environment (the

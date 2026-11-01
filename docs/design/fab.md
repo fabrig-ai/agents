@@ -342,8 +342,12 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `browser-skein`, `process-temper`, in that order (since 11-01: the qa,
   exhaustive and process-jig pairs ended, their tests re-tiered; process-temper
   joined within its 360 CPU-s). Not by default the live pairs (real
-  providers, the user's sign-ins): `--live` adds those, on logins borrowed
-  from the shelf (13.13).
+  providers, the user's sign-ins): `--live` adds `live-skein`, on logins
+  borrowed from the shelf (13.13). `live-smith` awaits a signed-in live root.
+  `live-temper` is out pending the user's decision on which ignored owner-run
+  stories, if any, should run with `--run-ignored`: since fabrig eb6c40aaf its
+  live binaries have no harness unit tests, so it selects no tests, nextest
+  exits 4, the pair faults and the cursor cannot move.
 - **One tip at a time, the newest:** each cycle fetches main. A tip that is
   not the cursor (the last tip run without a fault) gets one run of the tier
   set. Its **suspects** are the first-parent commits since the cursor; a queue
@@ -1251,8 +1255,13 @@ login that still works reused across them before more are signed in.
   lends the free login of that kind with the lowest number and prints its
   id. Builders reach the shelf by ssh to hel8 (the user, 11-01: custody
   stays central). `fab after-landing run --live` adds the live pairs of
-  `fab.after_landing.LIVE`: `live-temper` (`TEMPER_LIVE_ACCOUNT`, a
-  `chatgpt` record; `TEMPER_LIVE_CLAUDE`, a `claude-box`). `live-smith` is
+  `fab.after_landing.LIVE`: only `live-skein`. `live-temper` is out (11-01):
+  all its live stories are ignored owner-run sittings, and since fabrig
+  eb6c40aaf those binaries have no harness unit tests; nextest exits 4
+  (no tests to run), faulting the pair and holding the cursor (11). It comes
+  back only once the user decides which ignored stories, if any, should run
+  with `--run-ignored`. Borrowing and the `chatgpt` record / `claude-box`
+  directory kinds remain supported and tested. `live-smith` is
   out (11-01: all 17 of its tests red at once on hetzner8): besides
   `SMITH_LIVE_CLAUDE` its tests need `SMITH_LIVE`, a whole live root
   (`config/smith/config.toml`, `host-id`, `tokens/chatgpt`, a ChatGPT

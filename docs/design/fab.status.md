@@ -36,9 +36,15 @@
 - **Logins:** `fab logins` (13.13): the shelf, capture, lend, return, swap,
   retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
   machine's logins, the user's new sign-ins and QA's six (moved 11-01).
-  `fab after-landing --live` borrows them for `live-temper` and
-  `live-skein` (whose tests read logins' files since fabrig 978e17e); the
-  after-landing unit on hetzner8 runs with it, on the cheapest models.
+  `fab after-landing --live` borrows them for `live-skein` (whose tests
+  read logins' files since fabrig 978e17e); the after-landing unit on
+  hetzner8 runs with it, on the cheapest models. `live-temper` is out
+  (11-01): its owner-run live stories are ignored, and since fabrig
+  eb6c40aaf its live binaries have no harness unit tests; nextest exits 4,
+  faulting every run and holding the cursor. It awaits the user's decision
+  on which ignored stories, if any, to run with `--run-ignored` (11, 13.13).
+  Borrowing and its `chatgpt` / `claude-box` kinds remain tested with a
+  test-only live table.
   `live-smith` was taken out 11-01 ~02:00Z (red on 831e86f27 and
   e4f852afa: `SMITH_LIVE` unset): it needs a smith live root signed in by
   `smith login`, a directory kind the shelf does not have yet.

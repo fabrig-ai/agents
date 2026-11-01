@@ -508,11 +508,17 @@ class AfterLandingTest(unittest.TestCase):
         with patch.object(self.runner, "cycle", side_effect=AssertionError("already stopped")):
             self.runner.run(stop=stop)
 
-    def live_runner(self, shelf):
+    def live_runner(self, shelf, *, temper=False):
         """A --live runner on builder b1 whose `fab logins` calls to hel8 answer from shelf:
         borrow KIND -> the next id of shelf[KIND] (none left: refused), return -> ok unless
         the id is in shelf["stuck"]; the local refresh `fab logins account` answers
-        shelf["refresh"] (default an account)."""
+        shelf["refresh"] (default an account). temper adds a test-only pair to cover the
+        chatgpt and claude-box login kinds while live-temper is out of --live."""
+        if temper:
+            self.enterContext(patch.object(after_landing, "LIVE", {
+                "live-temper": (("TEMPER_LIVE_ACCOUNT", "chatgpt"), ("TEMPER_LIVE_CLAUDE", "claude-box")),
+                **after_landing.LIVE,
+            }))
         machines = {"hel8": Host("hel8", "free@hel8", ("dispatcher",)), "b1": Host("b1", "free@b1", ("builder",))}
         self.enterContext(patch.dict(os.environ, {"FAB_HOST": "b1"}))
         self.configured.update({profile: tiers.Pair(profile, *profile.rsplit("-", 1), ("pkg",), ())
@@ -541,9 +547,18 @@ class AfterLandingTest(unittest.TestCase):
         self.sh.on(["fab", "logins", "account"], refresh)
         return AfterLanding(1, sh=self.sh, tier_set=self.profiles, live=True, known=machines)
 
+    def test_live_adds_only_skein_and_advances_the_cursor_without_temper_logins(self):
+        runner = self.live_runner({"codex": ["codex-7"], "claude": ["claude-9"]})
+        self.assertEqual(runner.tier_set, (*self.profiles, "live-skein"))
+        record = runner.check(self.tip)
+        self.assertEqual((record["verdict"], record["faults"]), ("green", []))
+        self.assertEqual([profile for profile, _, _ in self.invocations], list(runner.tier_set))
+        self.assertEqual([call[1] for call in self.calls if call[0] == "borrow"], ["codex", "claude"])
+        self.assertEqual(runner.state["cursor"], self.tip)
+
     def test_live_pairs_borrow_their_logins_from_the_dispatcher_and_return_them(self):
         runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": ["claude-box-1", "claude-box-2"],
-                                   "codex": ["codex-7"], "claude": ["claude-9"]})
+                                   "codex": ["codex-7"], "claude": ["claude-9"]}, temper=True)
         self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-skein"))
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "green")
@@ -581,7 +596,7 @@ class AfterLandingTest(unittest.TestCase):
 
     def test_a_live_pair_without_its_logins_faults_and_returns_what_it_borrowed(self):
         runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": [], "codex": [], "claude": [],
-                                   "stuck": ["chatgpt-1"]})
+                                   "stuck": ["chatgpt-1"]}, temper=True)
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "partial")
         self.assertEqual(record["faults"], ["live-temper: logins: fab logins: no free claude-box login",
