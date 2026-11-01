@@ -88,8 +88,13 @@ login that still works reused across them before more are signed in.
   directory, `TEMPER_LIVE_CLAUDE`) and `github` (temper's GitHub
   conformance fixtures, `TEMPER_LIVE_GITHUB_FIXTURES`: the probe App's
   `app.json` and `app.pem` and a `person-<owner>.token` per owner, none
-  of which refreshes), lent to a run at a path of its own. An id is
-  `<kind>-<n>`.
+  of which refreshes), lent to a run at a path of its own. `smith-live`
+  (smith's live root, `SMITH_LIVE`: `config/smith/config.toml`, which names
+  the root absolutely, `host-id`, `tokens/chatgpt` signed in by
+  `smith login chatgpt`, and `programs/claude`) is a directory lent at
+  `~/.local/state/smith-live`. A kind whose files name their own path has
+  a `fixed` path and is lent only there, so one root serves one run at a
+  time on any builder. An id is `<kind>-<n>`.
 - **Custody is the log:** `login.added` (id, kind, origin, sha),
   `login.lent` (id, holder, host, at, sha), `login.returned` (id, sha),
   `login.checked` (id, email, plan, used, resets, error, limit_names,
@@ -115,10 +120,10 @@ login that still works reused across them before more are signed in.
   Claude Code cached in `~/.claude.json`: it reports, and keeps, the
   previous login's until none is cached (11-01: three swapped builders
   said gmail until it was dropped).
-- **A run's logins:** `fab logins borrow KIND HOST --path P --holder RUN`
+- **A run's logins:** `fab logins borrow KIND HOST [--path P] --holder RUN`
   lends the free login of that kind with the lowest number and prints its
-  id. Builders reach the shelf by ssh to hel8 (the user, 11-01: custody
-  stays central). `fab after-landing run --live` adds the live pairs of
+  id; `--path` may be omitted for a kind with a fixed path. Builders reach
+  the shelf by ssh to hel8 (the user, 11-01: custody stays central). `fab after-landing run --live` adds the live pairs of
   `fab.after_landing.LIVE`: only `live-skein`. `live-temper` is out (11-01):
   all its live stories are ignored owner-run sittings, and since fabrig
   eb6c40aaf those binaries have no harness unit tests; nextest exits 4
@@ -130,8 +135,9 @@ login that still works reused across them before more are signed in.
   `SMITH_LIVE_CLAUDE` its tests need `SMITH_LIVE`, a whole live root
   (`config/smith/config.toml`, `host-id`, `tokens/chatgpt`, a ChatGPT
   record of smith's own made by `smith login chatgpt`, and
-  `programs/claude`), which no kind holds yet; it comes back as a
-  directory kind once the user signs one in. Each pair borrows its logins, lent to the builder
+  `programs/claude`), held by the `smith-live` kind; its return to
+  `fab.after_landing.LIVE` waits for the signed-in root's capture. Each
+  pair borrows its logins, lent to the builder at the kind's fixed path or
   under its run directory for holder `after-landing/<tip>/<pair>`, runs
   with the variables naming them, and returns them when it ends; a pair
   short of a login faults, and a login that cannot be returned stays lent
@@ -184,8 +190,8 @@ login that still works reused across them before more are signed in.
   is deployed by hand, outside this change.
 - **Left out:** the old tools' pending journals and backups, QA's waiting
   queue, reservations and admission caps (the dispatcher decides who gets a
-  login, as it does places), and checks of `chatgpt` records, which only a
-  temper box can read: their live runs show whether they work.
+  login, as it does places), and checks of `chatgpt`, `github` and
+  `smith-live` logins: their live runs show whether they work.
 
 ## 4. The dispatcher's own units
 

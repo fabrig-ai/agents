@@ -106,6 +106,24 @@ class LoginsTest(unittest.TestCase):
             place.chmod(0o600)
         return value
 
+    def smith_root(self):
+        """A dummy SMITH_LIVE root on b1, including the files named by smith's live tests."""
+        source = "qa/smith-live"
+        root = self.at("b1", source)
+        for name, contents in {
+            "config/smith/config.toml": 'credentials = "/home/free/.local/state/smith-live"',
+            "host-id": "dummy host",
+            "tokens/chatgpt": "dummy smith ChatGPT record",
+            "programs/claude/.credentials.json": "dummy Claude record",
+        }.items():
+            destination = root / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            sibling = destination.with_name(destination.name + ".new")
+            sibling.write_text(contents)
+            sibling.replace(destination)
+        root.chmod(0o755)
+        return source
+
     def events(self):
         return [entry["ev"] for entry in log.read() if entry["ev"].startswith("login.")]
 
@@ -238,6 +256,88 @@ class LoginsTest(unittest.TestCase):
             self.shelf.check("github-1")
         self.shelf.give_back("github-1")
         self.assertFalse(self.at("b2", "walks/r1/github").exists())
+
+    def test_smith_live_capture_free_and_borrow_default_path_returns_the_root(self):
+        source = self.smith_root()
+        out = io.StringIO()
+        with patch.object(logins, "Shelf", return_value=self.shelf), redirect_stdout(out):
+            self.assertEqual(logins.main(["capture", "b1", "smith-live", "--path", source, "--free"]), 0)
+        self.assertTrue(self.shelf.login("smith-live-1").free)
+        self.assertTrue(self.at("b1", source).is_dir())
+        self.assertEqual(self.events(), ["login.added"])
+        login = self.shelf.borrow("smith-live", "b2", path="", holder="run-1")
+        self.assertEqual((login.id, login.holder, login.path),
+                         ("smith-live-1", "run-1", ".local/state/smith-live"))
+        lent = self.at("b2", login.path)
+        self.assertEqual(stat.S_IMODE(lent.stat().st_mode), 0o700)
+        for original in self.at("b1", source).rglob("*"):
+            if original.is_file():
+                self.assertEqual((lent / original.relative_to(self.at("b1", source))).read_bytes(),
+                                 original.read_bytes())
+        self.assertTrue(self.shelf.give_back(login.id).free)
+        self.assertFalse(lent.exists())
+        self.assertEqual(self.events(), ["login.added", "login.lent", "login.returned"])
+
+    def test_smith_live_lend_accepts_relative_tilde_and_host_absolute_fixed_paths(self):
+        self.shelf.capture("b1", "smith-live", path=self.smith_root(), free=True)
+        fixed = ".local/state/smith-live"
+        destination = self.at("b2", fixed)
+        for path in (fixed, "~/" + fixed, str(destination)):
+            with self.subTest(path=path):
+                login = self.shelf.lend("smith-live-1", "b2", path=path, holder="run-1")
+                self.assertEqual(login.path, fixed if path.startswith("~/") else path)
+                self.assertTrue(destination.is_dir())
+                self.shelf.give_back(login.id)
+                self.assertFalse(destination.exists())
+
+    def test_smith_live_lend_and_borrow_refuse_other_paths_before_copying(self):
+        self.shelf.capture("b1", "smith-live", path=self.smith_root(), free=True)
+        paths = ("runs/r1/smith", str(self.at("b2", "elsewhere")),
+                 str(self.home / ".local/state/smith-live"))
+        for operation, name in ((self.shelf.lend, "smith-live-1"), (self.shelf.borrow, "smith-live")):
+            for path in paths:
+                with self.subTest(operation=operation.__name__, path=path), \
+                        patch.object(self.shelf, "_push") as copy:
+                    with self.assertRaisesRegex(logins.Refused,
+                                                r"a smith-live login is lent only at ~/\.local/state/smith-live"):
+                        operation(name, "b2", path=path, holder="run-1")
+                    copy.assert_not_called()
+                    self.assertFalse(self.at("b2", path).exists())
+        self.assertFalse(self.at("b2", ".local").exists())
+        self.assertTrue(self.shelf.login("smith-live-1").free)
+        self.assertEqual(self.events(), ["login.added"])
+
+    def test_smith_live_check_refuses_without_probing_or_lending(self):
+        self.shelf.capture("b1", "smith-live", path=self.smith_root(), free=True)
+        with patch.object(self.shelf, "_account") as probe:
+            with self.assertRaisesRegex(logins.Refused,
+                                        "a smith-live login has no check; its runs show whether it works"):
+                self.shelf.check("smith-live-1")
+        probe.assert_not_called()
+        self.assertEqual(self.events(), ["login.added"])
+
+    def test_borrow_cli_omits_path_only_for_a_fixed_kind(self):
+        self.shelf.capture("b1", "smith-live", path=self.smith_root(), free=True)
+        self.secret("b1", "qa/chatgpt")
+        self.shelf.capture("b1", "chatgpt", path="qa/chatgpt", free=True)
+        out, err = io.StringIO(), io.StringIO()
+        with patch.object(logins, "Shelf", return_value=self.shelf), \
+                redirect_stdout(out), redirect_stderr(err):
+            self.assertEqual(logins.main(["borrow", "smith-live", "b2", "--holder", "run-1"]), 0)
+            self.assertEqual(logins.main(["borrow", "chatgpt", "b2", "--holder", "run-2"]), 1)
+            self.assertEqual(logins.main(["borrow", "codex", "b2", "--holder", "run-3"]), 1)
+        self.assertEqual(out.getvalue(), "smith-live-1\n")
+        self.assertEqual(err.getvalue(),
+                         "fab logins: a chatgpt login is lent to a run; name its --path\n"
+                         "fab logins: a codex login is lent to a run; name its --path\n")
+        self.assertEqual(self.shelf.login("smith-live-1").path, ".local/state/smith-live")
+        self.assertTrue(self.shelf.login("chatgpt-1").free)
+        self.shelf.give_back("smith-live-1")
+
+    def test_smith_live_capture_still_requires_a_source_path(self):
+        with self.assertRaisesRegex(logins.Refused, "has no machine path; name its --path"):
+            self.shelf.capture("b1", "smith-live", free=True)
+        self.assertEqual(self.events(), [])
 
     def test_a_directory_login_is_lent_to_a_run_and_returned_whole(self):
         self.secret("b1", "qa/claude", directory=True)

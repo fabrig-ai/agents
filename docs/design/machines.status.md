@@ -29,7 +29,8 @@
   test-only live table.
   `live-smith` was taken out 11-01 ~02:00Z (red on 831e86f27 and
   e4f852afa: `SMITH_LIVE` unset): it needs a smith live root signed in by
-  `smith login`, a directory kind the shelf does not have yet.
+  `smith login`.
+- The `smith-live` directory kind exists at its fixed path; live-smith's return to `fab.after_landing.LIVE` waits for the root's capture.
 
 ## Gaps and departures
 

@@ -35,6 +35,7 @@ class Kind:
     item: str  # the login's name in its shelf entry
     machine: str = ""  # where a machine's tools use it, relative to HOME; "" for a run's login
     directory: bool = False
+    fixed: str = ""  # the only lending path, relative to HOME, when its files name that path
 
 
 KINDS = {
@@ -45,6 +46,9 @@ KINDS = {
     # temper's GitHub conformance fixtures (TEMPER_LIVE_GITHUB_FIXTURES): app.json, the App's
     # app.pem and a person-<owner>.token per owner; neither refreshes.
     "github": Kind("login", directory=True),
+    # smith's live root (SMITH_LIVE): config/smith/config.toml names the root absolutely,
+    # host-id, tokens/chatgpt signed in by smith login chatgpt, and programs/claude.
+    "smith-live": Kind("login", directory=True, fixed=".local/state/smith-live"),
 }
 # The machine logins each role uses: the dispatcher's calls and ops runs, a builder's runs.
 NEEDS = {"dispatcher": ("claude", "codex"), "builder": ("claude", "codex")}
@@ -238,7 +242,12 @@ mkdir -p "$(dirname "$dest")"
 tmp=$(mktemp -d "$(dirname "$dest")/.fab-login.XXXXXX"); trap 'rm -rf "$tmp"' EXIT
 tar -C "$tmp" -xf -
 [ "$(digest "$tmp"/{shlex.quote(item)})" = {login.sha} ] || {{ echo "fab logins: the copy differs from the shelf's" >&2; exit 6; }}
-if [ -d "$tmp"/{shlex.quote(item)} ]; then mv -T "$tmp"/{shlex.quote(item)} "$dest"; else ln "$tmp"/{shlex.quote(item)} "$dest"; fi
+if [ -d "$tmp"/{shlex.quote(item)} ]; then
+  chmod 700 "$tmp"/{shlex.quote(item)}
+  mv -T "$tmp"/{shlex.quote(item)} "$dest"
+else
+  ln "$tmp"/{shlex.quote(item)} "$dest"
+fi
 [ "$(digest "$dest")" = {login.sha} ]
 """, stdin_from=shlex.join(sender))
 
@@ -270,14 +279,16 @@ if [ -d "$tmp"/{shlex.quote(item)} ]; then mv -T "$tmp"/{shlex.quote(item)} "$de
             return self.login(name)
 
     def lend(self, name: str, host: str, *, path: str | None = None, holder: str | None = None) -> Login:
-        """Copy free login name to host at path (by default its kind's machine path, lent to the
-        machine) for holder (a run's id; by default the machine)."""
+        """Copy free login name to host at path (by default its kind's fixed or machine path,
+        lent to the machine) for holder (a run's id; by default the machine)."""
         with self._lock():
             return self._lend(self.login(name), host, path, holder)
 
     def borrow(self, kind: str, host: str, *, path: str, holder: str) -> Login:
-        """Lend the free login of kind with the lowest number to holder (a run) on host at path;
-        Refused when none is free. The builders' live pairs borrow this way over ssh."""
+        """Lend the free login of kind with the lowest number to holder (a run) on host at path
+        (empty for a kind's fixed path); Refused when none is free. Builders borrow over ssh."""
+        if not path and kind in KINDS and not KINDS[kind].fixed:
+            raise Refused(f"a {kind} login is lent to a run; name its --path")
         with self._lock():
             free = [login for login in self.logins().values() if login.kind == kind and login.free]
             if not free:
@@ -289,7 +300,15 @@ if [ -d "$tmp"/{shlex.quote(item)} ]; then mv -T "$tmp"/{shlex.quote(item)} "$de
         if not login.free:
             raise Refused(f"{login.id} is not free: " + (f"retired ({login.retired})" if login.retired is not None
                                                           else f"lent to {login.holder}"))
-        path = path or KINDS[login.kind].machine
+        spec = KINDS[login.kind]
+        path = path or spec.fixed or spec.machine
+        if spec.fixed:
+            if path == f"~/{spec.fixed}":
+                path = spec.fixed
+            if path != spec.fixed:
+                absolute = self._script(host, f'printf "%s/%s" "$HOME" {shlex.quote(spec.fixed)}')
+                if path != absolute:
+                    raise Refused(f"a {login.kind} login is lent only at ~/{spec.fixed}: its files name that path")
         if not path:
             raise Refused(f"a {login.kind} login is lent to a run; name its --path")
         self._push(login, host, path)
@@ -575,7 +594,7 @@ def table(logins: Iterable[Login]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     """`fab logins list [--json]`, `capture HOST KIND [--path P] [--free]`, `lend ID HOST
-    [--path P] [--holder RUN]`, `borrow KIND HOST --path P --holder RUN` (prints the id lent),
+    [--path P] [--holder RUN]`, `borrow KIND HOST [--path P] --holder RUN` (prints the id lent),
     `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID... | --all`
     (on the shelf's machine); `account KIND [--home DIR] [--validate]` (on the login's)."""
     parser = argparse.ArgumentParser(prog="fab logins", description=__doc__)
@@ -595,7 +614,7 @@ def main(argv: list[str]) -> int:
     borrowing = commands.add_parser("borrow")
     borrowing.add_argument("kind", choices=sorted(KINDS))
     borrowing.add_argument("host")
-    borrowing.add_argument("--path", required=True)
+    borrowing.add_argument("--path", default="")
     borrowing.add_argument("--holder", required=True)
     commands.add_parser("return").add_argument("id")
     swapping = commands.add_parser("swap")
