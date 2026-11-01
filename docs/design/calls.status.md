@@ -211,7 +211,9 @@
   or after it, so with no other wake the backstop's ten minutes can make the
   wait nearly twenty (5).
 - **A call from main can start behind main** (3, seen at mechanisms-out's
-  retire; 5): `fab.calls.start` fetches first only for a report-only call, a
+  retire and acceptance-fixes', whose worktree, inventory and diffs were
+  32deb33 with its second part, ad63a0c, landed 28 s before the brief; the
+  call fast-forwarded by hand; 5): `fab.calls.start` fetches first only for a report-only call, a
   supplied branch, fabrig or a base other than main. `land-code-first` landed
   at 18:26:21Z, the retire's `call.started` is 18:26:22Z, and its worktree and
   inventory were 18b5d7f, one commit behind: no `land_tries`, and `amend_brief`

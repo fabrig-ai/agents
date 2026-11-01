@@ -5,17 +5,19 @@
 ## Present
 
 - **Precheck receipts require every test observed for reuse** (3; plan
-  `docs/plan/acceptance-fixes`, 11-01): `fab.precheck.precheck` records
-  `unobserved`, the skipped cases summed across test profiles, without
-  naming them in the log. `fab.receipts.reusable` refuses green receipts
+  `docs/plan/acceptance-fixes`, retired 11-01; e500bc3):
+  `fab.precheck.precheck` records `unobserved`, the skipped cases summed
+  across test profiles, inventory entries that never started among them
+  (`fab.cpu.cases`), without naming them in the log. A conflict's receipt
+  says 0. `fab.receipts.reusable` refuses green receipts
   with starved or unobserved tests; missing counts still mean 0 for older
-  receipts. Parsing, delivery and test coverage stay as they are. After
-  reading each profile's reports, precheck removes the collector's `records`
-  directories, keeping JUnit and summary files, on green and red runs.
-  Tested with fake nextest and collector records (`test_precheck.py`,
-  `test_receipts.py`). The reuse change is live once the gate's
-  `fab-queue.service` restarts on it: run `bin/install.sh <gate host>` once
-  landed. Builders follow main at their next run start (tick.md 3).
+  receipts. Parsing, delivery and `covers` stay as they are, so a red still
+  reads such a receipt. After reading each profile's reports, precheck
+  removes the collector's `records` directories (2), keeping JUnit and
+  summary files, on green and red runs. Tested with fake nextest and
+  collector records (`test_precheck.py`, `test_receipts.py`), not on a
+  stopped run (neither slice has a walk). Builders follow main at their
+  next run start (tick.md 3).
 - **The queue's retire fix and `rejected`'s tests** (11-01, section 2):
   the retire push runs with `--porcelain` and is read per ref; a refused
   source delete is left alone (a `left` line in the detail log); a refused
@@ -105,6 +107,16 @@
   machine that stretches the suite's 23 s of CPU past 120 s still refuses a
   good branch at `test` (plan `docs/plan/test-budget` did not change it; 4,
   Later).
+- **The gate may still reuse a starved receipt:** `fab-queue.service` runs
+  for days and moves only with `bin/install.sh`, so `fab.receipts.reusable`'s
+  change is live once e500bc3's machine action, `bin/install.sh <gate host>`,
+  has run. The retire did not check the gate; until the action is run, a
+  batch of one on a starved receipt on the same main still lands on fmt alone.
+- **`FAB_HOME/precheck/` is not pruned** (2; 4, Later): `_checks` stops new
+  `records` only. Those of prechecks from before e500bc3 stay on the
+  builders unless the same tip is checked again, and a precheck that raises
+  before the end of `_checks` leaves its own. Receipts, logs and reports stay
+  on every run.
 - **The bounds of the landing checks are first guesses:** two collateral
   reds per tip (`fab.reds.LIMIT`) and five retried tests per red
   (`fab.reds.RETRIES`), to be set from the queue's records.

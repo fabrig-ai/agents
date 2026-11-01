@@ -557,7 +557,10 @@ only as tweaks once a replay matches its run.
   from `origin/main` and its branch is delivered as a queue plan's call is
   (fabrig's queue: `ready/calls/<id>`, `call.finished` when the queue's
   record says it landed), never merged into the landed trunk; so is any
-  other call of the plan delivered after its trunk landed. Once the trunk
+  other call of the plan delivered after its trunk landed, a foreman's
+  answer and a repair's section, committed from `origin/main`, and a task
+  started from main, which lands or readies with its amendment's rebase
+  compared with `origin/main`. Once the trunk
   has landed (`fab.integration.trunk_landed`), the tick reads the plan from
   main: each fetch of the plan checkout moves it, detached, to `origin/main`
   (which holds the trunk's tip; the queue deleted the trunk), so the
@@ -722,6 +725,12 @@ anything.
   the manual run.
 - The cut's seeded `draft`, `repo` and `sources` (3) restored as its options
   are: only the brief's and the roles' text keeps the cut from changing them.
+- The trunk reads a landed plan keeps (3), which nothing reaches today:
+  `fab.dispatch._merge_cut`'s check of `origin/<plan.trunk>`, for a cut still
+  running when its trunk landed; `_merge_branch`; and the `queued` test in
+  `_settle` and `_remedy`, false for an integration plan even after its
+  landing, so a retry commits again where a queue plan's reads its pushed
+  branch. Left by plan acceptance-fixes, its request not naming them.
 - A cut's plan.toml that does not parse parked rather than retried: with
   options to restore, each tick logs a failed note and nothing asks anyone
   (`integration.status.md`).

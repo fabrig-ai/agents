@@ -134,7 +134,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   the default suite's 120 s global timeout alone, 23,338 passed, 7
   SIGTERMed, 938 not run, under a builder load of 14). Precheck writes its
   receipt to `FAB_HOME/precheck/<tip>.json` on the builder, with the
-  starved count beside the steps. The gate's lists
+  starved and unobserved counts beside the steps. Once it has read each
+  run profile's reports it removes that profile's collector `records` from
+  `FAB_HOME/precheck/<tip>/`, red or green, and keeps the JUnit, inventory
+  and summary: a full precheck left 127 MB and about 24,500 files
+  (hetzner6) that nothing reads. The gate's lists
   (`always.txt`, `read-by-tests.txt`) move with the cutover from fabrig's
   `tools/queue/` to its `.config/gate/`.
 
@@ -154,8 +158,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     gate (`fab queue receipt TIP`, kept as `FAB_HOME/receipts/<tip>.json`
     there; `fab/receipts.py`). A receipt that is missing, red or does not
     parse is no receipt: the queue checks the tip in full.
-  - **Reusable** means green, the same tip and the same main as the batch's
-    parent. The ratchet steps still run with `--write` (they shape the
+  - **Reusable** means green with nothing starved or unobserved, the same
+    tip and the same main as the batch's parent. The ratchet steps still run with `--write` (they shape the
     candidate), then `fmt` for the queue's selection; the batch record
     carries `receipt`, and the batch counts toward the fifth.
 - **Reds are classed before anyone hears them:** a failing test that passed
@@ -224,6 +228,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   does not have); receipts reused for batches of more than one, once
   numbers show how often a set's receipts all name its main; receipts on
   the gate pruned.
+- `FAB_HOME/precheck/` on the builders pruned (2): nothing removes a
+  tip's receipt, log and reports, or the collector's `records` of a
+  precheck from before they were removed, or of one that raised before the
+  end of its checks. Plan acceptance-fixes stopped new records only.
 - `bin/fab land` keeping a branch's merge commits (2): today its rebase
   drops them, and with them what a rerun's merge of the base resolved
   (tick.md 3); dogfood-faults/reruns (11-01) was refused three times on

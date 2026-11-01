@@ -31,7 +31,7 @@
 - **Every call works from main once the trunk has landed** (3, "It then
   works from main"; plans `docs/plan/dogfood-faults`, retired 11-01, 600f5a4,
   `docs/plan/df-followups`, retired 11-01, 009d591, and
-  `docs/plan/acceptance-fixes`):
+  `docs/plan/acceptance-fixes`, retired 11-01, ad63a0c):
   `fab.integration.call_base` is `main` for an integration plan once
   `trunk_landed` (this draft's queue `branch.landed` for
   `<draft>/integration`), else `plan.trunk`; `fab.designer.main` (every
@@ -39,10 +39,10 @@
   amend, settle), `fab.triage.main`, and `fab.dispatch`'s `_start` (tasks),
   `_foreman` and `_examine` (refusal repairs) start from it, a fix kind
   keeping `main`. `_settle` and `_remedy` also use `call_base` when
-  committing answers and repair sections, and deliver them through the queue
-  after the landing. For a task started from main after the landing,
-  `_landing_actions` lands it (agents) or readies it (fabrig), and compares
-  its amendment rebase with `origin/main`.
+  committing answers and repair sections, and `_deliver` takes them as it
+  takes a call's branch after the landing. For a task started from main
+  after the landing, `_landing_actions` lands it (agents) or readies it
+  (fabrig), and compares its amendment rebase with `origin/main`.
   `fab.dispatch._integration` returns after `_lift_catch_up` once the trunk
   has landed, before any `_contains` or `rev-parse` of `origin/<trunk>`, so
   the tick logs no `failed:` note for the gone trunk. `fab.dispatch._deliver`
@@ -157,8 +157,18 @@
   checkout detached there; its landing was imported only at 18:16:57Z, once
   a retired plan's import was built (tick.md 5, `tick.status.md`). No trunk
   has stopped since the stop's records were built. The other calls, foremen
-  and repairs from main after the landing (df-followups, 11-01) are untried
-  live: no trunk has landed since.
+  and repairs from main after the landing (df-followups, 11-01), and the
+  settles and tasks from main (acceptance-fixes, 11-01, slice 2 has no
+  walk), are untried live: no trunk has landed since.
+- **Settles after a landing, what stayed** (3; 5, Later; acceptance-fixes,
+  `notes/decisions.md` 7-9): `_settle` and `_remedy` use `call_base` for
+  every kind, so a fix kind's answer commits from the trunk before the
+  landing, where `_foreman` and `_examine` keep `main`. `queued` stays false
+  for an integration plan after its landing: a retry finds the pushed branch
+  or the edit on main, but a `_remedy` retried across midnight commits again
+  with its section's new date. `_merge_cut` still reads `origin/<plan.trunk>`
+  and `_merge_branch` still resets to it; neither is reached after a landing
+  unless a cut outlives its trunk.
 - **The start commands are unused live** (3, start-commands, 11-01): hel8's
   log holds no `trunk.made` at the plan's retire, and no plan's `inputs/`
   has gone through `fab plan inputs`; the next replay or `ready` probe is
