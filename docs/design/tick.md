@@ -80,7 +80,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `Question: <question>` (then the options and a recommendation),
   `Infra: <cause>` (disk, a machine or a tool, not the task's fault) or
   `Failed: <why>`. `fab run status` reads it; the dispatcher requeues an
-  `Infra:` run without asking anyone.
+  `Infra:` run without asking anyone. The rerun (kind `repair`) continues
+  from the branch the run pushed, or starts from the task's base when the
+  run pushed nothing (fixed 11-01: it started from `origin/<branch>` only,
+  which a run that never pushed lacks, so its start failed every tick).
 - **Done means checked:** the branch is pushed and its checks passed inside
   the run (this repository: `bin/fab test`; fabrig: precheck and the merged
   readers' tests, `agents/implementer.md` in fabrig).
@@ -208,10 +211,12 @@ only the backstop.
 The user's example timeline (`execution-modes.md`, "Example") is the order of
 things fab follows, whatever the clock says:
 
-- **Intake:** the user starts a draft by hand (`fab draft start PATH`, at
-  the user's word of 10-31): its surveys, then its cut. A draft landing in
-  `docs/design/draft/` starts nothing by itself; the timeline's T+0:00 is
-  the user's start.
+- **Intake:** the user starts a draft by hand (at the user's word of
+  10-31): today with its cut, `fab call cut --plan PLAN_DIR --source PATH
+  ...` (calls.md 3), which lists the plan in `FAB_HOME/plans`. A draft
+  landing in `docs/design/draft/` starts nothing by itself; the timeline's
+  T+0:00 is the user's start. `fab draft start PATH`, which would run the
+  draft's surveys and then its cut, is not built (8).
 - **Surveys:** read-only Codex runs (medium, kind `survey`), at intake (the
   readers of what the draft changes, the primitives in reach with their
   signatures, each area's test world) and before each skeleton call (the

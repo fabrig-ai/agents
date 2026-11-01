@@ -43,6 +43,15 @@ and Claude reads the code's structure in batches, never on the landing path.
   action and the branch waits; it never lands ungated. The first gates read
   Python (this repository); fabrig's, over Rust and its public API, come
   later.
+- **A skeleton or contract call's tip is gated too,** before its tasks may
+  start from it (the optimistic start, integration.md 2): the tick screens
+  the tip with the gates (this repository) or the Rust gates (fabrig) as a
+  task of kind `interface` owning `**`, and runs the tests (`bin/fab test`
+  in a detached worktree; fabrig: `fab precheck` in an idle slot). Its
+  `call.checked` (call, root, subject, branch, tip, outcome `green` or
+  `red`, the part's task ids and specs, `findings`) pins the tip and the
+  specs together; an infra failure logs nothing and the next tick retries.
+  Review and designer calls' branches are not gated.
 - **The taste file,** `fab/taste.md`, holds the banned names and pairs of
   good and bad code from this repository, each with one line on why. It is
   added to every implementer's brief after the role text.
@@ -66,5 +75,5 @@ and Claude reads the code's structure in batches, never on the landing path.
 
 - fabrig's api gate, the public API against the skeleton (rustdoc JSON);
   names, docs and clones over Rust (integration.md 2 has the minimal gates).
-- Gates on the calls' own branches (skeletons, reviews), which have no task
-  `files` to check against.
+- Gates on review calls' branches, which have no task `files` to check
+  against.

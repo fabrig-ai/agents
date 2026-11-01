@@ -62,8 +62,11 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   running alongside. The tasks are read from the call's branch tip, their
   branches start from it, and they hold landing (or readying) until the
   skeleton has landed. A refusal becomes an amend call as now; when the
-  amended skeleton lands, each started task's branch is rebased onto main
-  by a rebase run before it lands. A chain that parks parks its tasks.
+  amended skeleton lands, each started task's branch is rebased onto the
+  plan's trunk (main, or an integration plan's `<draft>/integration`) by a
+  rebase run before it lands; a rebase run that ended done from
+  `origin/<trunk>` consumes the amendment (fixed 11-01: only a base of
+  `origin/main` did, so an integration plan's rebase repeated forever). A chain that parks parks its tasks.
 - **Start wide:** the flow target (tick.md 4) starts at the plan's places (the
   sum of its builders' `places`), not 2, and runs start up to the lesser of
   the target and the runnable tasks. A first-attempt landing with the window
@@ -328,6 +331,29 @@ only as tweaks once a replay matches its run.
     runs as an implement run from the trunk's tip, is merged like any task,
     and the trunk is checked again. A third red parks the plan with a
     question.
+  - **A stop asks** (fixed 11-01: it was a log note only, found by
+    dogfood/design). A plan stops at the third red end check, at a
+    catch-up refusal that stops it (above), or at the third queue rejection.
+    The tick then logs `plan.stopped` once per stop (task
+    `<draft>/integration`, `tip`, `why` one of `red`, `catch-up`, `queue`,
+    `text` the stop's reason, `report` what to read: the last red check's
+    report, `FAB_HOME/runs/<run>/report.md`; the queue rejection's
+    `<gate>:<log>`; "" for a catch-up, whose findings the text quotes, at
+    most 20 lines). While it holds, the trunk takes no further step (no
+    catch-up, check or ready, and of the plan's tasks only repairs of
+    after-landing reds and QA findings start; runs in flight end and merge
+    as usual). The judgement is the user's,
+    since the loop's three tries could not make it: `fab.channel.asks` opens
+    an ask of kind `stopped` (subject `<draft>/integration`, text and report
+    the record's), so it reaches the page and the forge (channel.md 2-3).
+    `fab page answer <draft>/integration TEXT` logs `call.answered`, which
+    closes the ask and lifts the stop: its count starts afresh after the
+    answer (end reds, catch-up refusals, queue rejections), the next step
+    is taken as if none had come before, and the answer is folded under
+    Answers into each repair generated after the stop (the stopping red's
+    own repair among them), as a repair's own answers are. A catch-up stop
+    is lifted also by a clean catch-up, as above. A later stop logs a new
+    `plan.stopped` and opens a new ask.
   - A check run counts as the draft's run in flight and takes a place.
   - A repair has no spec file, so its question skips the foreman (no
     options to settle by) and queues, and an answer logged with `answer`
@@ -410,6 +436,12 @@ only as tweaks once a replay matches its run.
   their tasks have merged, but its retire call starts only once the trunk
   has landed on main (`branch.landed` for task `<draft>/integration` from
   the queue's record), and after its verdict after landing (after-landing.md 2).
+  It then works from main, not the trunk: the call starts from `origin/main`
+  and its branch lands through fabrig's queue as a queue plan's call does
+  (`ready/calls/<id>`, `call.finished` when the queue's record says it
+  landed), never merged into the landed trunk. Fixed 11-01 (found by
+  dogfood/design): the tick merged it into the trunk, so the plan's status
+  files and `retired = true` never reached main.
 - **Departures from the user's drafts, at the user's word** (10-31;
   `execution-modes.md`): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
