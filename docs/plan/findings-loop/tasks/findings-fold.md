@@ -80,3 +80,15 @@ Tests in `fab/tests/test_findings.py`, each from built records:
 
 The functions and states built, and any state transition the design left
 open that you had to choose (one line each).
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/findings-fold/foreman-1)
+
+Extract per-finding transitions from findings() into a private function in fab/findings.py.
+The branch owns this gate finding: `fab/findings.py:113` findings is 97 lines (cap 60).
+Move the `finding.triaged`, `finding.settled`, `signal.cleared`, and run/landing transition block into a documented private function.
+Pass its finding, event, and fold state explicitly; preserve updates to `found`, `asks`, and `foremen`.
+Keep `findings(events)` and every extracted function within the 60-line cap.
+Preserve log order, walk-end visibility, and all transitions required by `docs/design/fab.md`, 13.15, “Where each finding stands”.
+This refactor needs only `fab/findings.py`; use the existing `fab/tests/test_findings.py` coverage.
+Verify with `python3 -B -m fab.testrun` and the landing size gate.
+No files changed or builds run. The read-only environment prevents writing report.md; this response is the report.
