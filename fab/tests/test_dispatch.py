@@ -2073,7 +2073,7 @@ parts = []
     def test_main_invokes_tick_and_cli_registers_it(self):
         with patch("fab.dispatch.tick") as tick:
             self.assertEqual(cli.main(["tick", str(self.directory)]), 0)
-        tick.assert_called_once_with(self.directory, trigger="hand")
+        tick.assert_called_once_with(self.directory, trigger="hand", only=False)
 
     def test_main_reports_plan_or_shell_errors(self):
         for failure in (plan.PlanError("bad plan"), OSError("offline")):
@@ -2255,7 +2255,7 @@ class WakeTickTest(wakes.WakeTestCase):
     def test_main_passes_backstop_and_dry_run_ignores_trigger_and_want(self):
         with patch.object(dispatch, "tick", return_value=[]) as tick:
             self.assertEqual(dispatch.main([str(self.directory), "--trigger", "backstop"]), 0)
-        tick.assert_called_once_with(self.directory, trigger="backstop")
+        tick.assert_called_once_with(self.directory, trigger="backstop", only=False)
         wake.want("before")
         with patch.object(dispatch, "run", self.fake), \
                 patch.object(dispatch.machines, "load", return_value=wakes.HOSTS), \
@@ -2681,11 +2681,24 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual([a.task for a in actions if a.run_kind == "answer"], ["two"])
         self.assertIn(drafts.unit("answer", "two"), units(self.fake))
 
+    def test_only_ticks_the_given_plans_and_writes_no_page(self):
+        one, two = self.plan_dir("one"), self.plan_dir("two")
+        (log.home() / "plans").parent.mkdir(parents=True, exist_ok=True)
+        (log.home() / "plans").write_text(f"{one}\n")
+        with patch.object(dispatch, "_load_plans", return_value=([], [])) as load, \
+                patch.object(dispatch, "_page") as page:
+            dispatch.tick(two, sh=self.fake, hosts=self.hosts, only=True)
+        self.assertEqual(load.call_args.args[0], [two.resolve()])
+        page.assert_not_called()
+
     def test_main_two_directories_and_no_plans(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         with patch.object(dispatch, "tick", return_value=[]) as tick:
             self.assertEqual(dispatch.main([str(one), str(two)]), 0)
-        tick.assert_called_once_with(one, two, trigger="hand")
+        tick.assert_called_once_with(one, two, trigger="hand", only=False)
+        with patch.object(dispatch, "tick", return_value=[]) as tick:
+            self.assertEqual(dispatch.main(["--only", str(one)]), 0)
+        tick.assert_called_once_with(one, trigger="hand", only=True)
         self.assertEqual(self.tick(), [])
         self.assertEqual(self.out.getvalue(), "plans - none\n")
         self.assertEqual(self.fake.calls, [])

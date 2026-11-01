@@ -743,7 +743,7 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
 
 
 def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = None,
-         log_path: Path | None = None, trigger: str = "hand") -> list[Action]:
+         log_path: Path | None = None, trigger: str = "hand", only: bool = False) -> list[Action]:
     """Run one round under the tick lock (docs/design/fab.md, 13.9).
 
     Validate trigger before locking. Event ticks wait for the lock; hand and backstop
@@ -770,7 +770,7 @@ def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = 
             print("wake - " + ("; ".join(taken) or "-"))
         count = len(log.read(log_path))
         try:
-            return _round(plan_dirs, sh=sh, hosts=hosts, log_path=log_path)
+            return _round(plan_dirs, sh=sh, hosts=hosts, log_path=log_path, only=only)
         finally:
             for line in wake.settle(trigger, taken, log.read(log_path)[count:],
                                     path=path, log_path=log_path):
@@ -778,7 +778,7 @@ def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = 
 
 
 def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] | None,
-           log_path: Path | None) -> list[Action]:
+           log_path: Path | None, only: bool = False) -> list[Action]:
     """Load and run listed then given plans, sharing imports and builder measurements.
 
     Fetch each checkout once; print load failures and skip retired plans. With no loaded
@@ -786,7 +786,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     fresh events and spend calm extras once. Question and refusal actions share a log
     snapshot before fresh call decisions. Collect unowned runs last and refresh the page.
     """
-    directories = channel.plan_dirs(plan_dirs)
+    # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
+    directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
         return []
@@ -809,7 +810,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
                         host=record["host"], detail=record["run"])
         actions.append(action)
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
-    _page(plan_dirs, log_path)
+    if not only:
+        _page(plan_dirs, log_path)
     return actions
 
 
@@ -1224,9 +1226,10 @@ def _since_park(task_id: str, runs: list[str], events: list[dict]) -> list[str]:
 
 
 def main(argv: list[str]) -> int:
-    """`fab tick [PLAN_DIR...] [--trigger hand|event|backstop] [--dry-run]`.
+    """`fab tick [PLAN_DIR...] [--trigger hand|event|backstop] [--dry-run] [--only]`.
 
-    Tick listed and given plans; fail on bad loads.
+    Tick listed and given plans; fail on bad loads. With --only, tick the given plans alone and
+    write no page: a second tick beside fab's own, for plans kept off FAB_HOME/plans.
 
     Dry-run loads each plan without fetch, prints retirement, failed loads or decide's
     actions on the same log and hosts, with no calm. It neither chains plans nor acts,
@@ -1236,6 +1239,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("plan_dirs", type=Path, nargs="*", metavar="PLAN_DIR")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--trigger", choices=wake.TRIGGERS, default="hand")
+    parser.add_argument("--only", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.dry_run:
@@ -1249,7 +1253,7 @@ def main(argv: list[str]) -> int:
                 for action in decide(plan, tasks, events, hosts):
                     print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:
-            actions = tick(*args.plan_dirs, trigger=args.trigger)
+            actions = tick(*args.plan_dirs, trigger=args.trigger, only=args.only)
         return int(any(action.kind == "load" and action.detail.startswith("failed:") for action in actions))
     except (OSError, ValueError, Failed) as error:
         print("fab tick: " + " ".join(str(error).splitlines()), file=sys.stderr)
