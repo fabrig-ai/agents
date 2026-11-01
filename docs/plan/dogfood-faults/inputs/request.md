@@ -78,6 +78,27 @@ fix marked "fixed 11-01"; build them as designed:
    not built (`docs/design/tick.md` 7 now says so) and the gates on skeleton
    and contract tips (`docs/design/gates.md` 2, now designed).
 
+7. **Three paper cuts from the findings loop** (backlog item 3; its
+   handover listed them as seen, not fixed; each confirmed in the code):
+   - **A worktree rerun restarts from main.** `fab.run.start`'s worktree
+     path (repositories without slots, this one) adds the worktree at the
+     base for every kind but repair, so an implement rerun after a
+     `Question:` drops the work its earlier run pushed; the slot path
+     continues from `origin/<branch>` when it exists and merges the base in
+     (`docs/design/integration.md` 3's "reruns start from their pushed
+     branch"). Build the same continuation in the worktree path, sharing
+     item 5's "absent `origin/<branch>`" check.
+   - **Call units start without FAB_HOME.** `fab.dispatch._call` runs
+     `systemd-run --user` without the tick's environment, so a tick with a
+     non-default `FAB_HOME` (a replay's) starts calls that write to the
+     default home. Build: pass `--setenv=FAB_HOME=<fab.log.home()>`.
+   - **`fab/roles/cut-direct.md` says every branch is merged into the
+     trunk** ("Your branch is merged into the plan's trunk, not readied for
+     the queue", and "Its base is the trunk's tip"): true for an
+     integration plan only. Word it for both: an integration plan's
+     branches merge into its trunk; a queue plan's land on main (this
+     repository through `bin/fab land`, fabrig through its queue).
+
 Not in this request: units for `fab issues sync` and `fab report daily`
 (agents/status and ops own the units); `fab draft start` itself.
 
