@@ -71,7 +71,11 @@
   `<draft>: retired`. `_retire_plan` replaces the top-level assignment however
   the `retired` key is spelled, inserts `retired = true` before the first table
   only when the key is absent, and refuses final text that does not parse with
-  `retired` True (plan `docs/plan/edge-fixes`). A failure is `_take`'s
+  `retired` True (plan `docs/plan/edge-fixes`, retired 11-01; 32deb33). It
+  finds the statement through `fab.designer._plan_header` and `tomllib`, so a
+  multi-line value holding the text stays, and replaces the whole statement,
+  so a trailing comment goes. `[retired]` and split dotted keys, which
+  `load_plan` also refuses, raise inside the edit. A failure is `_take`'s
   note `finish <root> failed: ...`; the delivery not having run, `_take`'s
   `finally` records no `call.finished`, and the next tick tries again.
   `_queue_branch` reads origin's tip and readies again when it differs from
@@ -212,7 +216,11 @@
   at 18:26:21Z, the retire's `call.started` is 18:26:22Z, and its worktree and
   inventory were 18b5d7f, one commit behind: no `land_tries`, and `amend_brief`
   without `rebase`. The call brought itself to `origin/main` by hand; a retire
-  that trusted its brief would have called the part unbuilt.
+  that trusted its brief would have called the part unbuilt. Seen again at
+  edge-fixes' retire (11-01): `retire-spelling` landed as 32deb33 at 19:11:55Z,
+  the brief is 19:12:24Z, and its worktree and inventory were 717f4d5, one
+  commit behind, so it showed the old `_retire_plan` and no calls.md diff for
+  a part it called done. The call fast-forwarded by hand.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
@@ -231,8 +239,16 @@
   again at mechanisms-out's retire (11-01): calls.md 2 and 3 and
   integration.md 3 were written before its cut (f2d3ddb to f380344, 0a3a84e),
   so the seven designs its brief quoted carried only other plans' diffs.
+  Seen again at edge-fixes' retire (11-01): of its three designs, fab.md's
+  diff is d6fc657's and landing.md's is acceptance-fixes'.
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
+- **The request's third spelling is a reading** (3; plan
+  `docs/plan/edge-fixes`): `inputs/request.md` lists `"retired"`, `'retired'`
+  and `"retired"`, the first and last the same bytes. The cut took the third
+  for a unicode escape a tool layer decoded (`notes/decisions.md` 6), and
+  `test_retire_key_spellings_preserve_complete_plan` covers the bare key, both
+  quotings and `"r\u0065tired"`. The request does not say so.
 - **Designs a retire brief lists are read by the call** (3, 11-01), as the
   cut's design index names designs the cut reads itself: a departure from
   `execution-modes.md`'s "compiled by code" only for what the budget leaves

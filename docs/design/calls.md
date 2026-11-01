@@ -428,9 +428,11 @@ before it lands (2).
   edit, branch=<the call's branch>, trunk=<the call's branch>,
   worktree=FAB_HOME/retire/<root>)`, path the plan directory's
   plan.toml relative to the checkout (as `_check_call` finds it), author
-  fab, message `<draft>: retired`; the edit replaces a `retired = false`
-  line or inserts `retired = true` before the first table line, and an
-  edit finding no plan.toml raises. It is
+  fab, message `<draft>: retired`; the edit replaces the top-level `retired`
+  assignment, however the key is spelled, with `retired = true`, or inserts
+  that before the first table line only when the key is absent, and an
+  edit finding no plan.toml, or ending with text that does not parse with
+  `retired` True, raises. It is
   made only when the plan.toml does not already say it (`tomllib`'s
   `retired` is True), no `branch.landed` names the branch and
   `origin/<branch>` exists; otherwise the delivery takes its path as
