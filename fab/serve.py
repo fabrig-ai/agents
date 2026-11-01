@@ -12,7 +12,7 @@ from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fab import accounting, calls, channel, hosts as machines, log, overlaps
+from fab import accounting, calls, channel, hosts as machines, log, logins, overlaps
 
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
@@ -102,13 +102,33 @@ def _limits(event: dict) -> list[dict]:
             and "fable" not in name.lower()]
 
 
-def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[dict]:
+def _held_by(lent: list[logins.Login], hosts: Collection[str]) -> list[str]:
+    """Sorted public labels, one per login with a holder, never custody details."""
+    labels = []
+    for login in lent:
+        if login.holder is None:
+            continue
+        machine = logins.KINDS[login.kind].machine
+        if machine and login.holder in hosts and login.path == machine:
+            label = login.holder
+        else:
+            label = next((label for prefix, label in (("walk/", "QA walk"),
+                                                      ("after-landing/", "after-landing"),
+                                                      ("check/", "check"))
+                          if login.holder.startswith(prefix)), "other")
+        labels.append(label)
+    return sorted(labels)
+
+
+def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime,
+                   hosts: Collection[str]) -> list[dict]:
     """One subscription per account, with pace from its oldest usable window sample."""
-    kinds, retired, checks = {}, set(), {}
+    kinds, retired, checks, records = {}, set(), {}, []
     for event, stamp in sorted(dated, key=lambda pair: pair[1]):
         name = event.get("id")
         if not isinstance(name, str) or not re.fullmatch(r"(?:claude(?:-box)?|codex)-[0-9]+", name):
             continue
+        records.append(event)
         ev = event.get("ev")
         if ev == "login.added" and event.get("kind") in ("claude", "claude-box", "codex"):
             kinds[name] = "claude" if event["kind"] == "claude-box" else event["kind"]
@@ -116,6 +136,7 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
             retired.add(name)
         elif ev == "login.checked":
             checks.setdefault(name, []).append((event, stamp))
+    custody = logins.fold(records)
     groups = {}
     for name, samples in checks.items():
         event, stamp = samples[-1]
@@ -161,7 +182,9 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
         if len(parts) == 2 and all(parts):
             local, domain = parts
             label = f"{local[0]}***{local[-1] if len(local) > 2 else ''}@{domain.lower()}"
+        held_by = _held_by([custody[name] for name in names], hosts)
         subscriptions.append({"subscription": label, "kind": kind, "logins": len(names),
+                              "held": len(held_by), "held_by": held_by,
                               "plan": plan if isinstance(plan, str) and re.fullmatch(r"[a-z0-9_]{1,40}", plan)
                               else "",
                               "checked_age_s": int((now - stamp).total_seconds()),
@@ -285,7 +308,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                          "ratio": round(codex / claude, 1) if claude else None},
         "drafts": dict(sorted(drafts.items())),
         "overlaps": _public_overlaps(dated, known_drafts),
-        "subscriptions": _subscriptions(dated, now),
+        "subscriptions": _subscriptions(dated, now, hosts),
     }
 
 
@@ -373,6 +396,8 @@ def render(snapshot: dict) -> str:
                     state = " critical" if used >= 95 else " warning" if used >= 80 else ""
                     use = (f'<span class="meter{state}"><i style="width:{max(0, min(100, used)):g}%"></i>'
                            f'</span> {used:g}%')
+                if limit.get("name") and limit["name"] != "week":
+                    use += f' <small>· {_text(limit["name"])}</small>'
                 reset = "–"
                 if limit.get("resets") is not None:
                     try:
@@ -389,10 +414,12 @@ def render(snapshot: dict) -> str:
                     pace = "full in " + _duration(limit["full_at"] - now.timestamp())
                 elif limit.get("at_reset") is not None:
                     pace = f'lasts, {limit["at_reset"]:g}% at reset'
-                cells = (_text(label) if index == 0 else "", _text(limit.get("name", "–")), use,
+                held = (f'<span title="{_text(" · ".join(subscription["held_by"]) or "none")}">'
+                        f'{subscription["held"]}</span>') if index == 0 else ""
+                cells = (_text(label) if index == 0 else "", held, use,
                          reset, f"{rate:.1f}%/h" if rate is not None else "–", _text(pace))
                 rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
-        headings = ("Subscription", "Limit", "Used", "Resets", "Rate", "At this pace")
+        headings = ("Subscription", "Held", "Used", "Resets", "Rate", "At this pace")
         return ('<div class="scroll"><table><thead><tr>'
                 + "".join(f"<th>{heading}</th>" for heading in headings)
                 + '</tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>')

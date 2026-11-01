@@ -474,6 +474,10 @@ class SubscriptionsTest(unittest.TestCase):
         page = serve.render(current)
         self.assertIn("&lt;***&gt;@example.invalid", page)
         self.assertNotIn("<***>", page)
+        current["subscriptions"][0].update(held=1, held_by=['<host & "quoted">'])
+        page = serve.render(current)
+        self.assertIn('<span title="&lt;host &amp; &quot;quoted&quot;&gt;">1</span>', page)
+        self.assertNotIn('<host & "quoted">', page)
 
     def test_subscriptions_latest_recent_check_retirement_sorting_and_public_plan(self):
         events = [self.added(), self.checked(3600, plan="old"), self.checked(60),
@@ -508,6 +512,7 @@ class SubscriptionsTest(unittest.TestCase):
         current = serve.snapshot(list(reversed(events)), NOW, [])
         self.assertEqual(current["subscriptions"], [{
             "subscription": "c***1@example.invalid", "kind": "codex", "plan": "max", "logins": 2,
+            "held": 0, "held_by": [],
             "checked_age_s": 60, "limits": [{"name": "week", "used": 80, "resets": reset,
                                            "rate_per_h": None, "full_at": None, "at_reset": None}],
         }])
@@ -521,6 +526,7 @@ class SubscriptionsTest(unittest.TestCase):
                                   self.checked(name=name, plan="max")], NOW, [])
         self.assertEqual(current["subscriptions"], [{
             "subscription": "c***1@example.invalid", "kind": "claude", "plan": "max", "logins": 1,
+            "held": 0, "held_by": [],
             "checked_age_s": 0, "limits": [{"name": "week", "used": 80,
                                           "resets": NOW.timestamp() + 7200,
                                           "rate_per_h": None, "full_at": None, "at_reset": None}],
@@ -540,6 +546,7 @@ class SubscriptionsTest(unittest.TestCase):
                 current = serve.snapshot(list(reversed(events)), NOW, [])
                 self.assertEqual(current["subscriptions"], [{
                     "subscription": "s***d@example.invalid", "kind": "claude", "plan": "max", "logins": 2,
+                    "held": 0, "held_by": [],
                     "checked_age_s": 0, "limits": [{"name": "week", "used": 80, "resets": reset,
                                                   "rate_per_h": 10, "full_at": None, "at_reset": 100}],
                 }])
@@ -550,11 +557,14 @@ class SubscriptionsTest(unittest.TestCase):
     def test_subscriptions_latest_account_moves_login_to_new_group(self):
         events = [self.added(), self.added("codex-2"),
                   self.checked(3600), self.checked(1800, name="codex-2", email="codex-1@example.invalid")]
-        self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["logins"], 2)
+        events += [event("login.lent", 2000, id="codex-1", holder="walk/private-run", host="hel8", at="/private"),
+                   event("login.lent", 2000, id="codex-2", holder="hel8", host="hel8", at=".codex/auth.json")]
+        grouped = serve.snapshot(events, NOW, ["hel8"])["subscriptions"][0]
+        self.assertEqual((grouped["logins"], grouped["held"], grouped["held_by"]), (2, 2, ["QA walk", "hel8"]))
         events.append(self.checked(email="codex-2@example.invalid"))
         subscriptions = serve.snapshot(events, NOW, [])["subscriptions"]
         self.assertEqual(len(subscriptions), 2)
-        self.assertTrue(all(s["logins"] == 1 for s in subscriptions))
+        self.assertTrue(all(s["logins"] == 1 and s["held"] == 1 for s in subscriptions))
         previous = next(s for s in subscriptions if s["subscription"] == "c***1@example.invalid")
         self.assertEqual(previous["checked_age_s"], 1800)
 
@@ -643,6 +653,81 @@ class SubscriptionsTest(unittest.TestCase):
         self.assertIsNone(limit["used"])
         self.assertIsNone(limit["resets"])
 
+    def test_subscriptions_held_groups_machines_and_run_labels_without_custody_details(self):
+        email = "private-account@example.invalid"
+        uses = [("claude-1", "claude", "hel8", ".claude/.credentials.json"),
+                ("claude-2", "claude", "hetzner6", ".claude/.credentials.json"),
+                ("claude-box-1", "claude-box", "walk/private-walk", "/private/walk"),
+                ("claude-box-2", "claude-box", "walk/second-private-walk", "/private/walk-2"),
+                ("claude-3", "claude", "after-landing/private-tip/pair", "/private/pair"),
+                ("claude-4", "claude", "check/private-login", "/private/check"),
+                ("claude-5", "claude", "private-holder", "/private/other"),
+                ("claude-6", "claude", None, None),
+                ("codex-1", "codex", "hel8", ".codex/auth.json")]
+        events = []
+        for name, kind, holder, path in uses:
+            events += [self.added(name, kind),
+                       self.checked(name=name, email=email,
+                                    limits=[("week", 40, None), ("5 h", 92, None)])]
+            if holder is not None:
+                events.append(event("login.lent", 100, id=name, holder=holder,
+                                    host="private-host", at=path, sha="private-sha"))
+        before = copy.deepcopy(events)
+        current = serve.snapshot(list(reversed(events)), NOW, ["hetzner6", "hel8"])
+        self.assertEqual(events, before)
+        claude, codex = current["subscriptions"]
+        labels = ["QA walk", "QA walk", "after-landing", "check", "hel8", "hetzner6", "other"]
+        self.assertEqual((claude["logins"], claude["held"], claude["held_by"]), (8, 7, labels))
+        self.assertEqual((codex["logins"], codex["held"], codex["held_by"]), (1, 1, ["hel8"]))
+        page = serve.render(current)
+        self.assertEqual(page.count('<span title="' + " · ".join(labels) + '">7</span>'), 1)
+        self.assertEqual(page.count('<span title="hel8">1</span>'), 1)
+        self.assertIn('92% <small>· 5 h</small>', page)
+        for output in (json.dumps(current), page):
+            for secret in (email, "private-host", "private-sha", "private-host:/private/path",
+                           *(name for name, _, _, _ in uses),
+                           *(path for _, _, _, path in uses if path),
+                           *(holder for _, _, holder, _ in uses if holder and holder not in ("hel8", "hetzner6"))):
+                self.assertNotIn(secret, output)
+
+    def test_subscriptions_held_host_label_requires_the_kinds_machine_path(self):
+        for kind, path, expected in (("codex", ".codex/auth.json", "hel8"),
+                                     ("claude", ".claude/.credentials.json", "hel8"),
+                                     ("codex", ".claude/.credentials.json", "other"),
+                                     ("claude", ".codex/auth.json", "other"),
+                                     ("codex", "/private/.codex/auth.json", "other"),
+                                     ("claude-box", "", "other")):
+            with self.subTest(kind=kind, path=path):
+                name = kind + "-1"
+                events = [self.added(name, kind), self.checked(name=name),
+                          event("login.lent", 100, id=name, holder="hel8", host="hel8", at=path)]
+                subscription = serve.snapshot(events, NOW, ["hel8"])["subscriptions"][0]
+                self.assertEqual((subscription["held"], subscription["held_by"]), (1, [expected]))
+                self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["held_by"], ["other"])
+
+    def test_subscriptions_held_returns_retirement_and_relending_follow_the_fold(self):
+        events = []
+        for index in range(1, 4):
+            name = f"codex-{index}"
+            events += [self.added(name), self.checked(name=name, email="shared@example.invalid"),
+                       event("login.lent", 100, id=name, holder="hel8", host="hel8", at=".codex/auth.json")]
+        events += [event("login.returned", 30, id="codex-1", sha="returned-sha"),
+                   event("login.retired", 20, id="codex-3", reason="private-reason"),
+                   event("login.lent", -1, id="codex-1", holder="private-future", host="private", at="/private"),
+                   {**event("login.returned", id="codex-2", sha="invalid-sha"), "ts": "invalid"}]
+        current = serve.snapshot(list(reversed(events)), NOW, ["hel8"])
+        subscription = current["subscriptions"][0]
+        self.assertEqual((subscription["logins"], subscription["held"], subscription["held_by"]),
+                         (2, 1, ["hel8"]))
+        events.append(event("login.returned", 10, id="codex-2", sha="returned-sha"))
+        current = serve.snapshot(events, NOW, ["hel8"])
+        self.assertEqual(current["subscriptions"][0]["held"], 0)
+        self.assertEqual(current["subscriptions"][0]["held_by"], [])
+        self.assertIn('<span title="none">0</span>', serve.render(current))
+        events.append(event("login.lent", id="codex-1", holder="check/private-id", host="hel8", at="/private"))
+        subscription = serve.snapshot(events, NOW, ["hel8"])["subscriptions"][0]
+        self.assertEqual((subscription["held"], subscription["held_by"]), (1, ["check"]))
+
     def test_subscriptions_private_account_and_custody_fields_never_leave_fold(self):
         private = {"email": "private@example.invalid", "holder": "private-holder", "host": "private-host",
                    "path": "/private/path", "plan": "private@example.invalid"}
@@ -670,11 +755,17 @@ class SubscriptionsTest(unittest.TestCase):
         current = serve.snapshot(events, NOW, [])
         page = serve.render(current)
         self.assertIn('<h2>Subscriptions</h2><div class="panel"><div class="scroll"><table>', page)
-        self.assertIn('<th>Subscription</th><th>Limit</th><th>Used</th><th>Resets</th>'
+        self.assertIn('<th>Subscription</th><th>Held</th><th>Used</th><th>Resets</th>'
                       '<th>Rate</th><th>At this pace</th>', page)
         self.assertEqual(page.count("Claude · max · c***7@example.invalid · 1 sign-in</td>"), 1)
         self.assertIn('<span class="meter warning"><i style="width:80%"></i></span> 80%', page)
-        self.assertIn('<span class="meter critical"><i style="width:95%"></i></span> 95%', page)
+        self.assertIn('<span class="meter critical"><i style="width:95%"></i></span> 95% <small>· 5 h</small>', page)
+        self.assertIn('14% <small>· other 1 d</small>', page)
+        self.assertNotIn('<th>Limit</th>', page)
+        self.assertNotIn('<td>week</td>', page)
+        self.assertNotIn('<small>· week</small>', page)
+        self.assertEqual(page.count('<span title="none">0</span>'), 2)
+        self.assertIn('<tr><td></td><td></td><td><span class="meter critical">', page)
         self.assertIn('<span class="meter"><i style="width:4%"></i></span> 4%', page)
         self.assertIn('<time datetime="2026-11-01T03:39:00Z" title="2026-11-01 03:39 UTC">'
                       'in 3 h 9 min</time>', page)
