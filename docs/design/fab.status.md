@@ -28,7 +28,7 @@
   machine's logins, the user's new sign-ins and QA's six (moved 11-01).
   `fab after-landing --live` borrows them for `live-temper`, `live-smith`
   and `live-skein` (whose tests read logins' files since fabrig 978e17e);
-  the after-landing unit on hetzner10 runs with it, on the cheapest models.
+  the after-landing unit on hetzner8 runs with it, on the cheapest models.
 
 ## Gaps and departures
 
@@ -59,8 +59,8 @@
   by the tasks `report-base`, `report-code`, `report-landing` and
   `report-command`; `fab report` is not a command until the last lands. No
   timer runs `fab report daily` yet.
-- **After landing is live:** `fab-after-landing.service` on hetzner10,
-  slot 7, since 11-01; the tick imports its verdicts onto the user's page.
+- **After landing is live:** `fab-after-landing.service` on hetzner8,
+  slot 7, since 11-01 (hetzner10 until it retired, 11-01); the tick imports its verdicts onto the user's page.
   The old `tools/after-landing` (hetzner7, slot 4) stopped with hetzner7,
   which no longer answers. A new red reaches no task yet: the page is where
   it is heard.

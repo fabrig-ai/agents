@@ -325,7 +325,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   after-landing`); it refuses any other slot.
 - **Its machine and slot are config:** the builder with the role
   `after-landing` in `fab/hosts.toml` names its `after_landing_slot`
-  (hetzner10, slot 7). `fab after-landing install`, run by the deploy on
+  (hetzner8, slot 7). `fab after-landing install`, run by the deploy on
   every machine as `fab queue install` is (section 6, `fab/units.py`),
   claims that slot for good and writes `fab-after-landing.service`; a stop
   waits up to two hours for the run in progress, so a deploy never cuts one
