@@ -87,7 +87,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `Infra:` run without asking anyone. The rerun (kind `repair`) continues
   from the branch the run pushed, or starts from the task's base when the
   run pushed nothing (fixed 11-01: it started from `origin/<branch>` only,
-  which a run that never pushed lacks, so its start failed every tick).
+  which a run that never pushed lacks, so its start failed every tick). A
+  probe of the branch that errors (ssh or git, not an absent ref) fails the
+  start rather than reading as nothing pushed.
 - **Done means checked:** the branch is pushed and its checks passed inside
   the run (this repository: `bin/fab test`; fabrig: precheck and the merged
   readers' tests, `agents/implementer.md` in fabrig).

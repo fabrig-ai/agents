@@ -28,19 +28,28 @@
   from the object store is a failure, not an overlap (`overlaps-git`,
   08afbf7). The checkout wording of 4 was matched to the code with the
   design.
-- **Retire works from main once the trunk has landed** (3, "It then works
-  from main"; plan `docs/plan/dogfood-faults`, retired 11-01; 600f5a4):
-  `fab.designer.main` starts the retire call from `main` when
-  `fab.integration.trunk_landed`; `fab.dispatch._deliver` merges into the
-  trunk only until then, after which a call's branch goes through the queue
-  plan's path (`_queue_branch` for fabrig); `_checkout`, given the round's
-  events, detaches the plan checkout at `origin/main` on every fetch once
-  the queue's `branch.landed` for `<draft>/integration` is logged, and
-  fast-forwards to the upstream otherwise. Departure: `_checkout` runs
-  before the plan loads, so it takes the draft from the plan directory's
-  name (`docs/plan/<draft>`, as every plan's is) rather than
-  `trunk_landed`'s `plan.draft`. Tested with fake runners and fixture logs
-  (`test_designer.py`, `test_dispatch.py`).
+- **Every call works from main once the trunk has landed** (3, "It then
+  works from main"; plans `docs/plan/dogfood-faults`, retired 11-01, 600f5a4,
+  and `docs/plan/df-followups`, retired 11-01, 009d591):
+  `fab.integration.call_base` is `main` for an integration plan once
+  `trunk_landed` (this draft's queue `branch.landed` for
+  `<draft>/integration`), else `plan.trunk`; `fab.designer.main` (every
+  role, the retire among them), `fab.calls.main` (skeleton, answer, review,
+  amend, settle), `fab.triage.main`, and `fab.dispatch`'s `_start` (tasks),
+  `_foreman` and `_examine` (refusal repairs) start from it, a fix kind
+  keeping `main`.
+  `fab.dispatch._integration` returns after `_lift_catch_up` once the trunk
+  has landed, before any `_contains` or `rev-parse` of `origin/<trunk>`, so
+  the tick logs no `failed:` note for the gone trunk. `fab.dispatch._deliver`
+  merges into the trunk only until then, after which a call's branch goes
+  through the queue plan's path (`_queue_branch` for fabrig); `_checkout`,
+  given the round's events, detaches the plan checkout at `origin/main` on
+  every fetch once the landing is logged, and fast-forwards to the upstream
+  otherwise. Departure: `_checkout` runs before the plan loads, so it takes
+  the draft from the plan directory's name (`docs/plan/<draft>`, as every
+  plan's is) rather than `trunk_landed`'s `plan.draft`. Tested with fake
+  runners and fixture logs (`test_integration.py`, `test_designer.py`,
+  `test_calls.py`, `test_triage.py`, `test_dispatch.py`).
 - **A stop asks the answerer** (3, "A stop asks" and "The answerer judges a
   stop"; plan dogfood-faults; 6e03edc, 4962fb5, feb2272):
   `fab.integration.stopped` gives the `plan.stopped` (`why` `red`,
@@ -57,7 +66,8 @@
   `fab.foreman.questions` takes the stop's question with no task (specless,
   queued); `fab.calls._answer_questions` attaches the `plan.stopped`'s
   report and `answer_brief` shows `Question: <draft>/integration (stop)`
-  with no spec; `fab/roles/answerer.md` has the request's sentence.
+  with no spec, its `Report:` line `(none: the findings are quoted below)`
+  when the stop's report is "" (df-followups, 56bd6f9); `fab/roles/answerer.md` has the request's sentence.
   `plan.stopped` joins no wake list (`question.asked` is in `wake.AGAIN`).
   Tested with fixture logs (`test_integration.py`, `test_dispatch.py`,
   `test_foreman.py`, `test_calls.py`).
@@ -78,7 +88,17 @@
   `ready/calls/retire-2c39…` and landed at fc1651448b, and the plan
   checkout detached there; its landing was never imported (no
   `branch.landed` or `call.finished`; tick.md 5, start-commands item 4).
-  No trunk has stopped since the stop's records were built.
+  No trunk has stopped since the stop's records were built. The other calls,
+  foremen and repairs from main after the landing (df-followups, 11-01) are
+  untried live: no trunk has landed since.
+- **A foreman's answer or a repair's section after the landing still
+  commits from the trunk** (3, "so does every other call, foreman and
+  repair"): `fab.dispatch._settle` and `_remedy` pass `trunk=plan.trunk` to
+  `fab.foreman.commit` and `fab.repairs.commit`, whose `fab.spec_edit.commit`
+  adds its worktree at `origin/<trunk>`; once the queue deleted the trunk
+  and the clone pruned it, that settle fails each tick. Only a question or
+  refusal still open when the trunk lands reaches it (every task has merged
+  by then); df-followups' request named the starts, not the settles.
 - **The flow of a real run (3) is on main, not run live yet**
   (10-31): the options with the run's defaults (agents-rebuild names the
   old flow), the trunk throughout, the tick's merges with the baseline

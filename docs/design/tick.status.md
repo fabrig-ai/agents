@@ -23,8 +23,11 @@
   a conflicting merge for the run to resolve; review and rebase start from
   the base. Before it, an `Infra:` rerun that had pushed nothing failed its
   start every tick, and a worktree implement rerun dropped its pushed work.
-  Tested with fake runners (`test_run.py`, `test_dispatch.py`'s
-  `OptimisticStartTest`).
+  Only an absent ref (`rev-parse` exit 1) falls back to the base: any other
+  exit, an ssh 255 or a git 128, raises `fab.sh.Failed` before the checkout
+  is prepared or Codex launched, as `fab.dispatch._contains` does (plan
+  `docs/plan/df-followups`, retired 11-01; 56bd6f9). Tested with fake
+  runners (`test_run.py`, `test_dispatch.py`'s `OptimisticStartTest`).
 - **A failed task run parks for the answerer** (11-01, findings-loop; 44f2a0a):
   `fab.run.collect` logs a failed implement, repair or rebase run's report as a
   `question.asked` with `park` (calls.md 2), so it queues at once; it parked
