@@ -2572,8 +2572,67 @@ session still walks by hand; walks run by fab are the section's last part.
 - Deployment (the token file, a transient timer on hel8 running
   `fab issues sync` every 2 minutes) is by hand.
 
+### 13.17 Drafts beside each other
+
+At the user's word (11-01), after the catch-ups of 13.12. Several drafts run
+at once, each on its own trunk, and nothing told one draft what another was
+changing: on 10-31 each conflict between them surfaced only when the second
+merged with main (13.12's numbers). fab keeps no leases (a spec's `files`
+say what a task owns, and refuse nothing); it gives each draft a cheap,
+early view of the others instead, in two pieces, neither of which builds
+anything.
+
+- **The overlap probe.** Once per tick, after every plan has ticked, fab
+  looks at each pair of loaded plans that are integration plans with
+  `ready`, in the same repository, not retired, whose trunk is on origin and
+  has not landed on main (no queue `branch.landed` for task
+  `<draft>/integration`). A replay (`ready` false) sits on an old base and is
+  never probed. For each pair it runs `git merge-tree --write-tree
+  --name-only --no-messages origin/<trunk a> origin/<trunk b>` in the first
+  of the two plans' checkouts (already fetched by the tick): exit 0 is no
+  overlap, exit 1 lists the conflicting paths after the tree's id, any other
+  exit is a failure note and no event. Since both trunks catch up with main
+  (13.12), merging the two trunks is enough; main itself is their common
+  ancestor's side.
+  - It logs `trunks.overlap` (`drafts`: the two drafts in name order,
+    `tips`: their trunk tips, `files`: the conflicting paths in order, at
+    most 40, `more`: how many were left out) only when a pair's `files`
+    differ from the last `trunks.overlap` logged for that pair; an empty
+    `files` after a non-empty one says the overlap cleared. A pair whose
+    plan stops being probed (landed, retired, unlisted) logs nothing more.
+  - The fold is pure (`fab/overlaps.py`): the pairs to probe from the
+    loaded plans and the log, the parse of merge-tree's output, and whether
+    a result is news. The shell is one function the tick calls with its
+    runner.
+  - It costs a few git commands per pair per tick; with five drafts at
+    once that is ten pairs.
+- **What it is for, for now: report only.** Nothing waits on an overlap
+  and nothing is started by one: the trunk that lands second still meets
+  the conflict at its catch-up and repairs it there (13.12). The status
+  page (13.14) shows each pair whose last `trunks.overlap` has files: the
+  two drafts, the count and the first few paths. Whether an overlap should
+  also reorder work, or start an early repair, waits for the numbers: how
+  often pairs overlap, and how often an overlap becomes a catch-up repair.
+- **The cut sees the drafts beside it.** A cut's brief (13.3, 13.12) gains
+  a section `Drafts beside this one`: for every other loaded plan of the
+  same repository that is not retired and has not landed (as above, or a
+  queue plan with tasks not landed), its draft and each task not yet
+  landed with its `files`, at most 200 lines in all (the rest counted). The
+  cut's role text says what to do with it, in one line: prefer task
+  boundaries and an order that keep this draft's early work off files
+  another draft is changing, and say in `plan.md` which overlaps it could
+  not avoid. It refuses nothing and asks nothing.
+- **Later** (section 14): a build of the merged trunks (a `cargo check` of
+  each overlapping pair, in an idle slot like a check along the way),
+  which would catch the semantic conflicts a textual merge misses, such as
+  the jigq/debt compile red; landing a trunk at slice boundaries, so other
+  drafts see its changes sooner; both once the probe's numbers ask for them.
+
 ## 14. Later
 
+- Drafts beside each other (13.17): a `cargo check` of each overlapping
+  pair of trunks; landing a trunk at slice boundaries; overlaps acting on
+  the order of work, all once the probe's numbers ask for them.
 - (The self-critique is 13.1's, part `critique`, not later.)
 
 - fabrig's api gate, the public API against the skeleton (rustdoc JSON);

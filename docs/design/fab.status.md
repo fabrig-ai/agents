@@ -5,6 +5,9 @@
 
 ## Present
 
+- **Drafts beside each other** (13.17, 11-01): designed; the overlap probe,
+  its page line and the cut's `Drafts beside this one` are cut as plan
+  `docs/plan/trunk-overlaps`, not built yet.
 - **Reds reach their owners** (11-01; the user, after the night of 10-31,
   when every after-landing red and a hand-pushed rejection were handled by
   sessions noticing them by chance). Built and wired into the tick:
