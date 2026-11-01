@@ -1255,7 +1255,9 @@ class LadderTickTest(unittest.TestCase):
                          [Action("call", task="ladder/triage", run_kind="triage")])
         self.assertEqual([argv for argv in self.fake.argvs() if argv[0] == "systemd-run"],
                          [["systemd-run", "--user", "--collect", "--unit",
-                           drafts.unit("triage", "ladder/triage"), FAB, "call", "triage",
+                           drafts.unit("triage", "ladder/triage"),
+                           f"--setenv=FAB_HOME={log.home()}",
+                           FAB, "call", "triage",
                            "--plan", str(self.directory.resolve())]])
 
     def test_passing_walk_waits_until_thirty_minutes(self):
@@ -1891,11 +1893,23 @@ parts = []
                                    Action("call", task="next", run_kind="skeleton")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("skeleton", "draft/next"),
+                          f"--setenv=FAB_HOME={log.home()}",
                           FAB, "call", "skeleton", "next", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n"
                          + f"page - {log.home() / channel.PAGE}\n")
         self.assertEqual(len(log.read()), 1)
+
+    def test_call_unit_inherits_nondefault_fab_home(self):
+        """A replay tick passes its runtime home as one unit environment argument."""
+        replay_home = self.home / "replay home"
+        with patch.dict(os.environ, {"FAB_HOME": str(replay_home)}):
+            self.append(event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
+            self.assertEqual(self.tick(), [Action("call", task="draft", run_kind="answer")])
+        self.assertEqual(self.fake.argvs()[-1],
+                         ["systemd-run", "--user", "--collect", "--unit", drafts.unit("answer", "draft"),
+                          f"--setenv=FAB_HOME={replay_home}", FAB, "call", "answer",
+                          "--plan", str(self.directory)])
 
     def test_direct_part_without_specs_starts_no_design_call(self):
         path = self.directory / "plan.toml"
@@ -1919,6 +1933,7 @@ parts = []
                                       Action("call", task="core", run_kind="contract")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("contract", "draft/core"),
+                          f"--setenv=FAB_HOME={log.home()}",
                           FAB, "call", "contract", "core", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
 
@@ -1930,6 +1945,7 @@ parts = []
         self.assertEqual(self.tick(), [Action("call", task="draft/retire", run_kind="retire")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("retire", "draft/retire"),
+                          f"--setenv=FAB_HOME={log.home()}",
                           FAB, "call", "retire", "--plan", str(self.directory)])
         self.assertEqual(self.calls, [])
 
@@ -2039,6 +2055,7 @@ parts = []
         self.assertEqual(self.tick(), [Action("call", task="draft", run_kind="answer")])
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("answer", "draft"),
+                          f"--setenv=FAB_HOME={log.home()}",
                           FAB, "call", "answer", "--plan", str(self.directory)])
         self.assertEqual(len([e for e in log.read() if e["ev"] == "call.started"]), 2)
 
@@ -2327,6 +2344,7 @@ parts = []
         self.append(event("question.asked", text="Which?"), *chain_history("hold"), path=path)
         self.assertEqual(self.tick(log_path=path), [Action("call", task="root", run_kind="settle")])
         self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("settle", "root/settle"),
+                       f"--setenv=FAB_HOME={log.home()}",
                        FAB, "call", "settle", "root", "--plan", str(self.directory)], self.fake.argvs())
         self.append(dict(ev="call.started", call="settle-1", role="settle", subject="draft/core/settle",
                          settles="root"), path=path)
@@ -2462,7 +2480,8 @@ parts = []
                     dict(ev="call.ended", call="old-amend", outcome="failed"))
         self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
         self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("amend", "root"),
-                           FAB, "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
+                       f"--setenv=FAB_HOME={log.home()}",
+                       FAB, "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
         self.land.assert_not_called()
 
     def test_finish_answer_uses_latest_call_line_then_root_fallback(self):

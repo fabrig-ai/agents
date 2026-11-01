@@ -909,7 +909,7 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
         argv.append(action.task)
     argv.extend(["--plan", str(plan_dir.resolve())])
     sh(["systemd-run", "--user", "--collect", "--unit",
-        drafts.unit(role, key), *argv], check=True)
+        drafts.unit(role, key), f"--setenv=FAB_HOME={log.home()}", *argv], check=True)
 
 
 def _finish(action: Action, *, log_path: Path | None) -> None:
