@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, wake
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -100,6 +100,8 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     if (plan.reviews and "review" not in roles and subject not in parked | subjects
             and _review_due(plan.draft, tasks, events, now)):
         actions.append(Action("call", task=subject, run_kind="review"))
+    if plan.rungs and triage.due(plan, events, now):
+        actions.append(Action("call", task=triage.subject(plan.draft), run_kind="triage"))
     subject = designer.subject(plan.draft, "retire")
     if ("retire" not in roles and subject not in parked | subjects
             and designer.retire_due(plan, tasks, events)):
@@ -1036,6 +1038,10 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     if released:
         plan, tasks = _load_plan(directory, log.read(log_path), checkout=checkout, sh=sh)
     events = log.read(log_path)
+    if plan.rungs:
+        _record_triage(plan, events, log_path=log_path)
+        _record_passes(plan, log.read(log_path), directory, sh=sh, log_path=log_path)
+        events = log.read(log_path)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
     tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind != tier_reds.KIND},
              **tier_reds.tasks(plan, events, folded=folded)}
@@ -1065,6 +1071,55 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     _check_calls(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     _integration(plan, tasks, checkout, hosts, sh=sh, log_path=log_path)
     return released + actions
+
+
+def _record_triage(plan: Plan, events: list[dict], *, log_path: Path | None) -> None:
+    """Read ended triage reports and log their decisions once (docs/design/fab.md, 13.15).
+
+    Unreadable reports get a note without a call field so decisions retries the call.
+    Print one line when the step logs decisions or notes.
+    """
+    reports = {}
+    records = []
+    for event in events:
+        if (event.get("ev") != "call.ended" or event.get("role") != triage.ROLE
+                or event.get("subject") != triage.subject(plan.draft)
+                or event.get("outcome") != "done" or not isinstance(event.get("call"), str)):
+            continue
+        identifier = event["call"]
+        path = log.home() / "calls" / identifier / "report.md"
+        try:
+            reports[identifier] = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            records.append(("note", dict(task=triage.subject(plan.draft),
+                                        text=f"triage report {path}: " +
+                                        " ".join(str(error).splitlines()))))
+    records.extend(triage.decisions(plan, events, reports))
+    for ev, fields in records:
+        log.append(ev, path=log_path, **fields)
+    if records:
+        print(f"triage {plan.draft} {len(records)} records")
+
+
+def _record_passes(plan: Plan, events: list[dict], directory: Path, *, sh: Runner,
+                   log_path: Path | None) -> None:
+    """Read editions once and log rerun passes before decide (docs/design/fab.md, 13.15).
+
+    A failed edition read notes the cause and leaves all passes for another round.
+    Print one line when the step logs passes or a note.
+    """
+    try:
+        editions = walks.editions(plan, directory, sh=sh)
+    except (OSError, ValueError, Failed) as error:
+        failure = " ".join(str(error).splitlines())
+        log.append("note", path=log_path, task=plan.draft, text=f"rung passes failed: {failure}")
+        print(f"passes {plan.draft} failed: {failure}")
+        return
+    passed = findings.passes(plan, events, editions)
+    for fields in passed:
+        log.append("rung.passed", path=log_path, **fields)
+    if passed:
+        print(f"passes {plan.draft} {len(passed)} rungs")
 
 
 def _merge_cut(plan: Plan, directory: Path, checkout: Path, hosts: Mapping[str, Host], *,
