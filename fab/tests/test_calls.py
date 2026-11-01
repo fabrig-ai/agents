@@ -634,6 +634,92 @@ class StartTest(unittest.TestCase):
             self.assertEqual(call_review.chains(log.read()), {})
             self.assertEqual(channel.asks((), log.read()), [])
 
+    def test_report_only_detaches_logs_no_branch_and_never_pushes(self):
+        for fabrig in (False, True):
+            for base in ("main", "demo/integration"):
+                with self.subTest(fabrig=fabrig, base=base), tmp_home() as root:
+                    repo = log.home() / "repos/fabrig" if fabrig else root
+                    repo.mkdir(parents=True, exist_ok=True)
+
+                    def claude(call):
+                        directory = Path(call.cwd).parent
+                        brief = (directory / "brief.md").read_text()
+                        self.assertIn(f"- Call: {directory.name}", brief)
+                        self.assertIn(str(directory / "report.md"), brief)
+                        self.assertNotIn(f"calls/{directory.name}`", brief)
+                        self.assertNotIn("branch", log.read()[-1])
+                        write(directory / "report.md", "Done: 1 decisions\nfinding-1: backlog: off path\n")
+                        return Result(0, "{}")
+
+                    fake = FakeRunner().on(["claude"], claude)
+                    fields = {"draft": "demo", "branch": "must-not-be-logged"}
+                    result = calls.start("answer", "demo/triage", repo,
+                                         "# Call facts\n\npreview\n", sh=fake,
+                                         base=base, fields=fields, report_only=True)
+                    directory = Path(result["report"]).parent
+                    self.assertEqual(result, {"call": directory.name, "branch": "",
+                                              "outcome": "done", "report": str(directory / "report.md")})
+                    self.assertEqual(fake.argvs(), [
+                        ["git", "fetch", "origin"],
+                        ["git", "worktree", "add", "--detach", str(directory / "wt"), f"origin/{base}"],
+                        calls.claude_argv(directory / "brief.md", directory / "wt", effort="medium"),
+                        ["git", "worktree", "remove", "--force", str(directory / "wt")],
+                    ])
+                    self.assertEqual([call.cwd for call in fake.calls],
+                                     [str(repo), str(repo), str(directory / "wt"), str(repo)])
+                    started, ended = log.read()
+                    expected = {"ev": "call.started", "call": directory.name, "role": "answer",
+                                "subject": "demo/triage", "draft": "demo"}
+                    if base != "main":
+                        expected["trunk"] = base
+                    self.assertEqual({key: value for key, value in started.items() if key != "ts"}, expected)
+                    self.assertEqual(ended["outcome"], "done")
+                    self.assertEqual(fields, {"draft": "demo", "branch": "must-not-be-logged"})
+                    self.assertEqual((log.home() / "tick.want").read_text(), f"call {result['call']}\n")
+
+    def test_report_only_failure_removes_worktree_and_never_pushes(self):
+        for raises in (False, True):
+            with self.subTest(raises=raises), tmp_home():
+                def claude(call):
+                    if raises:
+                        raise OSError("cannot launch Claude")
+                    return Result(1, "{}", "failed")
+
+                fake = FakeRunner().on(["claude"], claude)
+                repo = log.home() / "repos/fabrig"
+                if raises:
+                    with self.assertRaisesRegex(OSError, "cannot launch"):
+                        calls.start("answer", "demo/triage", repo, "Brief.", sh=fake, report_only=True)
+                    self.assertEqual([event["ev"] for event in log.read()], ["call.started"])
+                else:
+                    result = calls.start("answer", "demo/triage", repo, "Brief.", sh=fake, report_only=True)
+                    self.assertEqual(result["outcome"], "failed")
+                    self.assertEqual(log.read()[-1]["outcome"], "failed")
+                self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+                self.assertFalse(any(argv[:2] == ["git", "push"] for argv in fake.argvs()))
+                self.assertNotIn("branch", log.read()[0])
+
+    def test_report_only_rejects_a_branch_before_starting(self):
+        for branch in ("calls/root", ""):
+            with self.subTest(branch=branch), tmp_home() as root:
+                fake = FakeRunner()
+                with self.assertRaisesRegex(ValueError, "branch"):
+                    calls.start("answer", "demo/triage", root, "Brief.", sh=fake,
+                                branch=branch, report_only=True)
+                self.assertEqual(fake.calls, [])
+                self.assertFalse((log.home() / "calls").exists())
+                self.assertEqual(log.read(), [])
+
+    def test_report_only_preparation_failure_never_launches_claude(self):
+        for command in (["git", "fetch"], ["git", "worktree", "add"]):
+            with self.subTest(command=command), tmp_home() as root:
+                fake = FakeRunner().on(command, Result(1, err="cannot prepare worktree"))
+                with self.assertRaises(Failed):
+                    calls.start("answer", "demo/triage", root, "Brief.", sh=fake, report_only=True)
+                self.assertEqual(fake.argvs()[0], ["git", "fetch", "origin"])
+                self.assertEqual(fake.argvs()[-1][:len(command)], command)
+                self.assertEqual(log.read(), [])
+
     def test_start_commands_artifacts_events_usage_and_outcome(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)

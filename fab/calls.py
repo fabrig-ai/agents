@@ -469,14 +469,16 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
           log_path: Path | None = None, branch: str | None = None,
           amends: str | None = None, base: str = "main",
-          fields: Mapping[str, object] | None = None) -> dict:
+          fields: Mapping[str, object] | None = None, report_only: bool = False) -> dict:
     """Run a fresh call, keeping its own id, directory, brief, report and result artifacts.
 
     Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/<base>, fetching first
     when base is not main (also for fabrig), or fetch origin and
-    reset the supplied branch from origin/<branch> with worktree add -B. Rebind Call facts
-    and insert the subject's user answers after them, before the next # section or at the
-    end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
+    reset the supplied branch from origin/<branch> with worktree add -B. With report_only,
+    fetch origin and detach at origin/<base>, log no branch and push nothing; return
+    branch "" (docs/design/fab.md, 13.15). A supplied branch is a ValueError in this mode.
+    Rebind Call facts and insert the subject's user answers after them, before the next
+    # section or at the end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
     brief before facts and answers are bound. Log call.started (including amends when
     supplied, trunk when base is not main, and fields), run Claude without
     nested-session environment markers, keep its stdout as
@@ -487,9 +489,11 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     outcome, report}."""
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
+    if report_only and branch is not None:
+        raise ValueError("report_only cannot use a branch")
     call_id = f"{role}-{uuid.uuid4().hex}"
     existing = branch is not None
-    branch = branch if existing else f"calls/{call_id}"
+    branch = "" if report_only else (branch if existing else f"calls/{call_id}")
     directory = log.home() / "calls" / call_id
     directory.mkdir(parents=True)
     worktree = directory / "wt"
@@ -498,20 +502,28 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     brief = _bind_brief(brief, call_id, branch, str(report_path),
                         channel.answers_text(subject, log.read(log_path)))
     fabrig = repo.resolve() == (log.home() / "repos/fabrig").resolve()
-    if existing or fabrig or base != "main":
+    if report_only or existing or fabrig or base != "main":
         sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
-    sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
-        f"origin/{branch}" if existing else f"origin/{base}"], cwd=str(repo), check=True)
+    if report_only:
+        sh(["git", "worktree", "add", "--detach", str(worktree), f"origin/{base}"],
+           cwd=str(repo), check=True)
+    else:
+        sh(["git", "worktree", "add", "-B" if existing else "-b", branch, str(worktree),
+            f"origin/{branch}" if existing else f"origin/{base}"], cwd=str(repo), check=True)
     began = time.monotonic()
     try:
         atomic.write(brief_path, brief)
         fields = dict(fields or {})
+        if report_only:
+            fields.pop("branch", None)
+        else:
+            fields["branch"] = branch
         if amends is not None:
             fields["amends"] = amends
         if base != "main":
             fields["trunk"] = base
         log.append("call.started", path=log_path, call=call_id, role=role, subject=subject,
-                   branch=branch, **fields)
+                   **fields)
         environment = {key: value for key, value in os.environ.items()
                        if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
         result = sh(claude_argv(brief_path, worktree, effort=role_effort(role)), cwd=str(worktree),
@@ -520,7 +532,7 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
         atomic.write(directory / "stream.jsonl", result.out)
         atomic.write(directory / "stderr.log", result.err)
         status = _call_result(report_path)
-        if fabrig:
+        if fabrig and not report_only:
             sh(["git", "push", "origin", branch], cwd=str(repo), check=True)
         log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
                    outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
