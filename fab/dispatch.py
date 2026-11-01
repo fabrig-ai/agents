@@ -1571,7 +1571,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
     subject = f"{plan.draft}/integration"
     step = None
     try:
-        main = None
+        main = trunk = None
         if plan.landing == "integration" and plan.ready:
             argv = ["git", "merge-base", "--is-ancestor", "origin/main", f"origin/{plan.trunk}"]
             ancestor = sh(argv, cwd=str(checkout))
@@ -1579,11 +1579,17 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                 main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
             elif not ancestor.ok:
                 raise Failed(argv, ancestor)
-        step = integration.next_step(plan, tasks, events, main=main)
+            trunk = sh(["git", "rev-parse", f"origin/{plan.trunk}"],
+                       cwd=str(checkout), check=True).out.strip()
+        step = integration.next_step(plan, tasks, events, main=main, trunk=trunk)
         if step is None:
             return
         detail = step.detail
-        if step.kind == "catch-up":
+        if step.kind == "caught":
+            main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
+            log.append("branch.landed", path=log_path, task=subject, branch="main", tip=main,
+                       main=step.tip, into=plan.trunk, by="hand")
+        elif step.kind == "catch-up":
             _catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)
         elif step.kind == "check":
             tip = (_catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)
@@ -1611,7 +1617,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
     except (OSError, ValueError, Failed) as error:
         detail = "failed: " + " ".join(str(error).splitlines())
         log.append("note", path=log_path, task=subject, text=detail)
-    print(f"integration {plan.draft} {step.kind if step else 'catch-up'} {detail}")
+    print(f"integration {plan.draft} {step.kind if step else '-'} {detail}")
 
 
 def _integration_check(plan: Plan, tip: str, hosts: Mapping[str, Host], events: list[dict], *,
