@@ -48,8 +48,9 @@ fix marked "fixed 11-01"; build them as designed:
      and every later one (`repair_tasks`);
    - a clean catch-up after a `catch-up` stop logs the stop's
      `question.answered` (answer `lifted by a clean catch-up`, `by` `tick`);
-   - `plan.stopped` joins no wake list (`fab/wake.py`): it changes no
-     decision, and the question's answer call starts in the same round.
+   - `plan.stopped` joins no wake list (`fab/wake.py`): the stop's
+     `question.asked`, logged with it, is in `wake.AGAIN` already, so the
+     next round starts the answer call.
    No change to `fab/channel.py`, `fab/forge.py` or `fab/serve.py`: an answer
    call that cannot settle the stop ends `Question:`, an ask they already show.
 4. **A rebase onto the trunk consumes the amendment** (`docs/design/integration.md`
