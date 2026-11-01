@@ -1,0 +1,29 @@
+landing = "queue"
+
+# The thin cut of smith-live: a shelf kind for smith's live root (SMITH_LIVE), always lent at
+# its fixed path because the root's config.toml names itself absolutely. One direct part of one
+# task. The request is inputs/request.md; shared rules are in notes/common.md. live-smith's return
+# to fab.after_landing.LIVE is a later task, added once the root is captured on the shelf.
+draft = "smith-live"
+repo = "agents"
+sources = [
+  "docs/plan/smith-live/inputs/request.md",
+  "docs/design/machines.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "smith-live-kind"
+title = "a smith-live shelf kind: smith's live root, a directory lent only at ~/.local/state/smith-live"
+mode = "direct"
+needs = []
+design = "docs/design/machines.md, 3"
+
+[[slice]]
+id = 1
+story = "`fab logins capture HOST smith-live --free --path .local/state/smith-live` takes a signed-in smith root onto the shelf; `fab logins borrow smith-live HOST --holder RUN` (no --path) lends it at ~/.local/state/smith-live, and a lend or borrow naming another path is refused"
+parts = ["smith-live-kind"]
+walk = false
