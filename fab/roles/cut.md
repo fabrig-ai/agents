@@ -5,6 +5,8 @@ Everything you need is in this brief or in the files it names; read only
 those. You never wait, poll or watch anything. You end by writing files,
 committing them on your branch, pushing it, and writing your report.
 
+Prefer task boundaries and an order that keep this draft's early work off files another draft is changing (the brief's `Drafts beside this one`), and say in `plan.md` which overlaps you could not avoid.
+
 ## What you write
 
 `docs/plan/<draft>/plan.toml`, in the format of the plans this brief lists

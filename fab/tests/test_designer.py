@@ -282,6 +282,90 @@ class RetireDueTest(unittest.TestCase):
             self.assertTrue(designer.retire_due(self.plan, {}, events))
 
 
+class DraftsBesideTest(unittest.TestCase):
+    def setUp(self):
+        self.cut = designer.uncut("new", "agents")
+        self.other = designer.uncut("beside", "agents")
+        self.tasks = {f"beside/{name}": Task(
+            f"beside/{name}", "core", "feature", "agents", (), files, "high", 30, "", "")
+            for name, files in (("z", ("fab/z.py",)), ("a", ("fab/a.py", "fab/shared.py")))}
+        self.events = [{"ev": "branch.landed", "task": "beside/a", "tip": "task-tip",
+                        "main": "trunk-tip", "into": "beside/integration"}]
+
+    def test_integration_lists_all_spec_tasks_by_id_and_marks_merged(self):
+        self.assertEqual(designer.drafts_beside(self.cut, [(self.other, self.tasks)], self.events),
+                         "- beside (integration)\n"
+                         "  - `beside/a` (merged): `fab/a.py`, `fab/shared.py`\n"
+                         "  - `beside/z`: `fab/z.py`")
+
+    def test_landed_trunk_is_omitted_only_with_queue_timestamp(self):
+        landed = {"ev": "branch.landed", "task": "beside/integration"}
+        for fields, omitted in (({}, False), ({"queue_ts": "queued"}, True)):
+            with self.subTest(fields=fields):
+                text = designer.drafts_beside(self.cut, [(self.other, self.tasks)],
+                                              [*self.events, {**landed, **fields}])
+                self.assertEqual(text == "", omitted)
+
+    def test_queue_lists_only_tasks_whose_fold_status_is_not_landed(self):
+        plan = replace(self.other, landing="queue")
+        self.assertEqual(designer.drafts_beside(self.cut, [(plan, self.tasks)], self.events),
+                         "- beside (queue)\n  - `beside/z`: `fab/z.py`")
+        events = [*self.events, {"ev": "branch.rejected", "task": "beside/a"}]
+        self.assertIn("`beside/a`: `fab/a.py`", designer.drafts_beside(
+            self.cut, [(plan, self.tasks)], events))
+
+    def test_keeps_plan_order_excluding_other_repositories_own_draft_and_retired(self):
+        plans = [(replace(self.other, draft="zulu"), {}),
+                 (replace(self.other, repo="fabrig"), self.tasks),
+                 (replace(self.cut, landing="queue"), {}),
+                 (replace(self.other, retired=True), self.tasks),
+                 (replace(self.other, draft="alpha", landing="queue"), {})]
+        self.assertEqual(designer.drafts_beside(self.cut, plans, []),
+                         "- zulu (integration)\n- alpha (queue)")
+        self.assertEqual(designer.drafts_beside(self.cut, [], []), "")
+
+    def test_latest_cut_without_end_is_in_flight_with_existing_tasks(self):
+        older = {"ev": "call.started", "role": "cut", "subject": "beside/cut", "call": "old"}
+        latest = {**older, "call": "latest"}
+        events = [older, latest, {"ev": "call.ended", "call": "old"},
+                  {"ev": "call.ended", "call": "unrelated"}]
+        text = designer.drafts_beside(self.cut, [(self.other, self.tasks)], events)
+        self.assertEqual(text, "- beside (cut in flight)\n"
+                               "  - `beside/a`: `fab/a.py`, `fab/shared.py`\n"
+                               "  - `beside/z`: `fab/z.py`")
+        self.assertEqual(designer.drafts_beside(self.cut, [(self.other, {})], events),
+                         "- beside (cut in flight)")
+        events = [older, latest, {"ev": "call.ended", "call": "latest"}]
+        self.assertEqual(designer.drafts_beside(self.cut, [(self.other, {})], events),
+                         "- beside (integration)")
+
+    def test_repair_and_catch_up_tasks_with_all_files_are_omitted(self):
+        tasks = {**self.tasks, **{f"beside/{name}": replace(
+            self.tasks["beside/a"], id=f"beside/{name}", kind="repair", files=("**",))
+            for name in ("repair", "catch-up")}}
+        for landing in ("integration", "queue"):
+            with self.subTest(landing=landing):
+                text = designer.drafts_beside(self.cut, [(replace(self.other, landing=landing), tasks)], [])
+                self.assertNotIn("repair", text)
+                self.assertNotIn("catch-up", text)
+                self.assertNotIn("**", text)
+                self.assertIn("`beside/a`", text)
+
+    def test_two_hundred_lines_then_count_the_rest(self):
+        for count in (199, 200, 204):
+            with self.subTest(tasks=count):
+                tasks = {f"beside/{index:03}": replace(self.tasks["beside/a"], id=f"beside/{index:03}")
+                         for index in range(count)}
+                lines = designer.drafts_beside(self.cut, [(self.other, tasks)], []).splitlines()
+                self.assertEqual(lines[0], "- beside (integration)")
+                self.assertTrue(lines[199].startswith("  - `beside/198`:"))
+                if count == 199:
+                    self.assertEqual(len(lines), 200)
+                else:
+                    self.assertEqual(len(lines), 201)
+                    self.assertEqual(lines[200], f"({count - 199} more lines)")
+
+
 class BriefTest(unittest.TestCase):
     def setUp(self):
         self.root = self.enterContext(tmp_home())
@@ -314,6 +398,38 @@ class BriefTest(unittest.TestCase):
                          "- `docs/plan/demo/plan.toml`", "Existing primitive."):
             self.assertIn(fragment, text)
         self.assertNotIn("Keep this contract.", text)
+
+    def test_cut_beside_section_immediately_follows_sources_for_both_roles(self):
+        for direct, source in ((True, "Sources"), (False, "The user's drafts")):
+            with self.subTest(direct=direct):
+                plan = designer.uncut("new", "fabrig", [SOURCE], {"direct": direct})
+                text = designer.cut_brief(plan, self.root, **FACTS, beside="- beside (integration)")
+                headings = [line for line in text.splitlines() if line.startswith("# ")]
+                position = headings.index(f"# {source}")
+                self.assertEqual(headings[position + 1], "# Drafts beside this one")
+                self.assertIn("# Drafts beside this one\n\n- beside (integration)", text)
+                if direct:
+                    self.assertLess(text.index("# Drafts beside this one\n"),
+                                    text.index("# What each implementer is told\n"))
+
+    def test_cut_beside_none_omits_section_and_empty_string_renders_none(self):
+        for direct in (True, False):
+            plan = designer.uncut("new", "agents", [SOURCE], {"direct": direct})
+            for beside in (None, ""):
+                with self.subTest(direct=direct, beside=beside):
+                    text = designer.cut_brief(plan, self.root, **FACTS, beside=beside)
+                    if beside is None:
+                        self.assertNotIn("# Drafts beside this one\n", text)
+                    else:
+                        self.assertIn("# Drafts beside this one\n\n(none)", text)
+
+    def test_cut_roles_prefer_early_work_away_from_other_drafts_and_record_overlaps(self):
+        line = ("Prefer task boundaries and an order that keep this draft's early work off files "
+                "another draft is changing (the brief's `Drafts beside this one`), and say in "
+                "`plan.md` which overlaps you could not avoid.")
+        for name in ("cut.md", "cut-run.md"):
+            with self.subTest(role=name):
+                self.assertIn(line, calls.ROLES["cut"].with_name(name).read_text().splitlines())
 
     def test_cut_options_follow_draft_and_emit_one_toml_assignment_per_key(self):
         plan = designer.uncut("new", "agents", [SOURCE])
@@ -523,6 +639,55 @@ class MainTest(unittest.TestCase):
                 self.assertIn("# Call facts", text)
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
+
+    def test_cut_brief_only_loads_listed_plan_without_fetching(self):
+        path = self.directory / "tasks/base.md"
+        atomic.write(path, path.read_text().replace('kind = "interface"',
+                                                    'kind = "interface"\nfiles = ["fab/base.py"]'))
+        atomic.write(log.home() / "plans", f"{self.directory}\n")
+        result, text, errors = self.invoke("cut", "--source", SOURCE,
+                                           directory=self.root / "docs/plan/new")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertIn("# Drafts beside this one\n\n- demo (queue)\n"
+                      "  - `demo/base`: `fab/base.py`", text)
+        self.assertFalse(any(argv[:2] in (["git", "fetch"], ["git", "merge"])
+                             for argv in self.fake.argvs()))
+
+    def test_cut_replay_omits_beside_section_and_does_not_load_plans(self):
+        atomic.write(log.home() / "plans", f"{self.directory}\n{self.root / 'broken'}\n")
+        with patch.object(dispatch, "_load_plans", wraps=dispatch._load_plans) as load_plans:
+            result, text, errors = self.invoke("cut", "--source", SOURCE, "--set", "ready=false",
+                                               directory=self.root / "docs/plan/new")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertNotIn("# Drafts beside this one\n", text)
+        load_plans.assert_not_called()
+
+    def test_cut_failed_load_goes_to_stderr_and_keeps_good_plan_in_brief(self):
+        broken = self.root / "docs/plan/broken"
+        atomic.write(log.home() / "plans", f"{broken}\n{self.directory}\n")
+        result, text, errors = self.invoke("cut", "--source", SOURCE,
+                                           directory=self.root / "docs/plan/new")
+        self.assertEqual(result, 0)
+        self.assertIn(f"load {broken} failed:", errors)
+        self.assertNotIn("failed:", text)
+        self.assertNotIn(f"load {broken}", text)
+        self.assertIn("# Drafts beside this one\n\n- demo (queue)", text)
+        self.assertNotIn("- broken (", text)
+
+    def test_cut_no_other_plans_renders_none(self):
+        result, text, errors = self.invoke("cut", "--source", SOURCE,
+                                           directory=self.root / "docs/plan/new")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertIn("# Drafts beside this one\n\n(none)", text)
+
+    def test_cut_in_flight_without_plan_toml_is_loaded_from_log(self):
+        directory = self.root / "docs/plan/starting"
+        atomic.write(log.home() / "plans", f"{directory}\n")
+        log.append("call.started", role="cut", subject="starting/cut", call="cut-1")
+        result, text, errors = self.invoke("cut", "--source", SOURCE,
+                                           directory=self.root / "docs/plan/new")
+        self.assertEqual((result, errors), (0, ""))
+        self.assertIn("# Drafts beside this one\n\n- starting (cut in flight)", text)
 
     def test_nested_cut_brief_names_destination_and_keeps_sources_at_root(self):
         self.fake.rules.insert(0, (["git", "rev-parse", "--abbrev-ref"],

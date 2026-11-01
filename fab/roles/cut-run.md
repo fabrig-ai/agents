@@ -10,6 +10,8 @@ Where the brief tells the lead how to launch, await, merge, check, measure
 or report (codex-start, codex-wait, branch names, slots, machines, logs,
 messages), fab does it instead; everything else in the brief holds.
 
+Prefer task boundaries and an order that keep this draft's early work off files another draft is changing (the brief's `Drafts beside this one`), and say in `plan.md` which overlaps you could not avoid.
+
 ## fabrig's own files
 
 - fabrig's `AGENTS.md` and each tree's `AGENTS.md` hold.

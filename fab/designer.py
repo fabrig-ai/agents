@@ -14,10 +14,11 @@ import argparse
 import json
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import redirect_stdout
 from dataclasses import replace
 from pathlib import Path
 
-from fab import atomic, calls, log, state
+from fab import atomic, calls, integration, log, state
 from fab import run as runs
 from fab.plan import Plan, Task, load_plan, load_tasks, parse_options
 from fab.sh import Failed, Runner, run
@@ -25,6 +26,7 @@ from fab.sh import Failed, Runner, run
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
 DESIGNS = "docs/design"  # a repository's designs; its draft/ holds the user's drafts
 PLANS = "docs/plan"  # plans live under this suffix, with any repository-relative prefix
+BESIDE_LINES = 200  # lines of other drafts in a cut brief, before the omitted count (13.17)
 
 
 def subject(draft: str, role: str, part: str | None = None) -> str:
@@ -177,8 +179,48 @@ def enlist(plan_dir: Path) -> bool:
     return True
 
 
+def drafts_beside(plan: Plan, plans: Sequence[tuple[Plan, Mapping[str, Task]]],
+                  events: Sequence[dict]) -> str:
+    """Render the cut's other drafts in loaded plans' order (docs/design/fab.md, 13.17).
+
+    Keep the same repository, excluding this draft, retired plans and landed integration
+    trunks. A latest cut call without an end marks its plan cut in flight and lists the
+    tasks already loaded. Otherwise queue tasks exclude landed ones. Integration tasks
+    include landed ones marked merged. Sort tasks by id, omitting files=("**",) repairs.
+    Return at most BESIDE_LINES lines followed by an omitted-line count, or an empty
+    string when no plans remain. Pure; the caller loads plans and reads the log.
+    """
+    cuts = {event.get("subject"): event for event in events
+            if event.get("ev") == "call.started" and event.get("role") == "cut"}
+    ended = {event.get("call") for event in events if event.get("ev") == "call.ended"}
+    lines = []
+    for other, tasks in plans:
+        if other.repo != plan.repo or other.draft == plan.draft or other.retired:
+            continue
+        if other.landing == "integration" and integration.trunk_landed(other, events):
+            continue
+        cut = cuts.get(subject(other.draft, "cut"))
+        in_flight = cut is not None and cut.get("call") not in ended
+        label = "cut in flight" if in_flight else other.landing
+        lines.append(f"- {other.draft} ({label})")
+        views = state.fold(tasks, events)
+        for identifier, task in sorted(tasks.items()):
+            if task.files == ("**",):
+                continue
+            merged = views[identifier].status == "landed"
+            if other.landing == "queue" and merged and not in_flight:
+                continue
+            mark = " (merged)" if merged and other.landing == "integration" else ""
+            files = ", ".join(f"`{name}`" for name in task.files)
+            lines.append(f"  - `{identifier}`{mark}: {files}")
+    if len(lines) > BESIDE_LINES:
+        return "\n".join([*lines[:BESIDE_LINES], f"({len(lines) - BESIDE_LINES} more lines)"])
+    return "\n".join(lines)
+
+
 def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
-              plan_path: str | None = None, options: Sequence[str] = ()) -> str:
+              plan_path: str | None = None, options: Sequence[str] = (),
+              beside: str | None = None) -> str:
     """The cut's brief, plan being uncut(draft, repo, sources), through fab.calls' section
     builder and facts (fab.calls._brief, _facts), sections in this order:
 
@@ -188,13 +230,14 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     3. `The draft`: `- Draft: <draft>`, `- Repository: <repo>`, `- Plan: write
        \\`<PLANS>/<draft>/plan.toml\\``, `- Sources: \\`<source>\\`, ...` (comma-separated).
     4. `The user's drafts`: fab.calls.drafts_text(plan, root).
-    5. `Designs`: design_index(root).
-    6. `Plans`: one line `- \\`<path>\\`` per `**/<PLANS>/*/plan.toml` under root, sorted;
+    5. `Drafts beside this one`: beside, or `(none)` when empty; omitted for None (13.17).
+    6. `Designs`: design_index(root).
+    7. `Plans`: one line `- \\`<path>\\`` per `**/<PLANS>/*/plan.toml` under root, sorted;
        `(none)` when there is none. Their format is the cut's to follow.
-    7. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
+    8. `Inventory`: fab.calls.render_inventory(fab.calls.inventory(root)), or `(none)`
        when it is empty (a repository without fab/).
     When cut-run.md is the role: section 4 is named `Sources`, a fabrig plan's brief then
-    quotes fab/roles/fabrig-run.md as `What each implementer is told`, and sections 5 to 7
+    quotes fab/roles/fabrig-run.md as `What each implementer is told`, and sections 6 to 8
     are left out (cut-run.md holds the formats).
 
     When options are given, insert `Plan options` after `The draft`, with parsed
@@ -243,6 +286,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
         # A run's cut gets its sources under their own name, and reads what each implementer is
         # told, as the run's lead read the implementers' role file; cut-run.md holds the formats.
         ("Sources" if run_role else "The user's drafts", calls.drafts_text(plan, root)),
+        *([] if beside is None else [("Drafts beside this one", beside or "(none)")]),
         *([("What each implementer is told",
             runs.ROLE.with_name("fabrig-run.md").read_text(encoding="utf-8"))]
           if run_role and plan.repo == "fabrig" else []),
@@ -355,8 +399,10 @@ def main(argv: list[str]) -> int:
       root/<prefix>docs/plan/<draft>, PLAN_DIR/plan.toml exists, or a source is not a
       relative path naming a file under the root. The plan is
       uncut(draft, repository(root), sources, parse_options(entries)); parse options
-      before preparing the checkout. An integration cut requires root's upstream to be
-      origin/<draft>/integration. Without --brief-only, enlist(PLAN_DIR) before the call;
+      before preparing the checkout. Ready cuts load the listed plans without fetching
+      for `Drafts beside this one` (13.17); loader messages go to stderr. An integration
+      cut requires root's upstream to be origin/<draft>/integration. Without --brief-only,
+      enlist(PLAN_DIR) before the call;
       raw option entries are logged in call.started's options.
     - `fab call contract PART --plan PLAN_DIR`: fab.calls.skeleton_brief with role
       contract; ValueError for an unknown part or one the plan does not mark contract.
@@ -373,9 +419,10 @@ def main(argv: list[str]) -> int:
     try:
         options = parse_options(args.set) if args.role == "cut" else {}
         plan, tasks, root, plan_path = _prepare(args, options)
-        statuses = {key: view.status for key, view in state.fold(tasks, log.read()).items()}
+        events = log.read()
+        statuses = {key: view.status for key, view in state.fold(tasks, events).items()}
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
-        text = _compile(args, plan, tasks, statuses, root, facts, plan_path)
+        text = _compile(args, plan, tasks, statuses, root, facts, plan_path, events)
         if args.brief_only:
             print(text)
             return 0
@@ -439,10 +486,17 @@ def _prepare(args, options):
     return plan, {}, root, plan_path.as_posix()
 
 
-def _compile(args, plan, tasks, statuses, root, facts, plan_path):
+def _compile(args, plan, tasks, statuses, root, facts, plan_path, events):
     """Build a brief only after the role's preconditions hold."""
     if args.role == "cut":
-        return cut_brief(plan, root, plan_path=plan_path, options=args.set, **facts)
+        beside = None
+        if plan.ready:
+            # dispatch imports designer; defer the loader import until the cut is compiled.
+            from fab import channel, dispatch
+            with redirect_stdout(sys.stderr):
+                loaded, _ = dispatch._load_plans(channel.plan_dirs(()), events, sh=run, fetch=False)
+            beside = drafts_beside(plan, [(other, other_tasks) for other, other_tasks, _, _ in loaded], events)
+        return cut_brief(plan, root, plan_path=plan_path, options=args.set, beside=beside, **facts)
     if args.role == "contract":
         if args.part not in plan.parts:
             raise ValueError(f"unknown part {args.part!r}")
