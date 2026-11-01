@@ -46,6 +46,18 @@ class Ask:
 
 
 @dataclass(frozen=True)
+class Signal:
+    """An open signal's page block, folded from the log (docs/design/fab.md, 13.6)."""
+
+    id: str
+    what: str
+    since: str
+    facts: tuple[str, ...]
+    read: str
+    clearable: bool
+
+
+@dataclass(frozen=True)
 class Report:
     """A standing report's latest day under FAB_HOME/reports."""
 
@@ -83,6 +95,47 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
                  for plan, path in plans for question in plan.questions
                  if not question.answer.strip()]
     return questions + _log_asks(events)
+
+
+def signals(events: Iterable[dict]) -> list[Signal]:
+    """Open signals, oldest first, from the log alone (docs/design/fab.md, 13.6).
+
+    Queue rejections open queue:<branch>; a landing, a rejection or collateral at another
+    tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
+    again. Other kinds of signals are left for their own folds.
+    """
+    return sorted(_queue_signals(events), key=lambda signal: signal.since)
+
+
+def _queue_signals(events: Iterable[dict]) -> list[Signal]:
+    """Fold hand-pushed rejections without raising a signal for collateral alone."""
+    opened = {}
+    for event in events:
+        ev = event.get("ev")
+        if ev == "signal.cleared":
+            opened.pop(event.get("signal"), None)
+            continue
+        if ev not in ("queue.rejected", "queue.landed", "queue.collateral"):
+            continue
+        branch = event.get("branch")
+        if not isinstance(branch, str):
+            continue
+        identifier = f"queue:{branch}"
+        if ev == "queue.landed":
+            opened.pop(identifier, None)
+        elif isinstance(event.get("tip"), str):
+            prior = opened.get(identifier)
+            if prior is not None and prior["tip"] != event["tip"]:
+                del opened[identifier]
+            if ev == "queue.rejected" and isinstance(event.get("ts"), str):
+                opened[identifier] = event
+    found = []
+    for identifier, event in opened.items():
+        facts = (f"- Tip: `{event['tip']}`", f"- Step: `{event.get('step', '-')}`",
+                 "- Tests: " + (", ".join(event.get("tests", [])) or "(see the log)"))
+        found.append(Signal(identifier, f"rejected {event['branch']}", event["ts"], facts,
+                            f"{event.get('gate', 'gate')}:{event.get('log', '-')}", True))
+    return found
 
 
 def plan_dirs(given: Sequence[Path] = ()) -> list[Path]:
@@ -210,14 +263,15 @@ def landing_lines(events: Iterable[dict]) -> list[str]:
 
 
 def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: str,
-           unread: Sequence[str] = (), landing: Sequence[str] = ()) -> str:
+           unread: Sequence[str] = (), landing: Sequence[str] = (),
+           open_signals: Sequence[Signal] = ()) -> str:
     """The page as Markdown, ending with a newline, sections separated by one blank line.
 
     entries: each ask with its body, the text the page quotes for it (the caller reads it:
     a plan question's text, excerpt of a call's report, a parked chain's reason then the
     excerpt of its report).
-    1. `# The user's page`, then the line `<now>. Only what is the user's: budgets,
-       machines, what is hard to reverse.`
+    1. `# The user's page`, then `<now>. Only what is the user's (budgets, machines,
+       what is hard to reverse) and what has no owner fab knows.`
     2. `## Questions`, then per entry in order, a block:
        - plan: `### <draft>: question <subject>`, the body, `- Waits: <parts, comma-
          separated>` and `- Answer: write its \\`answer\\` in \\`<report>\\` and land it
@@ -228,14 +282,18 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
          out when report is "") and the same Answer line;
        the heading, the body and the list separated by blank lines. `(none)` when there
        are no entries.
-    3. `## Daily reports`, then per report `### <name>, <day>`, the line `\\`<path>\\``, and
+    3. `## Open signals`, then per open_signals entry, `### <id>, <what>, since <since>`,
+       its facts, `- Read: <read>` and, when clearable,
+       `- Clear: fab page clear <id> TEXT`; `(none)` when empty.
+    4. `## Daily reports`, then per report `### <name>, <day>`, the line `\\`<path>\\``, and
        its signals lines (`- none` when it has none); `(none)` when there are no reports.
-    4. `## After landing`, one `- <line>` per landing line (landing_lines); left out when
+    5. `## After landing`, one `- <line>` per landing line (landing_lines); left out when
        landing is empty.
-    5. `## Unread`, one `- <line>` per unread entry; left out when unread is empty.
+    6. `## Unread`, one `- <line>` per unread entry; left out when unread is empty.
     Pure."""
     sections = ["# The user's page\n"
-                f"{now}. Only what is the user's: budgets, machines, what is hard to reverse.",
+                f"{now}. Only what is the user's (budgets, machines, what is hard to reverse) "
+                "and what has no owner fab knows.",
                 "## Questions"]
     for ask, body in entries:
         if ask.kind == "plan":
@@ -249,6 +307,15 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
             instructions.append(f"- Answer: `fab page answer {ask.subject} TEXT`")
         sections.append("\n\n".join((heading, body, "\n".join(instructions))))
     if not entries:
+        sections.append("(none)")
+    sections.append("## Open signals")
+    for signal in open_signals:
+        instructions = [*signal.facts, f"- Read: `{signal.read}`"]
+        if signal.clearable:
+            instructions.append(f"- Clear: `fab page clear {signal.id} TEXT`")
+        sections.append(f"### {signal.id}, {signal.what}, since {signal.since}\n\n"
+                        + "\n".join(instructions))
+    if not open_signals:
         sections.append("(none)")
     sections.append("## Daily reports")
     for report in reports:
@@ -274,7 +341,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     and events; each ask's body: plan, its text; call, excerpt(Path(report)); parked, its
     text, then a blank line and excerpt(Path(report)) when report is not "". The reports are
     latest_reports(fab.log.home() / "reports"). Return render(entries, reports, now,
-    unread, landing_lines(events))."""
+    unread, landing_lines(events), signals(events))."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
@@ -290,7 +357,8 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
         if ask.kind == "parked" and ask.report:
             body += "\n\n" + excerpt(Path(ask.report))
         entries.append((ask, body))
-    return render(entries, latest_reports(log.home() / "reports"), now, unread, landing_lines(events))
+    return render(entries, latest_reports(log.home() / "reports"), now, unread,
+                  landing_lines(events), signals(events))
 
 
 def write(text: str) -> Path:
@@ -330,14 +398,39 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
     return record
 
 
+def clear(identifier: str, text: str, events: Sequence[dict], *, by: str = "user",
+          log_path: Path | None = None) -> dict:
+    """Clear an open, clearable signal, logging signal.cleared and waking the tick.
+
+    Store signal, by and stripped text beside log_path. Blank text, an unknown or closed
+    signal, or a signal that cannot be cleared raises ValueError without logging or waking.
+    The command rewrites the page after this record (docs/design/fab.md, 13.6).
+    """
+    text = text.strip()
+    opened = signals(events)
+    identifiers = ", ".join(signal.id for signal in opened) or "none"
+    if not text:
+        raise ValueError(f"clear text for {identifier!r} is blank; open signals: {identifiers}")
+    signal = next((signal for signal in opened if signal.id == identifier), None)
+    if signal is None:
+        raise ValueError(f"no open signal for {identifier!r}; open signals: {identifiers}")
+    if not signal.clearable:
+        raise ValueError(f"signal {identifier!r} cannot be cleared")
+    record = log.append("signal.cleared", path=log_path, signal=identifier, by=by, text=text)
+    wake.want(f"clear {identifier}", path=wake.want_path(log_path))
+    return record
+
+
 def main(argv: list[str]) -> int:
     """`fab page show [PLAN_DIR...]`, `fab page write [PLAN_DIR...]` and `fab page answer
-    SUBJECT TEXT...`, on hel8.
+    SUBJECT TEXT...` and `fab page clear ID TEXT... [--by WHO]`, on hel8.
 
     show: print compose(plan_dirs(PLAN_DIRs), fab.log.read(), fab.log.now()), ending with
     its newline. write: write that text and print the path. answer: TEXT's words joined by
     single spaces; answer(SUBJECT, text, fab.log.read()), then write the page as write does,
-    and print `answered <SUBJECT>` and the page's path. Exit 0; an OSError or ValueError
+    and print `answered <SUBJECT>` and the page's path. clear: clear(ID, text,
+    fab.log.read(), by=WHO or user), rewrite the page and print `cleared <ID>` and its path.
+    Exit 0; an OSError or ValueError
     prints `fab page: <error>` on stderr and exits 1; bad arguments exit 2 (argparse)."""
     parser = argparse.ArgumentParser(prog="fab page", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -346,8 +439,14 @@ def main(argv: list[str]) -> int:
     replying = commands.add_parser("answer")
     replying.add_argument("subject")
     replying.add_argument("text", nargs="+")
+    clearing = commands.add_parser("clear")
+    clearing.add_argument("id")
+    clearing.add_argument("text", nargs="+")
+    clearing.add_argument("--by", default="user")
     args = parser.parse_args(argv)
     try:
+        if args.command == "clear":
+            clear(args.id, " ".join(" ".join(args.text).split()), log.read(), by=args.by)
         if args.command == "answer":
             answer(args.subject, " ".join(" ".join(args.text).split()), log.read())
         text = compose(plan_dirs(getattr(args, "plans", ())), log.read(), log.now())
@@ -357,6 +456,8 @@ def main(argv: list[str]) -> int:
             path = write(text)
             if args.command == "answer":
                 print(f"answered {args.subject}")
+            elif args.command == "clear":
+                print(f"cleared {args.id}")
             print(path)
         return 0
     except (OSError, ValueError) as error:

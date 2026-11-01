@@ -45,6 +45,76 @@ class ChannelTest(unittest.TestCase):
         self.fab_home = log.home()
         self.fab_home.mkdir()
 
+    def rejection(self, minute=1, branch="hand/pushed", tip="tip", **fields):
+        return event(minute, "queue.rejected", branch=branch, tip=tip, step="default",
+                     log="/queue/check.log", gate="gate-host", **fields)
+
+    def test_queue_signal_facts_and_oldest_first_from_an_iterator(self):
+        events = [self.rejection(3, tests=["pkg::a", "pkg::b"]),
+                  self.rejection(1, branch="hand/older")]
+        self.assertEqual(channel.signals(iter(events)), [
+            channel.Signal("queue:hand/older", "rejected hand/older", ts(1),
+                           ("- Tip: `tip`", "- Step: `default`", "- Tests: (see the log)"),
+                           "gate-host:/queue/check.log", True),
+            channel.Signal("queue:hand/pushed", "rejected hand/pushed", ts(3),
+                           ("- Tip: `tip`", "- Step: `default`", "- Tests: pkg::a, pkg::b"),
+                           "gate-host:/queue/check.log", True),
+        ])
+
+    def test_queue_landing_closes_its_branch_only_even_at_another_tip(self):
+        events = [self.rejection(), self.rejection(2, branch="other"),
+                  event(3, "queue.landed", branch="hand/pushed", tip="merged")]
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["queue:other"])
+
+    def test_queue_new_tip_replaces_rejection_and_collateral_only_closes_another_tip(self):
+        events = [self.rejection(), self.rejection(2, tip="new")]
+        self.assertEqual([(signal.since, signal.facts[0]) for signal in channel.signals(events)],
+                         [(ts(2), "- Tip: `new`")])
+        events.append(event(3, "queue.collateral", branch="hand/pushed", tip="new"))
+        self.assertEqual(len(channel.signals(events)), 1)
+        events.append(event(4, "queue.collateral", branch="hand/pushed", tip="newer"))
+        self.assertEqual(channel.signals(events), [])
+
+    def test_queue_collateral_and_task_rejection_never_open_signals(self):
+        events = [event(1, "queue.collateral", branch="hand/pushed", tip="tip"),
+                  event(2, "branch.rejected", branch="draft/task", tip="task-tip"),
+                  event(3, "red.opened", red="red-1"),
+                  event(4, "tiers.run", faults=["profile failed"])]
+        self.assertEqual(channel.signals(events), [])
+        self.assertEqual(channel.signals([{}, event(1, "queue.rejected"),
+                                         event(2, "queue.rejected", branch=3)]), [])
+
+    def test_queue_clear_closes_its_signal_and_later_rejection_opens_again(self):
+        events = [self.rejection(), self.rejection(2, branch="other"),
+                  event(3, "signal.cleared", signal="queue:hand/pushed", text="settled")]
+        self.assertEqual([signal.id for signal in channel.signals(events)], ["queue:other"])
+        events.append(self.rejection(4))
+        self.assertEqual([(signal.id, signal.since) for signal in channel.signals(events)],
+                         [("queue:other", ts(2)), ("queue:hand/pushed", ts(4))])
+
+    def test_clear_logs_stripped_text_and_wakes_beside_explicit_log(self):
+        path = self.home / "custom/events.jsonl"
+        events = [self.rejection()]
+        record = channel.clear("queue:hand/pushed", "  settled  ", events, by="free", log_path=path)
+        self.assertEqual({key: value for key, value in record.items() if key != "ts"},
+                         dict(ev="signal.cleared", signal="queue:hand/pushed", by="free", text="settled"))
+        self.assertEqual(log.read(path), [record])
+        self.assertEqual(channel.signals(events + [record]), [])
+        self.assertEqual((path.parent / "tick.want").read_text(), "clear queue:hand/pushed\n")
+        self.assertFalse((self.fab_home / "tick.want").exists())
+        self.assertEqual(log.read(), [])
+
+    def test_clear_refuses_unknown_closed_and_blank_without_logging_or_waking(self):
+        rejection = self.rejection()
+        closed = [rejection, event(2, "signal.cleared", signal="queue:hand/pushed")]
+        for identifier, text, events in (("missing", "yes", [rejection]),
+                                         ("queue:hand/pushed", "yes", closed),
+                                         ("queue:hand/pushed", "  ", [rejection])):
+            with self.subTest(identifier=identifier, text=text), self.assertRaises(ValueError):
+                channel.clear(identifier, text, events)
+        self.assertEqual(log.read(), [])
+        self.assertFalse((self.fab_home / "tick.want").exists())
+
     def test_asks_plans_first_in_given_order_and_whitespace_answer_open(self):
         first = plan(questions=(Question("budget", "How much?", ("core", "ui")),
                                 Question("host", "Which host?", (), "hel8"),
@@ -239,7 +309,7 @@ class ChannelTest(unittest.TestCase):
                    channel.Report("landing", "2026-10-29", Path("reports/landing.md"), ())]
         rendered = channel.render(entries, reports, ts(4), ["plan: bad TOML", "other: missing field"])
         self.assertEqual(rendered, f"""# The user's page
-{ts(4)}. Only what is the user's: budgets, machines, what is hard to reverse.
+{ts(4)}. Only what is the user's (budgets, machines, what is hard to reverse) and what has no owner fab knows.
 
 ## Questions
 
@@ -275,6 +345,10 @@ capacity
 
 - Answer: `fab page answer other TEXT`
 
+## Open signals
+
+(none)
+
 ## Daily reports
 
 ### demo, 2026-10-30
@@ -294,6 +368,31 @@ capacity
 - plan: bad TOML
 - other: missing field
 """)
+
+    def test_render_signals_uses_the_same_block_with_clear_only_when_clearable(self):
+        opened = [channel.Signal("queue:hand/pushed", "rejected hand/pushed", ts(1),
+                                 ("- Tip: `tip`", "- Step: `default`", "- Tests: pkg::test"),
+                                 "gate-host:/queue/check.log", True),
+                  channel.Signal("unclearable", "needs recovery", ts(2),
+                                 ("- Reason: still open",), "gate-host:/run.log", False)]
+        page = channel.render([], [], ts(3), open_signals=opened)
+        self.assertIn(f"""## Open signals
+
+### queue:hand/pushed, rejected hand/pushed, since {ts(1)}
+
+- Tip: `tip`
+- Step: `default`
+- Tests: pkg::test
+- Read: `gate-host:/queue/check.log`
+- Clear: `fab page clear queue:hand/pushed TEXT`
+
+### unclearable, needs recovery, since {ts(2)}
+
+- Reason: still open
+- Read: `gate-host:/run.log`
+
+## Daily reports""", page)
+        self.assertNotIn("fab page clear unclearable", page)
 
     def test_landing_lines_show_the_newest_run_and_its_new_reds(self):
         events = [dict(ev="tiers.run", ts="t1", tip="old", verdict="green"),
@@ -326,9 +425,13 @@ capacity
 
     def test_render_empty_page_and_no_unread_section(self):
         self.assertEqual(channel.render([], [], ts(0)), f"""# The user's page
-{ts(0)}. Only what is the user's: budgets, machines, what is hard to reverse.
+{ts(0)}. Only what is the user's (budgets, machines, what is hard to reverse) and what has no owner fab knows.
 
 ## Questions
+
+(none)
+
+## Open signals
 
 (none)
 
@@ -463,6 +566,43 @@ parts = ["core"]
         self.assertNotIn("Which host?", page)
         self.assertIn("## Questions\n\n(none)", page)
 
+    def test_main_clear_logs_rewrites_wakes_and_allows_later_rejections(self):
+        for minute, option, by in ((1, [], "user"), (4, ["--by", "free"], "free")):
+            with self.subTest(by=by):
+                log.append(**self.rejection(minute, tests=["pkg::test"]))
+                channel.write(channel.compose([], log.read(), ts(minute)))
+                self.assertIn("### queue:hand/pushed,", (self.fab_home / channel.PAGE).read_text())
+                output = io.StringIO()
+                with patch("fab.log.now", return_value=ts(minute + 1)), redirect_stdout(output):
+                    self.assertEqual(cli.main(["page", "clear", "queue:hand/pushed",
+                                               " Retry  ", "\nelsewhere ", *option]), 0)
+                self.assertEqual(log.read()[-1], event(minute + 1, "signal.cleared",
+                                 signal="queue:hand/pushed", by=by, text="Retry elsewhere"))
+                self.assertEqual(output.getvalue(), f"cleared queue:hand/pushed\n{self.fab_home / channel.PAGE}\n")
+                self.assertIn("## Open signals\n\n(none)", (self.fab_home / channel.PAGE).read_text())
+                self.assertIn("clear queue:hand/pushed\n", (self.fab_home / "tick.want").read_text())
+
+    def test_main_clear_refuses_unknown_or_closed_without_writing_or_waking(self):
+        for events in ([], [self.rejection(), event(2, "signal.cleared", signal="queue:hand/pushed")]):
+            with self.subTest(events=events):
+                for record in events:
+                    log.append(**record)
+                before = log.read()
+                with redirect_stderr(io.StringIO()) as errors:
+                    self.assertEqual(cli.main(["page", "clear", "queue:hand/pushed", "done"]), 1)
+                self.assertIn("fab page: no open signal", errors.getvalue())
+                self.assertEqual(log.read(), before)
+                self.assertFalse((self.fab_home / channel.PAGE).exists())
+                self.assertFalse((self.fab_home / "tick.want").exists())
+
+    def test_clear_refuses_a_signal_that_cannot_be_cleared(self):
+        with patch.object(channel, "signals", return_value=[
+                channel.Signal("unclearable", "needs recovery", ts(1), (), "run.log", False)]):
+            with self.assertRaisesRegex(ValueError, "cannot be cleared"):
+                channel.clear("unclearable", "done", [])
+        self.assertEqual(log.read(), [])
+        self.assertFalse((self.fab_home / "tick.want").exists())
+
     def test_main_errors_exit_one_without_logging(self):
         errors = io.StringIO()
         with redirect_stderr(errors):
@@ -475,7 +615,9 @@ parts = ["core"]
 
     def test_main_bad_arguments_exit_two(self):
         for argv in ([], ["unknown"], ["answer"], ["answer", "demo/core"],
-                     ["answer", "demo/core", "yes", "--by", "other"]):
+                     ["answer", "demo/core", "yes", "--by", "other"],
+                     ["clear"], ["clear", "queue:hand/pushed"],
+                     ["clear", "queue:hand/pushed", "done", "--by"]):
             with self.subTest(argv=argv), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as caught:
                 cli.main(["page", *argv])
             self.assertEqual(caught.exception.code, 2)
