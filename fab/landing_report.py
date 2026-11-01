@@ -350,12 +350,8 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
       repair_minutes: the median of the minutes from each such branch's last rejection to its
       landing, over those rejected at least once; None when none.
     - lane_wait, disk_wait: fab.report.heavy_waits over the hosts with role gate.
-    - reds_opened, reds_foreman, reds_page, reds_fix/none/left, red_repairs_landed,
-      reds_closed (also by reason), red_recovery_hours and hand_rejected: the log's
-      after-landing and hand-pushed decisions, from _red_figures.
-    - walks_pass/fail/void, findings_raised/merged, triaged_<decision>,
-      finding_repairs_landed, rungs_passed and walk_pass_hours: raw QA records and
-      hours from failed walks to their rung's next pass, from _qa_figures.
+    - after-landing and hand-pushed decisions: _red_figures; raw QA counts and failed-walk
+      hours to the next rung pass: _qa_figures (docs/design/fab.md, 10).
     Counts are ints; minutes, hours, rates and percentages are floats."""
     records = within(sources.queue, window)
     all_batches = [record for record in records if record.get("ev") == "batch"]
