@@ -388,10 +388,11 @@ def _start_kind(view: state.TaskView, events: list[dict]) -> tuple[str, dict | N
 
 def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host], *,
                   sh: Runner, log_path: Path | None, plan_drafts: Sequence[str]) -> None:
-    """Import all loaded tasks once, reading from the oldest draft cursor.
+    """Import loaded tasks' and unowned branches' queue records once.
 
-    Each cursor is its newest imported queue_ts, or empty before its first record.
-    Remote torn lines and other plans' records are skipped; imported keys deduplicate.
+    Read from the oldest loaded draft cursor, empty without loaded drafts. Only tasks'
+    and owned fab branches' records advance it. Skip torn lines and deduplicate by
+    queue timestamp, event kind, branch and tip (docs/design/fab.md, 13.8).
     """
     owners = {f"{draft}/integration": draft for draft in plan_drafts}
     owners.update({event["branch"]: draft for event in events
@@ -419,21 +420,33 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             log.append("note", path=log_path, text=f"queue import failed: {failure}")
             print(f"import - failed: {failure}")
         for entry in log.records(result.out) if result.ok else ():
-            if entry.get("ev") not in ("landed", "rejected"):
+            if entry.get("ev") not in ("landed", "rejected", "collateral"):
                 continue
             branch = entry.get("branch")
             if not isinstance(branch, str):
                 continue
             identifier = branch if branch in owners else land.task_of(branch)
-            if identifier not in tasks and branch not in owners:
+            owned = identifier in tasks or branch in owners
+            if owned and entry["ev"] == "collateral":
                 continue
-            ev = "branch." + entry["ev"]
+            if not owned and (branch.startswith(("calls/", "answers/", "repairs/"))
+                              or branch.endswith("/integration")):
+                continue
+            ev = ("branch." if owned else "queue.") + entry["ev"]
             key = (entry["ts"], ev, branch, entry.get("tip"))
             if key in imported:
                 continue
-            fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
-                      if field in entry}
-            events.append(log.append(ev, path=log_path, task=identifier, branch=branch,
+            if owned:
+                fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
+                          if field in entry}
+                fields["task"] = identifier
+            else:
+                fields = {"gate": gate_hosts[0]}
+                names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
+                fields.update({field: entry[field] for field in names if field in entry})
+                if entry["ev"] != "landed":
+                    fields["tests"] = entry.get("tests", [])
+            events.append(log.append(ev, path=log_path, branch=branch,
                                      queue_ts=entry["ts"], **fields))
             imported.add(key)
 
@@ -784,22 +797,23 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     """Load and run listed then given plans, sharing imports and builder measurements.
 
     Fetch each checkout once; print load failures and skip retired plans. With no loaded
-    plan, return before importing, measuring or paging. Otherwise decide each plan on
-    fresh events and spend calm extras once. Question and refusal actions share a log
-    snapshot before fresh call decisions. Collect unowned runs last and refresh the page.
+    plan, import unowned queue records and refresh the page, without measuring. Otherwise
+    decide each plan on fresh events and spend calm extras once. Question and refusal
+    actions share a log snapshot before fresh call decisions. Collect unowned runs last
+    and refresh the page.
     """
     # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
-        return []
     loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
-    if not loaded:
-        return actions
     hosts = machines.load() if hosts is None else hosts
     tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
     _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
+    if not loaded:
+        _page(plan_dirs, log_path)
+        return actions
     _import_after_landing(log.read(log_path), hosts, sh=sh, log_path=log_path)
     calm = flow.measure(hosts, log.now(), sh=sh)
     for plan, tasks, directory, checkout in loaded:

@@ -188,6 +188,19 @@ class RoundTest(WakeTestCase):
         self.assertEqual(wake.lost(None, [landed("demo/a")]), [])
         self.assertEqual(wake.lost([], []), [])
 
+    def test_lost_queue_records_without_a_task_name_the_branch(self):
+        records = [dict(ev=kind, branch="hand/pushed", queue_ts="001") for kind in
+                   ("queue.rejected", "queue.landed", "queue.collateral")]
+        self.assertEqual(wake.lost(None, iter(records)),
+                         ["queue.rejected hand/pushed", "queue.landed hand/pushed",
+                          "queue.collateral hand/pushed"])
+        lines = wake.settle("backstop", None, records)
+        text = ("lost event: queue.rejected hand/pushed; queue.landed hand/pushed; "
+                "queue.collateral hand/pushed")
+        self.assertEqual(lines, ["lost - " + text])
+        self.assertEqual(self.notes(), [text])
+        self.assertNoWant()
+
     def test_hand_and_event_rounds_want_again_without_lost_notes(self):
         for trigger in ("hand", "event"):
             with self.subTest(trigger=trigger):

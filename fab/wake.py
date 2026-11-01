@@ -136,15 +136,16 @@ def lost(taken: Sequence[str] | None, records: Iterable[dict]) -> list[str]:
     """What a backstop round found that only an event explains, in this order: `wake
     <reason>` per taken reason (a want no event round started for); then, in records' order,
     `run.ended <run>` per run.ended record (a builder's wake did not arrive) and `<ev> <task>`
-    per record carrying queue_ts (a record imported from the queue's, whose wake did not
-    arrive). records are those the log gained during the round. A run that ends just as the
-    backstop collects it reads the same; that race is rare. Pure."""
+    per record carrying queue_ts, falling back to branch when task is absent (a record
+    imported from the queue, whose wake did not arrive). records are those the log gained
+    during the round. A run that ends just as the backstop collects it reads the same;
+    that race is rare. Pure."""
     found = [f"wake {reason}" for reason in taken or ()]
     for record in records:
         if record.get("ev") == "run.ended":
             found.append(f"run.ended {record['run']}")
         if "queue_ts" in record:
-            found.append(f"{record['ev']} {record['task']}")
+            found.append(f"{record['ev']} {record.get('task', record.get('branch'))}")
     return found
 
 

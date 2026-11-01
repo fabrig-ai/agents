@@ -1096,10 +1096,12 @@ parts = []
         self.assertEqual(examine.call_count, 2)
         self.assertEqual(examine.call_args.args[0].step, "merge")
         self.assertEqual(examine.call_args.args[0].branch, "draft/b-r2")
-        self.assertEqual([(e["ev"], e["task"]) for e in first],
-                         [("branch.landed", "draft/a"), ("branch.rejected", "draft/b"),
-                          ("branch.landed", "draft/c")])
-        self.assertTrue(all(e["queue_ts"] == "002" for e in first))
+        self.assertEqual([(e["ev"], e.get("task"), e["branch"]) for e in first],
+                         [("branch.landed", "draft/a", "draft/a"),
+                          ("branch.rejected", "draft/b", "draft/b-r2"),
+                          ("queue.landed", None, "elsewhere/task"),
+                          ("branch.landed", "draft/c", "draft/c")])
+        self.assertEqual([e["queue_ts"] for e in first], ["002", "002", "003", "002"])
         self.assertEqual(first[1]["step"], "merge")
         self.assertEqual(first[1]["log"], "conflict")
         self.assertEqual(first[1]["branch"], "draft/b-r2")
@@ -1342,7 +1344,7 @@ parts = []
                           ["git", "remote", "get-url", "origin"]], ["/checkout"] * 2)
         self.assertFalse(directory.exists())
 
-    def test_missing_plan_without_its_cut_call_fails_before_import(self):
+    def test_missing_plan_without_its_cut_call_still_imports_unowned_branches(self):
         """A different draft or role does not authorize ticking a missing plan file."""
         (self.directory / "plan.toml").unlink()
         self.append(dict(ev="call.started", call="other", role="cut", subject="other/cut"),
@@ -1350,7 +1352,8 @@ parts = []
         actions = self.tick()
         self.assertEqual([action.kind for action in actions], ["load"])
         self.assertIn(str(self.directory), actions[0].detail)
-        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
+                         ssh("fake@gate", ["fab", "queue", "log", "--since", ""])])
         self.assertEqual(self.calls, [])
 
     def test_uncut_question_parks_until_answered(self):
@@ -1365,24 +1368,18 @@ parts = []
         self.assertFalse(any(argv[0] == "systemd-run" for argv in self.fake.argvs()))
         self.assertEqual(self.calls, [])
 
-    def test_retired_plan_prints_and_skips_import_measurement_and_actions(self):
-        """After fetch, retirement exits before loading hosts or doing any plan work."""
-        write(log.home() / channel.PAGE, "keep page\n")
+    def test_retired_plan_imports_unowned_branches_without_measurement_or_actions(self):
+        """Retirement skips the plan's work while queue signals still reach the page."""
         path = self.directory / "plan.toml"
         write(path, 'retired = true\n' + path.read_text())
-        self.append(started(), *chain_history("review"))
-        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, "/checkout\n"))
-        with patch("fab.hosts.load", side_effect=AssertionError("hosts loaded")), \
-             patch.object(dispatch, "_import_queue", side_effect=AssertionError("queue imported")), \
-             patch.object(flow, "measure", side_effect=AssertionError("builder measured")), \
+        self.queue([dict(ev="rejected", ts="001", branch="hand/pushed", tip="tip",
+                         step="default", tests=[], log="/queue/red.log")])
+        with patch.object(flow, "measure", side_effect=AssertionError("builder measured")), \
              patch.object(dispatch, "decide", side_effect=AssertionError("actions decided")):
-            self.assertEqual(dispatch.tick(self.directory, sh=self.fake), [])
-        self.assertEqual(self.out.getvalue(), "retired draft\n")
-        self.assertEqual((log.home() / channel.PAGE).read_text(), "keep page\n")
-        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
-                                           ["git", "fetch", "origin"],
-                                           ["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-                                           ["git", "merge", "--ff-only", "@{upstream}"]])
+            self.assertEqual(self.tick(), [])
+        self.assertEqual([record["ev"] for record in log.read()], ["queue.rejected"])
+        self.assertIn("### queue:hand/pushed,", (log.home() / channel.PAGE).read_text())
+        self.assertIn("retired draft\n", self.out.getvalue())
         self.assertEqual(self.calls, [])
 
     def completed_call(self, role="answer", identifier="answer-1", path=None):
@@ -2547,12 +2544,14 @@ class MultiPlanTickTest(unittest.TestCase):
                               for draft, stamp in (("one", "020"), ("two", "010"))]
         first = self.tick(one, two)
         self.assertEqual(first[0].kind, "load")
-        self.assertEqual([(e["task"], e["queue_ts"]) for e in log.read()], [("one/a", "020")])
+        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read()],
+                         [("branch.landed", "one/a", "020"), ("queue.landed", None, "010")])
         self.plan_dir("two", tasks=("a",))
         self.tick(one, two)
         self.tick(one, two)
-        self.assertEqual([(e["task"], e["queue_ts"]) for e in log.read()],
-                         [("one/a", "020"), ("two/a", "010")])
+        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read()],
+                         [("branch.landed", "one/a", "020"), ("queue.landed", None, "010"),
+                          ("branch.landed", "two/a", "010")])
         self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", stamp])
                                           for stamp in ("", "", "010")])
 
@@ -2566,7 +2565,8 @@ class MultiPlanTickTest(unittest.TestCase):
         designer.enlist(two)
         self.tick()
         self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", ""])] * 2)
-        self.assertEqual([e["task"] for e in log.read()], ["one/a", "two/a"])
+        self.assertEqual([(e["ev"], e.get("task")) for e in log.read()],
+                         [("branch.landed", "one/a"), ("queue.landed", None), ("branch.landed", "two/a")])
 
     def test_draft_without_queue_records_keeps_empty_cursor(self):
         one, two = self.plan_dir("one", tasks=("a",)), self.plan_dir("two", tasks=("a",))
@@ -2694,6 +2694,81 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(load.call_args.args[0], [two.resolve()])
         page.assert_not_called()
 
+    def test_unowned_queue_records_import_once_without_advancing_the_task_cursor(self):
+        directory = self.plan_dir("draft", tasks=("a",))
+        self.append(dict(ev="branch.landed", task="draft/a", branch="draft/a", tip="a",
+                         main="main", queue_ts="001"))
+        self.queue_records = [dict(ev="rejected", ts="002", branch="hand/pushed", tip="tip",
+                                   step="default", tests=["pkg::test"], log="/queue/red.log"),
+                              dict(ev="collateral", ts="003", branch="hand/pushed", tip="new",
+                                   step="fuzzy", tests=["pkg::flake"], log="/queue/flake.log"),
+                              dict(ev="landed", ts="004", branch="hand/pushed", tip="new", main="merged")]
+        self.queue_records.append(self.queue_records[0])
+        self.tick(directory)
+        first = log.read()
+        self.tick(directory)
+        imported = [record for record in first if record["ev"].startswith("queue.")]
+        self.assertEqual([record["ev"] for record in imported],
+                         ["queue.rejected", "queue.collateral", "queue.landed"])
+        self.assertEqual([record["queue_ts"] for record in imported], ["002", "003", "004"])
+        self.assertEqual(imported[0]["tests"], ["pkg::test"])
+        self.assertEqual(imported[1]["tests"], ["pkg::flake"])
+        self.assertEqual(imported[2]["main"], "merged")
+        self.assertTrue(all("task" not in record for record in imported))
+        self.assertEqual([record["gate"] for record in imported], ["gate"] * 3)
+        self.assertEqual(log.read(), first)
+        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", "001"])] * 2)
+
+    def test_task_rejection_and_fab_branches_never_open_queue_signals(self):
+        directory = self.plan_dir("draft", tasks=("a",))
+        self.queue_records = [dict(ev="rejected", ts="001", branch=branch, tip="tip",
+                                   step="default", log="/queue/red.log") for branch in (
+                                       "draft/a-r2", "calls/foreign", "answers/foreign",
+                                       "repairs/foreign", "draft/integration", "foreign/integration")]
+        self.tick(directory)
+        imported = [record for record in log.read() if "queue_ts" in record]
+        self.assertEqual([(record["ev"], record["task"]) for record in imported],
+                         [("branch.rejected", "draft/a"), ("branch.rejected", "draft/integration")])
+        self.assertEqual(channel.signals(log.read()), [])
+
+    def test_unowned_queue_rejection_imports_without_plans_and_old_records_have_no_tests(self):
+        self.queue_records = [dict(ev="rejected", ts="001", branch="hand/pushed", tip="tip",
+                                   step="default", log="/queue/red.log")]
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(len(log.read()), 1)
+        record = log.read()[0]
+        self.assertEqual((record["ev"], record["branch"], record["tests"]),
+                         ("queue.rejected", "hand/pushed", []))
+        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", ""])] * 2)
+        self.assertTrue((log.home() / channel.PAGE).exists())
+        self.assertEqual(len(channel.signals(log.read())), 1)
+        page = (log.home() / channel.PAGE).read_text()
+        for fact in ("### queue:hand/pushed,", "- Tip: `tip`", "- Step: `default`",
+                     "- Tests: (see the log)", "- Read: `gate:/queue/red.log`",
+                     "- Clear: `fab page clear queue:hand/pushed TEXT`"):
+            self.assertIn(fact, page)
+
+    def test_unowned_queue_rejection_page_updates_for_new_tip_and_landing(self):
+        first = dict(ev="rejected", ts="001", branch="hand/pushed", tip="first",
+                     step="default", tests=["pkg::first"], log="/queue/first.log")
+        self.queue_records = [first]
+        self.tick()
+        page = (log.home() / channel.PAGE).read_text()
+        self.assertIn("- Tests: pkg::first", page)
+        self.assertIn("- Read: `gate:/queue/first.log`", page)
+        self.queue_records.append(dict(first, ts="002", tip="second", tests=["pkg::second"]))
+        self.tick()
+        page = (log.home() / channel.PAGE).read_text()
+        self.assertEqual(page.count("### queue:hand/pushed,"), 1)
+        self.assertIn("- Tip: `second`", page)
+        self.assertIn("- Tests: pkg::second", page)
+        self.assertNotIn("pkg::first", page)
+        self.queue_records.append(dict(ev="landed", ts="003", branch="hand/pushed",
+                                       tip="second", main="merged"))
+        self.tick()
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+
     def test_main_two_directories_and_no_plans(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         with patch.object(dispatch, "tick", return_value=[]) as tick:
@@ -2703,8 +2778,9 @@ class MultiPlanTickTest(unittest.TestCase):
             self.assertEqual(dispatch.main(["--only", str(one)]), 0)
         tick.assert_called_once_with(one, trigger="hand", only=True)
         self.assertEqual(self.tick(), [])
-        self.assertEqual(self.out.getvalue(), "plans - none\n")
-        self.assertEqual(self.fake.calls, [])
+        self.assertEqual(self.out.getvalue(), f"plans - none\npage - {log.home() / channel.PAGE}\n")
+        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", ""])])
+        self.assertEqual(len(self.fake.calls), 1)
         self.assertFalse(wake.want_path().exists())
 
     def test_dry_run_continues_after_failed_load_and_returns_one(self):
