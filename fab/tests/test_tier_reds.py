@@ -1,7 +1,6 @@
 """Red lifecycle decisions over records; acting shells use temporary homes and fakes."""
 
 import shlex
-import time
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
@@ -61,6 +60,14 @@ def command(call):
 
 
 class TierRedsOpeningTest(unittest.TestCase):
+    def test_unknown_commit_counts_open_with_evidence_instead_of_raising(self):
+        for count in (None, "three", [], {}, True, 1.5):
+            with self.subTest(commits=count), tmp_home() as home:
+                events = [tier(), checked(commits=count)]
+                actual = reds.open_reds(events, {TASK.id: TASK.id}, HOST, sh=FakeRunner(), log_path=home / "events")
+                self.assertEqual(len(actual), 1)
+                self.assertIn("unknown", reds.evidence_path("red-1").read_text())
+
     def test_loaded_queue_merge_opens_one_foreman(self):
         events = [tier(branches=("demo/a-r2",)), checked()]
         owners = reds.owners([(PLAN, {TASK.id: TASK})], events)
@@ -219,6 +226,17 @@ class TierRedsOpeningTest(unittest.TestCase):
 
 
 class TierRedsFoldTest(unittest.TestCase):
+    def test_covering_run_before_queue_import_proves_repair_landed(self):
+        events = repair_events() + [checked((), tip="cover", branches=["demo/red-1-r2"], starved=1)]
+        red, = reds.reds(events)
+        self.assertEqual((red.state, red.covered), ("landed", "cover"))
+        self.assertEqual(reds.closures(events), [])
+        events += [event("branch.landed", task="demo/red-1")]
+        self.assertEqual(reds.reds(events)[0].covered, "cover")
+        events += [checked(tip="later", branches=[])]
+        self.assertEqual(reds.reds(events)[0].state, "signal")
+        self.assertIn("still red at later", reds.reds(events)[0].signal_reason)
+
     def test_states_since_report_and_frozen_record(self):
         records = [opened(), *foreman_run("done"), settled(),
                    event("run.started", task="demo/red-1", run="demo/red-1-1", kind="implement"),
@@ -382,12 +400,12 @@ class TierRedsFoldTest(unittest.TestCase):
                      event("run.ended", run="other/a-1", outcome="done"),
                      event("branch.landed", task="other/a")]
         events += [unrelated[n % len(unrelated)] for n in range(20000 - len(events))]
-        start = time.perf_counter()
-        folded = reds.reds(events)
-        elapsed = time.perf_counter() - start
+        with patch.object(reds, "_advance", wraps=reds._advance) as advance:
+            folded = reds.reds(events)
+        self.assertEqual(advance.call_count, 300)
         self.assertEqual(len(folded), 100)
         self.assertEqual([red.state for red in folded], ["landed", "closed"] * 50)
-        self.assertLess(elapsed, 0.08, f"20k events / 100 reds took {elapsed:.3f}s")
+
 
 
 class TierRedsClosingTest(unittest.TestCase):
@@ -450,6 +468,14 @@ class TierRedsClosingTest(unittest.TestCase):
 
 
 class TierRedsTaskTest(unittest.TestCase):
+    def test_refusal_fix_folds_into_the_red_task_body(self):
+        events = repair_events() + [event("refusal.settled", task="demo/red-1", verdict="fix",
+                                         section="## Repair (refusal)\n\nFix its regression test.\n"),
+                                   event("refusal.settled", task="other/red-1", verdict="fix", section="foreign")]
+        body = reds.repair_tasks(PLAN, events, {})["demo/red-1"].body
+        self.assertIn("## Repair (refusal)\n\nFix its regression test.\n", body)
+        self.assertNotIn("foreign", body)
+
     def test_fix_makes_specless_task_with_evidence_section_owner_and_acceptance(self):
         task, = reds.repair_tasks(PLAN, repair_events(), {"red-1": "confirmed red"}).values()
         self.assertEqual((task.id, task.kind, task.part, task.repo, task.needs, task.files,

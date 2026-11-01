@@ -168,7 +168,12 @@ def reds(events: Iterable[dict]) -> list[Red]:
             identifier = None
         else:
             continue
-        affected = tuple(landed) if kind == TIERS_RUN else (identifier,)
+        if kind == TIERS_RUN:
+            named = {by_task[land.task_of(branch)] for branch in event.get("branches", ())
+                     if land.task_of(branch) in by_task}
+            affected = landed | named
+        else:
+            affected = (identifier,)
         for identifier in affected:
             red = found.get(identifier)
             if red is None or (red.state == "closed" and kind != "run.ended"):
@@ -221,10 +226,10 @@ def _advance(red: Red, event: dict) -> Red:
         return replace(red, started=True)
     if red.repair and kind == "branch.landed" and event.get("task") == red.task and red.state == "repairing":
         return replace(red, state="landed", since=stamp)
-    if red.state == "landed" and kind == TIERS_RUN and not event.get("faults"):
+    if red.repair and red.state in ("repairing", "landed") and kind == TIERS_RUN and not event.get("faults"):
         if not red.covered and any(land.task_of(branch) == red.task
                                    for branch in event.get("branches", ())):
-            red = replace(red, covered=event.get("tip", ""))
+            red = replace(red, state="landed", since=stamp, covered=event.get("tip", ""))
         if red.covered and set(red.keys).intersection(event.get("reds", ())):
             return replace(red, state="signal", since=stamp,
                            signal_reason=f"unfixed: {red.task} landed, still red at {event.get('tip', '')}")
@@ -367,7 +372,8 @@ def openings(events: Sequence[dict], owners: Mapping[str, str], *,
         checked = last_run.get(tip, {})
         result.append(Group(tip, tuple(record["key"] for record in records), suspects, assigned,
                             draft, "foreman" if assigned else "signal", reason, tuple(records),
-                            checked.get("commits"), tuple(checked.get("branches", ()))))
+                            checked.get("commits") if type(checked.get("commits")) is int else None,
+                            tuple(checked.get("branches", ()))))
     return result
 
 
@@ -462,10 +468,12 @@ def repair_tasks(plan: Plan, events: Sequence[dict], evidence_texts: Mapping[str
     this same events snapshot, to avoid folding again.
     """
     folded = reds(events) if folded is None else folded
-    answers = {}
+    answers, sections = {}, {}
     for event in events:
         if event.get("ev") == "question.answered" and "task" in event and event.get("answer"):
             answers.setdefault(event["task"], []).append(event["answer"])
+        elif event.get("ev") == "refusal.settled" and event.get("verdict") == "fix" and event.get("section"):
+            sections.setdefault(event.get("task"), []).append(event["section"])
     result = {}
     for red in folded:
         if red.draft != plan.draft or not red.repair or (red.state == "closed" and not red.started):
@@ -483,6 +491,8 @@ def repair_tasks(plan: Plan, events: Sequence[dict], evidence_texts: Mapping[str
                 "fabrig task (precheck --onto origin/main). A red of a live pair cannot be "
                 "reproduced without logins: use the foreman's section as the guide and the next "
                 "after-landing run as the check.\n")
+        for section in sections.get(red.task, ()):
+            body += "\n" + section.rstrip("\n") + "\n"
         if answers.get(red.task):
             body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers[red.task]) + "\n"
         result[red.task] = Task(red.task, "after-landing", KIND, "fabrig", (), ("**",), "high", 20, body, "")
