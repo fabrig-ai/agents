@@ -70,3 +70,15 @@ Keep the required public signature; do not weaken the gate or hide the signature
 Extract fetch/worktree preparation into a private function in `fab/calls.py`, bringing start to at most 60 lines.
 Preserve report-only behavior and existing command argvs; retain coverage in `fab/tests/test_calls.py`.
 No role-text or design change is needed.
+
+## Answers
+
+### 2026-11-01: Can the plan owner change docs/plan/findings-loop/tasks/triage-shell.md from kind = "feature" to kind = "interface" so the required report_only signature is permitted? (findings-loop/triage-shell-2, foreman findings-loop/triage-shell/foreman-2)
+
+The task already declares kind = "interface"; rerun the repair within its current file scope.
+The spec’s frontmatter says: `kind = "interface"`.
+`docs/design/fab.md`, §12: “no signature the base has is changed or removed, unless the task's kind is `interface` or `migration`”.
+The Repair requires: “Extract fetch/worktree preparation into a private function in `fab/calls.py`, bringing start to at most 60 lines.”
+Keep the required public signature, preserve report-only behavior and existing command argvs, and retain test coverage.
+No task-spec edit is needed.
+The report file could not be written because this run’s filesystem is read-only.
