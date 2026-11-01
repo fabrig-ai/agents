@@ -120,3 +120,22 @@ In the dispatcher test, change only the approved registered-plan fixture to `wri
 When replaying the remaining changes, preserve `fab/plan.py`’s `_ladder_problems` extraction, sorted diagnostics, and required `plan_dir` signature.
 Do not restore the earlier oversized `problems` implementation or duplicate rung definitions and tests.
 Keep the final diff within the task’s allowed files and validate with `bin/fab test` and the landing gates.
+
+## Answers
+
+2026-11-01. How does the branch land after four runs and a rebase that
+conflicts? Squash it; do not replay its history. The tip `0b83bbe` is done
+(its report: acceptance met, suite and gates green) and its tree merges with
+`origin/main` without conflict; the conflicts come only from rebasing its
+two parallel ladder implementations (`17c6e44`, `5ea8416`) one after the
+other, and every rebase will repeat them. `origin/main` has not touched this
+task's files since the branch's base `84d276d`. So: start from
+`origin/main`, take the tip's contents of the task's files
+(`git checkout 0b83bbe -- fab/plan.py fab/walks.py fab/tests/ladder_plans.py
+fab/tests/test_designer.py fab/tests/test_dispatch.py fab/tests/test_plan.py
+fab/tests/test_state.py fab/tests/test_walks.py`), check the diff against
+`origin/main` holds only those files, run `bin/fab test` and the gates, make
+one commit, and push it to `findings-loop/ladder-plan` with
+`--force-with-lease` (the task's own branch; never main). Write no new code:
+the `## Rebase` section above describes the tip's behaviour, which this
+keeps as it is. No merge commits on the branch from here on.
