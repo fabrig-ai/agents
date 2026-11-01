@@ -54,6 +54,24 @@ class QueueCpuTest(unittest.TestCase):
         cpu.build_wrapper(self.repo, self.home, lane="gate", sh=fake)
         self.assertEqual(fake.calls[0].argv[:3], ["heavy", "--gate", "cc"])
 
+    def test_build_lane_compiles_wrapper_without_gate(self):
+        fake = FakeNextest({None: [("b", "ok", "pass")]})
+        commands = []
+
+        def runner(argv, **kwargs):
+            commands.append(list(argv))
+            return fake(argv, **kwargs)
+
+        steps = gate.check_steps(self.repo, "full", [], None, lane="build")
+        outcomes, reports = queue_cpu.run_steps(steps, self.detail, {"selection": "full"},
+                                               lane="build", sh=runner)
+        self.assertTrue(all(step.green for step in outcomes))
+        self.assertEqual(set(reports), {"default", "fuzzy"})
+        builds = [command for command in commands if command[:2] == ["heavy", "cc"]]
+        self.assertEqual(len(builds), 1)
+        for command in commands + fake.calls:
+            self.assertNotIn("--gate", command)
+
     def test_failure_red_even_alongside_starvation_and_no_fuzzy_after_red(self):
         outcomes, reports = self.run_checks([("b", "slow", "starved"), ("b", "assertion", "fail")])
         self.assertFalse(outcomes[-1].green)

@@ -116,13 +116,14 @@ def gate_report(directory: Path, profile: str, measured: dict) -> Path:
 
 
 def run_steps(steps: Sequence[gate.Step], log: Path, record: dict, *,
-              sh: Runner = run) -> tuple[list[gate.StepResult], dict[str, Path]]:
+              lane: str = "gate", sh: Runner = run) -> tuple[list[gate.StepResult], dict[str, Path]]:
     """Run queue checks; build the wrapper lazily once, retaining each profile's records.
 
     cpu_trees holds JSON strings because fab's event log permits only scalar fields
     and lists of scalars. Each string has named totals, counts, optional budgets and
     at most ten tests. Raw collector records live under the unique batch directory.
-    Other steps keep gate.run_steps' exit checks and timeout.
+    The wrapper uses lane ("gate" by default); other steps keep gate.run_steps'
+    exit checks and timeout.
     """
     outcomes, reports = [], {}
     directory = log.with_suffix("")
@@ -134,7 +135,7 @@ def run_steps(steps: Sequence[gate.Step], log: Path, record: dict, *,
             repo = Path(step.cwd)
             if wrapper is None:
                 directory.mkdir(parents=True, exist_ok=False)
-                wrapper = cpu.build_wrapper(repo, directory, lane="gate", sh=sh)
+                wrapper = cpu.build_wrapper(repo, directory, lane=lane, sh=sh)
             target = directory / step.name
             atomic.extend(log, f"\n[{step.name}] {shlex.join(step.argv)} (cwd {step.cwd})\n")
             started = time.monotonic()

@@ -94,7 +94,7 @@ class FakeNextest:
 
     def __call__(self, argv: Sequence[str], **kwargs) -> Result:
         argv = list(argv)
-        if argv[:3] == ["heavy", "--gate", "cc"]:
+        if argv[:3] == ["heavy", "--gate", "cc"] or argv[:2] == ["heavy", "cc"]:
             return Result(0)  # fake the collector build, never touch a live service
         if len(argv) == 4 and argv[-1].endswith("/fab/cpu.py"):
             return self.collect(json.loads(kwargs["input"]), Path(kwargs["cwd"]))

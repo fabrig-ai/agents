@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 
-from fab import atomic, gate, log
+from fab import atomic, gate, log, nextest, queue_cpu
 from fab.sh import Runner, run
 
 
@@ -18,12 +19,14 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
 
     In slot: remember where HEAD is; fetch origin; detach at onto and merge tip (--no-ff;
     a conflict aborts it: outcome "conflict"); select with fab.gate.select (load: the metadata
-    loader); run the ratchet steps without --write and the build-lane checks, logging to
-    FAB_HOME/precheck/<tip>.log. Always restore the slot to where HEAD was, clean.
+    loader); run the ratchet steps without --write and build-lane checks, with test steps
+    through the queue collector, logging to FAB_HOME/precheck/<tip>.log. Always restore
+    the slot to where HEAD was, clean.
     With full, select "full" and ratchet every tree with scripts/old_forms.py.
     The receipt {tip, main (onto's sha), selection ("full", "docs" or sorted names), steps
-    (as "name:code:seconds"), outcome ("green", "red" or "conflict"), log, at (fab.log.now())} is
-    written to FAB_HOME/precheck/<tip>.json and returned.
+    (as "name:code:seconds"), starved (reconciled starved cases summed across test profiles),
+    outcome ("green", "red" or "conflict"), log, at (fab.log.now())} is written to
+    FAB_HOME/precheck/<tip>.json and returned.
     """
     slot = slot.resolve()
 
@@ -40,7 +43,7 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
     log_path = directory / f"{tip}.log"
     atomic.write(log_path, "")
     receipt = {"tip": tip, "main": main_tip, "selection": "docs", "steps": [],
-               "outcome": "conflict", "log": str(log_path)}
+               "outcome": "conflict", "starved": 0, "log": str(log_path)}
     load_metadata = gate.loader(load, sh=sh)
 
     try:
@@ -51,25 +54,39 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
         if not merged.ok:
             git("merge", "--abort")
         else:
-            paths = gate.changed_paths(slot, base=main_tip, sh=sh)
-            selected = ("full" if full else
-                        gate.select(slot, paths, base=main_tip, sh=sh, load=load_metadata))
-            receipt["selection"] = gate.shown(selected)
-            ratchet_paths = ([tree for tree in gate.TREES
-                              if (slot / tree / "scripts/old_forms.py").is_file()]
-                             if full else paths)
-            steps = gate.ratchet_steps(slot, ratchet_paths, write=False)
-            meta = load_metadata(slot) if isinstance(selected, set) else None
-            steps += gate.check_steps(slot, selected, paths, meta, lane="build")
-            steps = [step for step in steps if step.name not in without]  # a check along the way
-            results = gate.run_steps(steps, log_path, sh=sh)
-            receipt["steps"] = gate.step_texts(results)
-            receipt["outcome"] = "green" if all(step.green for step in results) else "red"
+            _checks(slot, main_tip, full, without, load_metadata, receipt, log_path, sh)
     finally:
         _restore(git, original, branch)
     receipt["at"] = log.now()
     atomic.write(directory / f"{tip}.json", json.dumps(receipt, indent=2) + "\n")
     return receipt
+
+
+def _checks(slot, main_tip, full, without, load_metadata, receipt, log_path, sh):
+    """Select checks and collect them, counting and naming reconciled starvation."""
+    paths = gate.changed_paths(slot, base=main_tip, sh=sh)
+    selected = ("full" if full else
+                gate.select(slot, paths, base=main_tip, sh=sh, load=load_metadata))
+    receipt["selection"] = gate.shown(selected)
+    ratchet_paths = ([tree for tree in gate.TREES
+                      if (slot / tree / "scripts/old_forms.py").is_file()]
+                     if full else paths)
+    steps = gate.ratchet_steps(slot, ratchet_paths, write=False)
+    meta = load_metadata(slot) if isinstance(selected, set) else None
+    steps += gate.check_steps(slot, selected, paths, meta, lane="build")
+    steps = [step for step in steps if step.name not in without]  # a check along the way
+    directory = log_path.with_suffix("")
+    if directory.exists():
+        shutil.rmtree(directory)
+    record = {"selection": receipt["selection"]}
+    results, reports = queue_cpu.run_steps(steps, log_path, record, lane="build", sh=sh)
+    receipt["steps"] = gate.step_texts(results)
+    receipt["outcome"] = "green" if all(step.green for step in results) else "red"
+    for profile, report in reports.items():
+        for case in nextest.junit(report, profile):
+            if case.result == "starved":
+                receipt["starved"] += 1
+                atomic.extend(log_path, f"{profile}: starved {case.binary} {case.test}\n")
 
 
 def _restore(git, original, branch):

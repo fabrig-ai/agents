@@ -3,13 +3,15 @@
 import io
 import json
 import os
+import shutil
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import atomic, gate, precheck
+from fab import atomic, gate, nextest, precheck
 from fab.sh import Result, run
+from fab.tests.landing_checks import FakeNextest
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
 
@@ -31,13 +33,25 @@ def metadata(repo):
 
 
 class PrecheckGitTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.fixture = cls.enterClassContext(tmp_home())
+        _, slot = git_pair(cls.fixture)
+        write(slot / ".config/nextest.toml", '[profile.default]\n[profile.fuzzy]\n')
+        git(slot, "add", ".config/nextest.toml")
+        git(slot, "commit", "-qm", "Configure fake nextest")
+        git(slot, "push", "-q", "origin", "HEAD:main")
+
     def setUp(self):
         self.home = self.enterContext(tmp_home())
-        self.origin, self.slot = git_pair(self.home)
+        root = shutil.copytree(self.fixture, self.home / "git", symlinks=True)
+        self.origin, self.slot = root / "origin.git", root / "clone"
+        git(self.slot, "remote", "set-url", "origin", str(self.origin))
         self.base = git(self.slot, "rev-parse", "HEAD")
         self.branch = "draft/task"
         git(self.slot, "checkout", "-qb", self.branch)
         self.checks = FakeRunner()
+        self.nextest = FakeNextest({None: [("b", "ok", "pass")]}, fallback=self.checks)
         self.commands = []
 
     def commit(self, path, text):
@@ -59,7 +73,7 @@ class PrecheckGitTest(unittest.TestCase):
         self.commands.append(list(argv))
         if argv[0] == "git":
             return run(argv, env={**os.environ, **GIT_ENV}, **kwargs)
-        return self.checks(argv, **kwargs)
+        return self.nextest(argv, **kwargs)
 
     def check(self, tip, **kwargs):
         return precheck.precheck(self.slot, tip, sh=self.runner, **kwargs)
@@ -74,7 +88,9 @@ class PrecheckGitTest(unittest.TestCase):
 
     def assert_receipt(self, receipt, tip, main, *, home=None):
         directory = (home or self.home / "fab") / "precheck"
-        self.assertEqual(set(receipt), {"tip", "main", "selection", "steps", "outcome", "log", "at"})
+        self.assertEqual(set(receipt), {"tip", "main", "selection", "steps", "outcome", "starved", "log", "at"})
+        self.assertIs(type(receipt["starved"]), int)
+        self.assertGreaterEqual(receipt["starved"], 0)
         self.assertEqual(receipt["tip"], tip)
         self.assertEqual(receipt["main"], main)
         self.assertEqual(receipt["log"], str(directory / f"{tip}.log"))
@@ -114,6 +130,7 @@ class PrecheckGitTest(unittest.TestCase):
         self.assert_receipt(receipt, tip, main)
         self.assertEqual(receipt["outcome"], "green")
         self.assertEqual(receipt["selection"], ["core", "dependent"])
+        self.assertEqual(receipt["starved"], 0)
         self.assertEqual(loaded, [self.slot])
         self.assertEqual([step.rsplit(":", 2)[0] for step in receipt["steps"]],
                          ["ratchet:skein", "fmt", "clippy", "build", "default", "fuzzy"])
@@ -121,7 +138,7 @@ class PrecheckGitTest(unittest.TestCase):
         calls = self.checks.argvs()
         self.assertNotIn("--write", calls[0])
         self.assertEqual(calls[1], ["cargo", "fmt", "--check", "-p", "core"])
-        for call in calls[2:]:
+        for call in calls[2:] + self.nextest.calls:
             self.assertEqual(call[:2], ["heavy", "cargo"])
             self.assertNotIn("--gate", call)
             start = call.index("-p")
@@ -129,6 +146,64 @@ class PrecheckGitTest(unittest.TestCase):
         self.assertIn("fake check output", Path(receipt["log"]).read_text())
         self.assertFalse((self.slot / "main.md").exists())
         self.assertFalse((self.slot / "generated").exists())
+        self.assert_restored(tip)
+
+    def _global_timeout_checks(self, *, assertion=False):
+        cases = [("b", "cancelled-a", "fail"), ("b", "cancelled-b", "fail"),
+                 ("b", "ok", "pass")]
+        if assertion:
+            cases.append(("b", "assertion", "fail"))
+        self.nextest = FakeNextest({None: cases}, codes={None: 100}, fallback=self.checks)
+        original = self.nextest.collect
+
+        def collect(request, repo):
+            result = original(request, repo)
+            path = Path(request["directory"]) / "summary.json"
+            measured = json.loads(path.read_text())
+            for test in measured["tests"]:
+                test["starved"] = int(test["test_name"].startswith("cancelled-"))
+            measured["failures"] = ["b assertion"] if assertion else []
+            measured["suite"] = dict(starved_run=True, starved=2)
+            atomic.write(path, json.dumps(measured))
+            return Result(result.code, err="Cancelling due to global timeout\n")
+
+        self.nextest.collect = collect
+
+    def test_global_timeout_starvation_green_counted_and_named_in_build_lane(self):
+        tip = self.commit("Cargo.toml", "workspace input\n")
+        self._global_timeout_checks()
+        receipt = self.check(tip)
+        self.assert_receipt(receipt, tip, self.base)
+        self.assertEqual(receipt["outcome"], "green")
+        self.assertEqual(receipt["starved"], 4)
+        self.assertEqual([step.split(":")[:2] for step in receipt["steps"]][-2:],
+                         [["default", "100"], ["fuzzy", "100"]])
+        content = Path(receipt["log"]).read_text()
+        lines = [line for line in content.splitlines() if ": starved " in line]
+        self.assertEqual(lines, [f"{profile}: starved b cancelled-{suffix}"
+                                 for profile in ("default", "fuzzy") for suffix in ("a", "b")])
+        self.assertGreater(content.index(lines[0]), content.index("fuzzy/smith: CPU"))
+        directory = Path(receipt["log"]).with_suffix("")
+        raw = nextest.junit(directory / "default/junit.xml", "default")
+        self.assertEqual([case.result for case in raw], ["fail", "fail", "pass"])
+        for command in self.commands + self.nextest.calls:
+            self.assertNotIn("--gate", command)
+        self.assertTrue(any(command[:2] == ["heavy", "cc"] for command in self.commands))
+        self.assert_restored(tip)
+
+    def test_assertion_beside_global_timeout_stays_red_and_stops_before_fuzzy(self):
+        tip = self.commit("Cargo.toml", "workspace input\n")
+        self._global_timeout_checks(assertion=True)
+        receipt = self.check(tip)
+        self.assert_receipt(receipt, tip, self.base)
+        self.assertEqual((receipt["outcome"], receipt["starved"]), ("red", 2))
+        self.assertEqual(receipt["steps"][-1].split(":")[:2], ["default", "100"])
+        self.assertFalse(any(step.startswith("fuzzy:") for step in receipt["steps"]))
+        self.assertEqual(len(self.nextest.calls), 1)
+        content = Path(receipt["log"]).read_text()
+        self.assertIn("default: starved b cancelled-a\n", content)
+        self.assertIn("default: starved b cancelled-b\n", content)
+        self.assertNotIn("starved b assertion", content)
         self.assert_restored(tip)
 
     def test_onto_checks_fetched_trunk_sha_and_restores_branch(self):
@@ -162,6 +237,7 @@ class PrecheckGitTest(unittest.TestCase):
         receipt = self.check(tip, home=home, load=lambda _: self.fail("docs loaded metadata"))
         self.assert_receipt(receipt, tip, self.base, home=home)
         self.assertEqual(receipt["selection"], "docs")
+        self.assertEqual(receipt["starved"], 0)
         self.assertEqual(receipt["steps"], [])
         self.assertEqual(receipt["outcome"], "green")
         self.assertEqual(self.checks.calls, [])
@@ -173,6 +249,7 @@ class PrecheckGitTest(unittest.TestCase):
         receipt = self.check(tip)
         self.assert_receipt(receipt, tip, self.base)
         self.assertEqual(receipt["outcome"], "red")
+        self.assertEqual(receipt["starved"], 0)
         self.assertEqual([step.split(":")[:2] for step in receipt["steps"]],
                          [["fmt", "0"], ["clippy", "7"]])
         self.assertEqual(len(self.checks.calls), 2)
@@ -195,6 +272,7 @@ class PrecheckGitTest(unittest.TestCase):
         receipt = self.check(tip)
         self.assert_receipt(receipt, tip, main)
         self.assertEqual(receipt["outcome"], "conflict")
+        self.assertEqual(receipt["starved"], 0)
         self.assertEqual(receipt["steps"], [])
         self.assertEqual(self.checks.calls, [])
         self.assertIn("CONFLICT", Path(receipt["log"]).read_text())
@@ -234,14 +312,21 @@ class PrecheckGitTest(unittest.TestCase):
         self.assertEqual(git(self.slot, "status", "--porcelain", "--branch"), "## HEAD (no branch)")
         self.assertEqual(git(self.slot, "rev-parse", self.branch), tip)
 
-    def test_repeated_check_replaces_log_instead_of_appending(self):
+    def test_repeated_check_replaces_collector_directory_and_log(self):
         tip = self.commit("Cargo.toml", "workspace input\n")
         self.checks.on([], Result(0, "first output\n"))
+        self.nextest.results = {None: [("b", "old", "starved")]}
         first = self.check(tip)
+        directory = Path(first["log"]).with_suffix("")
+        atomic.write(directory / "stale", "old collector output\n")
+        self.nextest.results = {None: [("b", "new", "pass")]}
         self.checks.rules.clear()
         self.checks.on([], Result(0, "second output\n"))
         second = self.check(tip)
         self.assertEqual(first["log"], second["log"])
+        self.assertEqual((first["starved"], second["starved"]), (2, 0))
+        self.assertFalse((directory / "stale").exists())
+        self.assertTrue((directory / "default/gate-junit.xml").is_file())
         content = Path(second["log"]).read_text()
         self.assertNotIn("first output", content)
         self.assertIn("second output", content)
@@ -258,13 +343,14 @@ class PrecheckFullTest(unittest.TestCase):
                     if tree != absent:
                         atomic.write(slot / tree / "scripts/old_forms.py", "# fake service\n")
                 atomic.write(slot / "outside/scripts/old_forms.py", "# outside TREES\n")
+                atomic.write(slot / ".config/nextest.toml", '[profile.default]\n[profile.fuzzy]\n')
                 fake = (FakeRunner().on(["git", "rev-parse", "HEAD"], Result(0, "original\n"))
                         .on(["git", "rev-parse", "--verify", "origin/component-kit/integration^{commit}"],
                             Result(0, "trunk-sha\n"))
                         .on(["git", "rev-parse", "--verify", "--end-of-options"], Result(0, "tip-sha\n"))
                         .on(["git", "diff"], Result(0, paths)))
                 receipt = precheck.precheck(slot, "tip", onto="origin/component-kit/integration",
-                                            full=True, sh=fake,
+                                            full=True, sh=FakeNextest({None: []}, fallback=fake),
                                             load=lambda _: self.fail("full loaded metadata"))
                 trees = sorted(tree for tree in gate.TREES if tree != absent)
                 self.assertEqual(receipt["main"], "trunk-sha")
