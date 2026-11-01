@@ -9,6 +9,7 @@ landing = "queue"
 # task, as the request says; the spec is tasks/guard.md, the cut's decisions
 # and critical path notes/decisions.md.
 
+retired = true
 [buffer]
 low = 1.0
 high = 2.0
