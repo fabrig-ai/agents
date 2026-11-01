@@ -4,12 +4,14 @@ The metrics are the landing draft's (docs/design/draft/landing-pipeline.md, 3) t
 queue's record holds: its `batch`, `landed` and `rejected` records (fab.queue.Queue.attempt),
 joined with the log's branch.ready for latency, and heavy's records on the gate machine.
 The log also supplies after-landing red routes, settlements, repairs and closures, and
-hand-pushed rejections; their open signals follow the user's page.
+hand-pushed rejections; their open signals follow the user's page. QA records supply
+walk verdicts, findings, triage decisions, repair landings and time to a rung's next pass.
 Every function here is pure; `render` puts them together for one window.
 """
 
 from __future__ import annotations
 
+import re
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -60,6 +62,20 @@ FIGURES = (  # (key, label), in the report's order
     ("reds_closed_cleared", "after-landing reds closed cleared"),
     ("red_recovery_hours", "hours opened to recovered, median"),
     ("hand_rejected", "hand-pushed rejections"),
+    ("walks_pass", "walks ended pass"),
+    ("walks_fail", "walks ended fail"),
+    ("walks_void", "walks ended void"),
+    ("findings_raised", "findings raised"),
+    ("findings_merged", "findings merged"),
+    ("triaged_path", "findings triaged path"),
+    ("triaged_backlog", "findings triaged backlog"),
+    ("triaged_user", "findings triaged user"),
+    ("triaged_brief", "findings triaged brief"),
+    ("triaged_drop", "findings triaged drop"),
+    ("triaged_again", "findings triaged again"),
+    ("finding_repairs_landed", "finding repairs landed"),
+    ("rungs_passed", "rungs passed"),
+    ("walk_pass_hours", "hours failed walk to rung passed, median"),
 )
 
 
@@ -246,6 +262,49 @@ def _red_figures(events: list[dict], window: Window) -> dict[str, Figure]:
     }
 
 
+def _qa_figures(events: list[dict], window: Window) -> dict[str, Figure]:
+    """Count raw QA records by ts in the window (docs/design/fab.md, 10).
+
+    Join failed walk endings to their starts' draft and rung, then to that rung's
+    next pass in log order. Include failures before the window for passes within it;
+    leave failures without a later pass out. Hours use the report's nearest-rank median.
+    """
+    records = within(events, window)
+    kinds = Counter(event.get("ev") for event in records)
+    verdicts = Counter(event.get("verdict") for event in records
+                       if event.get("ev") == "walk.ended")
+    decisions = Counter(event.get("decision") for event in records
+                        if event.get("ev") == "finding.triaged")
+    walks, failures, hours = {}, {}, []
+    for event in events:
+        kind = event.get("ev")
+        if kind == "walk.started":
+            walks[event["walk"]] = (event["draft"], event["rung"])
+        elif kind == "walk.ended" and event.get("verdict") == "fail":
+            rung = walks.get(event.get("walk"))
+            if rung is not None:
+                failures.setdefault(rung, []).append(event["ts"])
+        elif kind == "rung.passed":
+            starts = failures.pop((event["draft"], event["rung"]), [])
+            if window.holds(event["ts"]):
+                hours.extend(minutes(start, event["ts"]) / 60 for start in starts)
+    return {
+        "walks_pass": verdicts["pass"],
+        "walks_fail": verdicts["fail"],
+        "walks_void": verdicts["void"],
+        "findings_raised": kinds["finding.raised"],
+        "findings_merged": kinds["finding.merged"],
+        **{f"triaged_{decision}": decisions[decision]
+           for decision in ("path", "backlog", "user", "brief", "drop", "again")},
+        "finding_repairs_landed": sum(event.get("ev") == "branch.landed"
+                                      and isinstance(event.get("task"), str)
+                                      and re.fullmatch(r".+/finding-[0-9]+", event["task"]) is not None
+                                      for event in records),
+        "rungs_passed": kinds["rung.passed"],
+        "walk_pass_hours": quantile(hours, 0.5),
+    }
+
+
 def _open_signals(events: list[dict], window: Window) -> list[Signal]:
     """Ownerless reds and hand-pushed rejections still open at the window's end.
 
@@ -294,6 +353,9 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
     - reds_opened, reds_foreman, reds_page, reds_fix/none/left, red_repairs_landed,
       reds_closed (also by reason), red_recovery_hours and hand_rejected: the log's
       after-landing and hand-pushed decisions, from _red_figures.
+    - walks_pass/fail/void, findings_raised/merged, triaged_<decision>,
+      finding_repairs_landed, rungs_passed and walk_pass_hours: raw QA records and
+      hours from failed walks to their rung's next pass, from _qa_figures.
     Counts are ints; minutes, hours, rates and percentages are floats."""
     records = within(sources.queue, window)
     all_batches = [record for record in records if record.get("ev") == "batch"]
@@ -348,6 +410,7 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
         "lane_wait": heavy["lane_wait"],
         "disk_wait": heavy["disk_wait"],
         **_red_figures(sources.log, window),
+        **_qa_figures(sources.log, window),
     }
 
 

@@ -14,6 +14,10 @@ WINDOW = Window(START, END)
 RED_COUNTS = {"reds_opened", "reds_foreman", "reds_page", "reds_fix", "reds_none", "reds_left",
               "red_repairs_landed", "reds_closed", "reds_closed_recovered", "reds_closed_absent",
               "reds_closed_cleared", "hand_rejected"}
+# QA counts remain integers; only the hours median can be absent.
+QA_COUNTS = {"walks_pass", "walks_fail", "walks_void", "findings_raised", "findings_merged",
+             "triaged_path", "triaged_backlog", "triaged_user", "triaged_brief", "triaged_drop",
+             "triaged_again", "finding_repairs_landed", "rungs_passed"}
 
 
 def ts(time, day="2026-10-29"):
@@ -232,14 +236,19 @@ class LandingReportTest(unittest.TestCase):
             "reds_left": 0, "red_repairs_landed": 0, "reds_closed": 0, "reds_closed_recovered": 0,
             "reds_closed_absent": 0, "reds_closed_cleared": 0, "red_recovery_hours": None,
             "hand_rejected": 0,
+            "walks_pass": 0, "walks_fail": 0, "walks_void": 0,
+            "findings_raised": 0, "findings_merged": 0,
+            "triaged_path": 0, "triaged_backlog": 0, "triaged_user": 0,
+            "triaged_brief": 0, "triaged_drop": 0, "triaged_again": 0,
+            "finding_repairs_landed": 0, "rungs_passed": 0, "walk_pass_hours": None,
         })
         self.assertEqual(set(actual), {key for key, _ in landing.FIGURES})
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
                   "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
-        counts |= RED_COUNTS
+        counts |= RED_COUNTS | QA_COUNTS
         for key, value in actual.items():
             with self.subTest(key=key):
-                if key == "red_recovery_hours":
+                if key in ("red_recovery_hours", "walk_pass_hours"):
                     self.assertIsNone(value)
                 else:
                     self.assertIs(type(value), int if key in counts else float)
@@ -250,8 +259,9 @@ class LandingReportTest(unittest.TestCase):
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
                   "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
         absent = {"branches_per_batch", "red_share", "false_red_rate", "latency_median",
-                  "latency_p90", "oldest_wait", "repair_rounds", "repair_minutes", "red_recovery_hours"}
-        counts |= RED_COUNTS
+                  "latency_p90", "oldest_wait", "repair_rounds", "repair_minutes", "red_recovery_hours",
+                  "walk_pass_hours"}
+        counts |= RED_COUNTS | QA_COUNTS
         for key, _ in landing.FIGURES:
             with self.subTest(key=key):
                 if key in absent:
@@ -260,6 +270,98 @@ class LandingReportTest(unittest.TestCase):
                     self.assertEqual(empty[key], 0)
                     self.assertIs(type(empty[key]), int if key in counts else float)
         self.assertEqual(landing.figures(sources, {}, Window(START, START)), empty)
+
+    def test_landing_report_counts_raw_qa_records_only_within_window(self):
+        records = [
+            *({"ev": "walk.ended", "walk": "walk-1", "verdict": verdict}
+              for verdict in ("pass", "fail", "void")),
+            {"ev": "finding.raised", "finding": "finding-1"},
+            {"ev": "finding.merged", "finding": "finding-1", "into": "finding-2"},
+            *({"ev": "finding.triaged", "finding": "finding-1", "decision": decision}
+              for decision in ("path", "backlog", "user", "brief", "drop", "again")),
+            {"ev": "branch.landed", "task": "demo/finding-12"},
+            {"ev": "rung.passed", "draft": "demo", "rung": "one"},
+        ]
+        events = [{**record, "ts": stamp, "queue_ts": END if WINDOW.holds(stamp) else START}
+                  for stamp in (ts("23:59", "2026-10-28"), START, ts("00:30"), END)
+                  for record in records]
+        for task in ("finding-1", "/finding-1", "demo/finding-1/foreman", "demo/finding-1-r2",
+                     "demo/finding-no", "demo/red-1", "demo/a", "demo/finding-1/", "demo/finding-", None):
+            events.append({"ts": START, "ev": "branch.landed", "task": task})
+        actual = landing.figures(Sources(events, [], {}), {}, WINDOW)
+        self.assertEqual({key: actual[key] for key in QA_COUNTS},
+                         dict.fromkeys(QA_COUNTS, 2))
+        self.assertIsNone(actual["walk_pass_hours"])
+        for window in (Window(ts("23:59", "2026-10-28"), START),
+                       Window(END, ts("02:00"))):
+            outside = landing.figures(Sources(events, [], {}), {}, window)
+            self.assertEqual({key: outside[key] for key in QA_COUNTS},
+                             dict.fromkeys(QA_COUNTS, 1))
+        keys = [key for key, _ in landing.FIGURES]
+        self.assertEqual(keys[keys.index("hand_rejected") + 1:], [
+            "walks_pass", "walks_fail", "walks_void", "findings_raised", "findings_merged",
+            "triaged_path", "triaged_backlog", "triaged_user", "triaged_brief", "triaged_drop",
+            "triaged_again", "finding_repairs_landed", "rungs_passed", "walk_pass_hours",
+        ])
+        with tmp_home():
+            rendered = landing.render(Sources(events, [], {}), {}, WINDOW)
+        for key, label in landing.FIGURES:
+            if key in QA_COUNTS:
+                self.assertIn(f"| {label} | 2 (prev 1) |", rendered)
+
+    def test_landing_report_qa_median_joins_failed_walks_to_their_rungs_next_pass(self):
+        events = []
+        for number, time, draft, rung in ((1, "20:00", "demo", "one"),
+                                         (2, "22:00", "demo", "one"),
+                                         (3, "23:00", "other", "one"),
+                                         (4, "18:00", "demo", "two"),
+                                         (5, "19:00", "demo", "never")):
+            events.extend([
+                {"ts": ts(time, "2026-10-28"), "ev": "walk.started", "walk": f"walk-{number}",
+                 "draft": draft, "rung": rung},
+                {"ts": ts(time, "2026-10-28"), "ev": "walk.ended", "walk": f"walk-{number}",
+                 "verdict": "fail"},
+            ])
+        for time, day, draft, rung in (("21:00", "2026-10-28", "demo", "one"),
+                                       ("00:00", "2026-10-29", "demo", "one"),
+                                       ("00:15", "2026-10-29", "demo", "one"),
+                                       ("00:30", "2026-10-29", "other", "one"),
+                                       ("00:45", "2026-10-29", "demo", "unfailed"),
+                                       ("01:00", "2026-10-29", "demo", "two")):
+            events.append({"ts": ts(time, day), "ev": "rung.passed", "draft": draft, "rung": rung})
+        sources = Sources(sorted(events, key=lambda event: event["ts"]), [], {})
+        actual = landing.figures(sources, {}, WINDOW)
+        self.assertEqual(actual["walks_fail"], 0)
+        self.assertEqual(actual["rungs_passed"], 4)
+        self.assertEqual(actual["walk_pass_hours"], 1.5)  # nearest rank of 1.5 and 2 hours
+        with tmp_home():
+            rendered = landing.render(sources, {}, WINDOW)
+        self.assertIn("| hours failed walk to rung passed, median | 1.5 (prev -) |", rendered)
+
+    def test_landing_report_qa_median_counts_each_failure_until_the_next_pass(self):
+        events = []
+        for number, time in ((1, "00:00"), (2, "00:15")):
+            events.extend([
+                {"ts": ts(time), "ev": "walk.started", "walk": f"walk-{number}",
+                 "draft": "demo", "rung": "one"},
+                {"ts": ts(time), "ev": "walk.ended", "walk": f"walk-{number}", "verdict": "fail"},
+            ])
+        events.append({"ts": ts("00:30"), "ev": "rung.passed", "draft": "demo", "rung": "one"})
+        actual = landing.figures(Sources(events, [], {}), {}, WINDOW)
+        self.assertEqual(actual["walk_pass_hours"], 0.25)
+
+    def test_landing_report_day_without_qa_records_shows_zeros_and_absent_median(self):
+        sources, hosts = metric_sources()
+        day = Window(START, ts("00:00", "2026-10-30"))
+        actual = landing.figures(sources, hosts, day)
+        self.assertEqual({key: actual[key] for key in QA_COUNTS}, dict.fromkeys(QA_COUNTS, 0))
+        self.assertIsNone(actual["walk_pass_hours"])
+        with tmp_home():
+            rendered = landing.render(sources, hosts, day)
+        for key, label in landing.FIGURES:
+            if key in QA_COUNTS:
+                self.assertIn(f"| {label} | 0 (prev 0) |", rendered)
+        self.assertIn("| hours failed walk to rung passed, median | - (prev -) |", rendered)
 
     def test_landing_report_counts_red_routes_settlements_repairs_and_closures_from_log(self):
         sources = red_sources()
