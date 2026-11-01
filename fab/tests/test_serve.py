@@ -573,6 +573,65 @@ class SubscriptionsTest(unittest.TestCase):
         self.assertIn("Codex · max · c***1@example.invalid · 2 sign-ins", page)
         self.assertIn('<div class="sub">1 subscriptions</div>', page)
 
+    def test_subscriptions_group_newest_legacy_check_supplies_week(self):
+        reset = NOW.timestamp() + 7200
+        events = [self.added(), self.added("codex-2"),
+                  self.checked(600, limits=[("week", 40, reset)]),
+                  self.checked(60, name="codex-2", email="codex-1@example.invalid",
+                               limits=[], used=72, resets=reset)]
+        before = copy.deepcopy(events)
+        subscription = serve.snapshot(list(reversed(events)), NOW, [])["subscriptions"][0]
+        self.assertEqual(events, before)
+        self.assertEqual(subscription["logins"], 2)
+        self.assertEqual(subscription["checked_age_s"], 60)
+        self.assertEqual(subscription["limits"], [
+            {"name": "week", "used": 72, "resets": reset,
+             "rate_per_h": None, "full_at": None, "at_reset": None},
+        ])
+
+    def test_subscriptions_limitless_check_keeps_older_figure_and_age(self):
+        reset = NOW.timestamp() + 7200
+        events = [self.added(), self.added("codex-2"),
+                  self.checked(4200, limits=[("week", 60, reset)]),
+                  self.checked(600, limits=[("week", 70, reset)]),
+                  self.checked(60, name="codex-2", email="codex-1@example.invalid",
+                               plan="max", limits=[])]
+        subscription = serve.snapshot(list(reversed(events)), NOW, [])["subscriptions"][0]
+        self.assertEqual(subscription["checked_age_s"], 600)
+        self.assertEqual(subscription["plan"], "max")
+        self.assertEqual(subscription["limits"], [
+            {"name": "week", "used": 70, "resets": reset,
+             "rate_per_h": 10, "full_at": None, "at_reset": 91.7},
+        ])
+
+    def test_subscriptions_pace_spans_legacy_and_current_checks(self):
+        reset = NOW.timestamp() + 7200
+        for legacy_latest in (False, True):
+            with self.subTest(legacy_latest=legacy_latest):
+                older = (self.checked(4200, limits=[], used=70, resets=reset) if not legacy_latest
+                         else self.checked(4200, limits=[("week", 70, reset)]))
+                latest = (self.checked(600, limits=[], used=80, resets=reset) if legacy_latest
+                          else self.checked(600, limits=[("week", 80, reset)]))
+                events = [self.added(), older, latest]
+                limit = serve.snapshot(events, NOW, [])["subscriptions"][0]["limits"][0]
+                self.assertEqual(limit, {"name": "week", "used": 80, "resets": reset,
+                                         "rate_per_h": 10, "full_at": NOW.timestamp() + 6600,
+                                         "at_reset": None})
+
+    def test_subscriptions_legacy_figures_require_finite_numbers(self):
+        for used in (None, True, "72", float("inf"), float("nan")):
+            with self.subTest(used=used):
+                events = [self.added(), self.checked(limits=[], used=used, resets=123)]
+                self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["limits"], [])
+        for resets in (None, True, "123", float("inf"), float("nan")):
+            with self.subTest(resets=resets):
+                events = [self.added(), self.checked(limits=[], used=0, resets=resets)]
+                limit = serve.snapshot(events, NOW, [])["subscriptions"][0]["limits"][0]
+                self.assertEqual((limit["used"], limit["resets"]), (0, None))
+        events = [self.added(), self.checked(limits=[("week", 40, 123)], used=72, resets=456)]
+        limit = serve.snapshot(events, NOW, [])["subscriptions"][0]["limits"][0]
+        self.assertEqual((limit["used"], limit["resets"]), (40, 123))
+
     def test_subscriptions_claude_box_alone_is_a_claude_row(self):
         name = "claude-box-1"
         current = serve.snapshot([self.added(name, "claude-box"),
@@ -838,7 +897,10 @@ class SubscriptionsTest(unittest.TestCase):
         events = [self.added(), event("login.checked", id="codex-1", email="codex-1@example.invalid",
                                       plan="pro", used=72, resets=123)]
         current = serve.snapshot(events, NOW, [])
-        self.assertEqual(current["subscriptions"][0]["limits"], [])
+        self.assertEqual(current["subscriptions"][0]["limits"], [
+            {"name": "week", "used": 72, "resets": 123,
+             "rate_per_h": None, "full_at": None, "at_reset": None},
+        ])
         self.assertIn("Codex · pro · c***1@example.invalid · 1 sign-in", serve.render(current))
 
 

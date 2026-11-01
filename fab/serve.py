@@ -96,6 +96,8 @@ def _limits(event: dict) -> list[dict]:
     columns = [event.get(key, []) for key in ("limit_names", "limit_used", "limit_resets")]
     if not all(isinstance(column, list) for column in columns) or len({len(c) for c in columns}) != 1:
         return []
+    if not columns[0] and (used := _number(event.get("used"))) is not None:
+        return [{"name": "week", "used": used, "resets": _number(event.get("resets"))}]
     return [{"name": name, "used": _number(used), "resets": _number(resets)}
             for name, used, resets in zip(*columns)
             if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9 ()\[\]?]{1,46}", name)
@@ -118,6 +120,38 @@ def _held_by(lent: list[logins.Login], hosts: Collection[str]) -> list[str]:
                           if login.holder.startswith(prefix)), "other")
         labels.append(label)
     return sorted(labels)
+
+
+def _subscription_limits(samples: list[tuple[dict, datetime]],
+                         now: datetime) -> tuple[list[dict], datetime]:
+    """Use the newest check with limits and pace it against the same reset window."""
+    event, stamp = next((sample for sample in reversed(samples) if _limits(sample[0])), samples[-1])
+    limits = []
+    for limit in _limits(event):
+        label, used, resets = limit["name"], limit["used"], limit["resets"]
+        if label == "5 h" and (used is None or used <= 80):
+            continue
+        limit.update(rate_per_h=None, full_at=None, at_reset=None)
+        if used is not None and resets is not None and resets > now.timestamp():
+            for earlier, before in samples:
+                elapsed = (stamp - before).total_seconds()
+                if elapsed < 1200:
+                    continue
+                previous = next((sample for sample in _limits(earlier)
+                                 if sample["name"] == label and sample["resets"] == resets
+                                 and sample["used"] is not None), None)
+                if previous is None or previous["used"] > used:
+                    continue
+                rate = (used - previous["used"]) * 3600 / elapsed
+                limit["rate_per_h"] = round(rate, 1)
+                full = stamp.timestamp() + (100 - used) * 3600 / rate if rate > 0 else None
+                if full is not None and full < resets:
+                    limit["full_at"] = full
+                else:
+                    limit["at_reset"] = round(used + rate * (resets - stamp.timestamp()) / 3600, 1)
+                break
+        limits.append(limit)
+    return limits, stamp
 
 
 def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime,
@@ -150,33 +184,8 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime,
         samples = sorted((sample for name in names for sample in checks[name]
                           if not sample[0].get("error") and sample[0].get("email") == email),
                          key=lambda pair: pair[1])
-        event, stamp = samples[-1]
-        plan = event.get("plan")
-        limits = []
-        for limit in _limits(event):
-            label, used, resets = limit["name"], limit["used"], limit["resets"]
-            if label == "5 h" and (used is None or used <= 80):
-                continue
-            limit.update(rate_per_h=None, full_at=None, at_reset=None)
-            if used is not None and resets is not None and resets > now.timestamp():
-                for earlier, before in samples[:-1]:
-                    elapsed = (stamp - before).total_seconds()
-                    if elapsed < 1200:
-                        continue
-                    previous = next((sample for sample in _limits(earlier)
-                                     if sample["name"] == label and sample["resets"] == resets
-                                     and sample["used"] is not None), None)
-                    if previous is None or previous["used"] > used:
-                        continue
-                    rate = (used - previous["used"]) * 3600 / elapsed
-                    limit["rate_per_h"] = round(rate, 1)
-                    full = stamp.timestamp() + (100 - used) * 3600 / rate if rate > 0 else None
-                    if full is not None and full < resets:
-                        limit["full_at"] = full
-                    else:
-                        limit["at_reset"] = round(used + rate * (resets - stamp.timestamp()) / 3600, 1)
-                    break
-            limits.append(limit)
+        plan = samples[-1][0].get("plan")
+        limits, stamp = _subscription_limits(samples, now)
         label = "***"
         parts = email.split("@")
         if len(parts) == 2 and all(parts):

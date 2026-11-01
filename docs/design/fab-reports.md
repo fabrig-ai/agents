@@ -171,16 +171,24 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   first character before `***`. Local characters keep their case; the domain
   is otherwise unchanged. Without exactly one `@` and two nonempty parts,
   the label is `***`. For example, `free.ekanayaka@gmail.com` becomes
-  `f***a@gmail.com`. The group's newest successful check supplies its plan,
-  age and limits. The three scalar log lists are zipped back to `name`,
-  `used`, `resets`; old checks without them have no limits. Fable is omitted;
+  `f***a@gmail.com`. The group's newest successful check supplies its plan.
+  A check's three nonempty scalar log lists are zipped back to `name`,
+  `used`, `resets`. When the lists are empty or absent, a finite numeric
+  `used` supplies one `week` limit with that `used` and `resets`: the older
+  fab's weekly window. Nonfinite or nonnumeric figures become null; without
+  lists or numeric `used`, the check has no limits. The group's newest
+  successful check with limits supplies its figure and `checked_age_s`;
+  a newer check with no limits does not hide an older figure. If no check
+  has limits, use the newest successful check's age and empty limits.
+  Fable is omitted;
   `5 h` appears only above 80% use. Each limit also has `rate_per_h`,
   `full_at` and `at_reset`, null without a usable earlier sample. Use the
   oldest successful sample across the group's logins for that account and
-  limit with the same reset, at least 20 minutes before the latest check;
+  limit with the same reset, reading limits by the same rule in both old and
+  new checks, at least 20 minutes before the check supplying the figure;
   decreasing use and expired or unknown resets give no pace. Checks made
   under another account do not contribute. Rate is percent per hour to one
-  decimal; projections use the unrounded rate from the latest check time.
+  decimal; projections use the unrounded rate from the figure's check time.
   `full_at` is Unix seconds if full before reset; otherwise `at_reset` is
   projected percent at reset to one decimal (zero rate lasts).
   The panel after Waiting on the user has Subscription (kind, plan, label,
