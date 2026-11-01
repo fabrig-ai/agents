@@ -23,6 +23,25 @@
   fabrig `eb6c40aaf5` passed 265 default and 7 fuzzy tests, reporting smith
   and jig CPU separately. The lead lands and deploys this change; no live
   queue unit was changed. Turning budget excesses red remains in Later (2, 14).
+- **Precheck judges starvation as the queue does** (2, "The selection and
+  the steps are shared"; plan `docs/plan/precheck-starved`, retired 11-01;
+  3c59a96): `fab precheck` runs its steps through `fab.queue_cpu.run_steps`
+  with the wrapper in the build lane (`lane="build"`; the queue keeps
+  `"gate"`). Its `default` and `fuzzy` steps go through the collector and
+  its reconciliation, so a step red only by starvation is green and an
+  assertion failure stays red. Its other steps keep `gate.run_steps`, inside
+  `run_steps`. The receipt gains `starved`, the reconciled starved cases
+  summed over both profiles (0 on a conflict). `outcome` is still `green`,
+  `red` or `conflict`, so receipt parsing and reuse (3) did not change. The
+  precheck log names each starved case as `<profile>: starved <binary>
+  <test>` after the collector's per-tree lines. A second check of the same
+  tip replaces the collector directory along with the log. Tested with
+  fake nextest and collector records (`test_precheck.py`,
+  `test_queue_cpu.py`): a global-timeout cancellation with nothing asserting
+  is green with starved 4, and an assertion beside it is red with starved
+  2, and fuzzy never runs. Builders pick this up when their installs follow
+  main at their next run start (tick.md 3). This call has not seen
+  `v0.1.0-ladder/finding-5`'s precheck run again on it.
 - **The queue takes ready refs of two segments or more** (2; plan
   `docs/plan/dogfood-faults`, retired 11-01; 6e72974):
   `fab.queue.candidates` keeps every `ready/<name>` whose name has at least
