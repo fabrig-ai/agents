@@ -1,0 +1,56 @@
+landing = "queue"
+
+# The thin cut of mechanisms-out: three mechanisms the calls do today move to
+# code, as the designs now say (each marked "the user, 11-01"), the role texts
+# in step. Every part is direct, one task each, in the request's order;
+# specs in tasks/, shared rules in notes/common.md, the decisions and the
+# critical path in notes/decisions.md.
+draft = "mechanisms-out"
+repo = "agents"
+sources = [
+  "docs/plan/mechanisms-out/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "retired-code"
+title = "retired = true is code's: the tick commits it on a done retire's branch before delivery; the queue re-readies a moved tip"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 3"
+
+[[part]]
+id = "plan-options"
+title = "Plan options written by code: fab call cut seeds plan.toml through calls.start's seed, the tick restores the options"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "land-code-first"
+title = "fab land refusals, code first: fetch and push retried and parked by the tick, test rebased by fab call amend"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[slice]]
+id = 1
+story = "A retire call that ended done lands with retired = true in its plan.toml, committed by fab; the retire role writes only the status files"
+parts = ["retired-code"]
+walk = false
+
+[[slice]]
+id = 2
+story = "A cut's branch starts with plan.toml holding draft, repo, sources and its --set options; options the cut changed are restored before they reach main or the trunk"
+parts = ["plan-options"]
+walk = false
+
+[[slice]]
+id = 3
+story = "A fab land refusal at fetch or push is retried by the tick and parks the chain at the third; one at test reaches the amender with the branch already rebased onto main"
+parts = ["land-code-first"]
+walk = false
