@@ -218,6 +218,36 @@ def drafts_beside(plan: Plan, plans: Sequence[tuple[Plan, Mapping[str, Task]]],
     return "\n".join(lines)
 
 
+def _cut_role_options(plan: Plan, parsed: Mapping[str, object],
+                      plan_path: str) -> tuple[bool, str, list[tuple[str, str]]]:
+    """Return the effective cut role and option sections (docs/design/fab.md, 13.3)."""
+    direct = parsed.get("direct", plan.direct)
+    run_role = direct and parsed.get("landing", plan.landing) == "integration"
+    if run_role:
+        role_text = calls.ROLES["cut"].with_name("cut-run.md").read_text(encoding="utf-8")
+    else:
+        role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
+        if plan.repo == "fabrig":
+            role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
+    option_sections = []
+    text = ""
+    if parsed:
+        lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
+        text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
+                f"```toml\n{lines}\n```")
+    if direct and not run_role:
+        role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
+        if text:
+            text += "\n\n"
+        text += ("Every part is `mode = \"direct\"`, so the cut writes every task spec itself. "
+                 f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
+                 "cited from each spec by repository path; the implementers read them in their checkout. "
+                 "A task's `needs` name the tasks whose merged code it builds on.")
+    if text:
+        option_sections.append(("Plan options", text))
+    return run_role, role_text, option_sections
+
+
 def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
               plan_path: str | None = None, options: Sequence[str] = (),
               beside: str | None = None) -> str:
@@ -252,30 +282,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     plans = sorted(path.relative_to(root).as_posix() for path in root.glob(f"**/{PLANS}/*/plan.toml")
                    if path.is_file())
     parsed = parse_options(options)
-    direct = parsed.get("direct", plan.direct)
-    run_role = direct and parsed.get("landing", plan.landing) == "integration"
-    if run_role:
-        role_text = calls.ROLES["cut"].with_name("cut-run.md").read_text(encoding="utf-8")
-    else:
-        role_text = calls.ROLES["cut"].read_text(encoding="utf-8")
-        if plan.repo == "fabrig":
-            role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-fabrig.md").read_text(encoding="utf-8")
-    option_sections = []
-    text = ""
-    if parsed:
-        lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
-        text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
-                f"```toml\n{lines}\n```")
-    if direct and not run_role:
-        role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
-        if text:
-            text += "\n\n"
-        text += ("Every part is `mode = \"direct\"`, so the cut writes every task spec itself. "
-                 f"Notes that several tasks share go once in `{plan_path}/notes/<name>.md`, "
-                 "cited from each spec by repository path; the implementers read them in their checkout. "
-                 "A task's `needs` name the tasks whose merged code it builds on.")
-    if text:
-        option_sections.append(("Plan options", text))
+    run_role, role_text, option_sections = _cut_role_options(plan, parsed, plan_path)
     return calls._brief([
         ("Role", role_text),
         ("Call facts", calls._facts(call_id, branch, report)),
