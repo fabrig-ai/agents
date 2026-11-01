@@ -13,6 +13,27 @@
   closes older parked asks for forge sync; legacy automatic parks settle when
   their plan next ticks. Tested with temporary homes, fake runners and log
   folds; not run live.
+- **A call whose brief cannot be compiled parks its subject** (2; the user,
+  11-01; plan `docs/plan/start-commands`, retired 11-01; 580befa).
+  `fab.dispatch._call` ends every role's argv with `--tick`, which
+  `fab/calls.py`, `fab/designer.py` and `fab/triage.py` parse. Each `main`
+  turns a ValueError or OSError from its brief builders into
+  `fab.calls.BriefError` at its compile step only (`_compile_call`,
+  `designer._compile`, triage's `brief`), after the preconditions; a
+  `fab.sh.Failed` (`_retire_designs`' and `changed_designs`' git
+  included) and `fab.calls.start` never park. With `--tick` and without
+  `--brief-only`, `fab.calls.park` logs `call.parked` (subject, role,
+  `brief failed: <first line>`, report "", `call` "", or for amend and
+  settle the chain's root with the chain's subject) and then
+  `wake.want("park <subject>")`. `_parked_subjects` adds open `parked`
+  asks whose call is "", and `call_actions` checks it before triage;
+  `fab.channel._log_asks` closes such an ask at a later `call.started` of
+  its subject, chain parks untouched; `fab/forge.py` gives a report-less
+  parked ask its reason alone, with no excerpt and no `Read:` line in the
+  issue body or reply brief. Tested with temporary homes and fake runners
+  (`test_calls.py`, `test_designer.py`, `test_triage.py`,
+  `test_dispatch.py`, `test_channel.py`, `test_forge.py`); not seen live:
+  hel8's log holds no `brief failed` park at the plan's retire.
 - **Report-only calls** (2; qa.md 2, plan findings-loop, retired
   11-01): `fab.calls.start(report_only=True)` detaches a worktree at
   `origin/<base>`, logs no branch and pushes nothing; `settle` and the
@@ -108,8 +129,9 @@
   checked by code; settle's refusal to land a refused tip is role text too
   (`fab/roles/settle.md`), which `_judge_chain` enforces by parking a land
   verdict with `settle failed`; a
-  failing `git fetch` in `_retire_designs` fails the amend's start like
-  any brief that cannot be compiled (5, its first bullet).
+  failing `git fetch` in `_retire_designs` fails the amend's start without
+  parking (a git failure is not a brief's, 2), and the next tick tries
+  again.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
@@ -120,7 +142,11 @@
   Seen again at dogfood-faults' retire (11-01): its brief quoted calls.md,
   fab.md, machines.md and reports.md, which mechanisms-out and hel8-units
   changed, and channel.md, which the plan changed and restored, beside the
-  four it changed (gates, integration, landing, tick).
+  four it changed (gates, integration, landing, tick). Seen again at
+  start-commands' retire (11-01): the designs it built against (calls.md 2,
+  integration.md 3, tick.md 5) were written before its cut (de5edc2,
+  1fc8818), so its brief quoted none of them, and quoted integration.md
+  and landing.md, which df-followups and precheck-starved changed.
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
 - **Designs a retire brief lists are read by the call** (3, 11-01), as the

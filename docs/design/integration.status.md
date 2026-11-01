@@ -71,6 +71,28 @@
   `plan.stopped` joins no wake list (`question.asked` is in `wake.AGAIN`).
   Tested with fixture logs (`test_integration.py`, `test_dispatch.py`,
   `test_foreman.py`, `test_calls.py`).
+- **The start commands** (3, "The plan lives on its trunk"; the user,
+  11-01; plan `docs/plan/start-commands`, retired 11-01; c7c8fa6,
+  e2eebfa). `fab trunk make PLAN_PATH [--base REV]` (`fab/trunk.py`,
+  `make`): after `fetch --prune` of `FAB_HOME/repos/fabrig` it refuses a
+  PLAN_PATH that is not a relative `<prefix>docs/plan/<draft>` (and, beyond
+  the design, one with a `..` part), a `plan.toml` at REV, an origin or
+  local `<draft>/integration` and an occupied worktree path (a dangling
+  symlink included); then `worktree add -b`, the push with the empty lease
+  and `-u`, the worktree and branch removed on any push failure, and
+  `trunk.made` (draft, base, tip) last; it prints the plan directory.
+  `fab plan inputs PLAN_DIR FILE... [--replace]` (`fab/inputs.py`, `add`):
+  the refusals of 3 before any commit; a temporary worktree detached at
+  `origin/<trunk>`, removed in a `finally`; the commit `<draft>: inputs`
+  by fab; the push per checkout kind (the trunk fast-forward only, this
+  repository's `inputs/<draft>` through `fab.land.main`, deleted on a
+  refusal naming the logged step, fabrig's `ready/inputs/<draft>`, which
+  `--replace` force-pushes); the fast-forward of the checkout under
+  `FAB_HOME/tick.lock` after a trunk push or a landing, and for a ready
+  ref the printed wait (and, detached, that the operator moves it). Both
+  are in `fab/cli.py` `COMMANDS` (`trunk` after `check`, `plan` after
+  `status`). Tested on real git in temporary directories (`git_pair`) and
+  fake runners, the landing faked (`test_trunk.py`, `test_inputs.py`).
 - **A rebase onto the trunk consumes the amendment** (2, "Optimistic
   start"; plan dogfood-faults; f19f942): `fab.call_review.task_rebase`
   takes `trunk` (default `main`) and counts a done rebase run from
@@ -86,11 +108,11 @@
   ran live once (the probe phase-case, 11-01): its trunk landed through the
   queue at 17:17:58Z, its retire started from main (17:27:16Z), went through
   `ready/calls/retire-2c39…` and landed at fc1651448b, and the plan
-  checkout detached there; its landing was never imported (no
-  `branch.landed` or `call.finished`; tick.md 5, start-commands item 4).
-  No trunk has stopped since the stop's records were built. The other calls,
-  foremen and repairs from main after the landing (df-followups, 11-01) are
-  untried live: no trunk has landed since.
+  checkout detached there; its landing was imported only at 18:16:57Z, once
+  a retired plan's import was built (tick.md 5, `tick.status.md`). No trunk
+  has stopped since the stop's records were built. The other calls, foremen
+  and repairs from main after the landing (df-followups, 11-01) are untried
+  live: no trunk has landed since.
 - **A foreman's answer or a repair's section after the landing still
   commits from the trunk** (3, "so does every other call, foreman and
   repair"): `fab.dispatch._settle` and `_remedy` pass `trunk=plan.trunk` to
@@ -99,6 +121,12 @@
   and the clone pruned it, that settle fails each tick. Only a question or
   refusal still open when the trunk lands reaches it (every task has merged
   by then); df-followups' request named the starts, not the settles.
+- **The start commands are unused live** (3, start-commands, 11-01): hel8's
+  log holds no `trunk.made` at the plan's retire, and no plan's `inputs/`
+  has gone through `fab plan inputs`; the next replay or `ready` probe is
+  their first run. On fabrig's main path the command ends at a ready ref,
+  as designed: the operator starts the cut once the queue's `queue.landed`
+  is imported and the tick has moved the checkout.
 - **The flow of a real run (3) is on main, not run live yet**
   (10-31): the options with the run's defaults (agents-rebuild names the
   old flow), the trunk throughout, the tick's merges with the baseline

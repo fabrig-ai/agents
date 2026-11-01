@@ -58,7 +58,8 @@
   `fab.dispatch._round` takes `fab.channel.plan_dirs`' listed then named
   plans under `tick`'s lock; `_checkout` shares fetches, `_load_plans` skips
   retired plans and reports failed loads, and `_import_queue` reads from
-  the oldest loaded draft's cursor. Each `_tick_loaded` sees fresh events;
+  the oldest owning draft's cursor (a retired plan's draft included since
+  11-01, below). Each `_tick_loaded` sees fresh events;
   `fab.drafts.owned` scopes collection, `strays` leaves unowned runs until
   last, and `spend` spends a builder's calm extra once per round.
   `fab.dispatch.call_actions` scopes call limits and review times by draft;
@@ -67,6 +68,24 @@
   `fab.drafts.unit` to name units by role and subject, and since 11-01
   (dogfood-faults; a074df1) passes `--setenv=FAB_HOME=<fab.log.home()>`,
   so a tick with another home (a replay's) starts calls that write to it.
+- **A retired plan's last landing is imported** (5, "A plan that cannot
+  load"; plan `docs/plan/start-commands`, retired 11-01; 9fcbb9a): found
+  by the probe `phase-case`, whose retire the queue landed on fabrig main
+  (fc1651448b) while the tick skipped the plan and never logged it.
+  `_load_plans` appends each retired plan it skips to its `retired`
+  keyword (the return shape `designer._compile` unpacks is unchanged, and
+  it still prints `retired <draft>`); `_round` passes the retired drafts
+  with the loaded ones to `_reconcile_reds` and `_import_queue`
+  (`plan_drafts`: owners and cursor), even when no plan loads, then
+  `_finish_retired` logs, once, `call.finished` (the chain's latest call,
+  role `retire`, outcome `done`, `tip` from its last `call.checked` when
+  there is one) for each retire chain under the draft with no finish for
+  any of its calls and a `branch.landed` with `queue_ts` for its branch.
+  Nothing else runs for a retired plan: it is never in `loaded`. Tested
+  with fixture logs and queue records (`test_dispatch.py`
+  `RetiredFinishTest`). Live at 18:16:57Z on hel8: phase-case's
+  `calls/retire-2c39…` got its `branch.landed` and `call.finished` (no
+  `tip`: the call logged no `call.checked`).
 - **The buffer's order** (`docs/design/tick.md`, 7; since 10-31):
   `fab.buffer.group` and `order` put consolidations before refusals' repairs
   and rebases, then contracts, then slice tasks, breaking ties by slice,
