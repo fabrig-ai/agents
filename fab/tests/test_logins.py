@@ -223,6 +223,18 @@ class LoginsTest(unittest.TestCase):
         self.shelf.lend("claude-1", "b2", path="runs/r1/.credentials.json", holder="r1")
         self.assertEqual(json.loads(settings.read_text()), {"oauthAccount": {"emailAddress": "kept@example.invalid"}})
 
+    def test_github_fixtures_are_a_directory_lent_private_to_a_run(self):
+        self.secret("b1", "src/rust/tmp/github-conformance", directory=True)
+        self.shelf.capture("b1", "github", path="src/rust/tmp/github-conformance", free=True)
+        login = self.shelf.borrow("github", "b2", path="walks/r1/github", holder="walk/github/rung-a-1")
+        self.assertEqual(login.id, "github-1")
+        # temper's proof-live-github.sh refuses fixtures whose directory is not 0700.
+        self.assertEqual(stat.S_IMODE(self.at("b2", "walks/r1/github").stat().st_mode), 0o700)
+        with self.assertRaisesRegex(logins.Refused, "has no check"):
+            self.shelf.check("github-1")
+        self.shelf.give_back("github-1")
+        self.assertFalse(self.at("b2", "walks/r1/github").exists())
+
     def test_a_directory_login_is_lent_to_a_run_and_returned_whole(self):
         self.secret("b1", "qa/claude", directory=True)
         login = self.shelf.capture("b1", "claude-box", path="qa/claude", free=True)

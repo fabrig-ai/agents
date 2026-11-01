@@ -1291,9 +1291,12 @@ login that still works reused across them before more are signed in.
   entry per login, holding it under its kind's name. The kinds are `codex`
   (`~/.codex/auth.json`) and `claude` (`~/.claude/.credentials.json`), lent
   to a machine at that path, and QA's `chatgpt` (temper's ChatGPT record,
-  a live run's `TEMPER_LIVE_ACCOUNT`) and `claude-box` (a Claude Code
-  directory, `TEMPER_LIVE_CLAUDE`), lent to a run at a path of its own. An
-  id is `<kind>-<n>`.
+  a live run's `TEMPER_LIVE_ACCOUNT`), `claude-box` (a Claude Code
+  directory, `TEMPER_LIVE_CLAUDE`) and `github` (temper's GitHub
+  conformance fixtures, `TEMPER_LIVE_GITHUB_FIXTURES`: the probe App's
+  `app.json` and `app.pem` and a `person-<owner>.token` per owner, none
+  of which refreshes), lent to a run at a path of its own. An id is
+  `<kind>-<n>`.
 - **Custody is the log:** `login.added` (id, kind, origin, sha),
   `login.lent` (id, holder, host, at, sha), `login.returned` (id, sha),
   `login.checked` (id, email, plan, used, resets, error) and

@@ -40,6 +40,9 @@ KINDS = {
     "claude": Kind(".credentials.json", ".claude/.credentials.json"),
     "chatgpt": Kind("login"),  # temper's ChatGPT record: a live run's TEMPER_LIVE_ACCOUNT
     "claude-box": Kind("login", directory=True),  # a Claude Code directory: TEMPER_LIVE_CLAUDE
+    # temper's GitHub conformance fixtures (TEMPER_LIVE_GITHUB_FIXTURES): app.json, the App's
+    # app.pem and a person-<owner>.token per owner; neither refreshes.
+    "github": Kind("login", directory=True),
 }
 # The machine logins each role uses: the dispatcher's calls and ops runs, a builder's runs.
 NEEDS = {"dispatcher": ("claude", "codex"), "builder": ("claude", "codex")}
