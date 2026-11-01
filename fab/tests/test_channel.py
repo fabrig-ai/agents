@@ -47,11 +47,11 @@ class ChannelTest(unittest.TestCase):
 
     def rejection(self, minute=1, branch="hand/pushed", tip="tip", **fields):
         return event(minute, "queue.rejected", branch=branch, tip=tip, step="default",
-                     log="/queue/check.log", gate="gate-host", **fields)
+                     log="/queue/check.log", gate="gate-host", queue_ts=ts(minute), **fields)
 
     def test_queue_signal_facts_and_oldest_first_from_an_iterator(self):
-        events = [self.rejection(3, tests=["pkg::a", "pkg::b"]),
-                  self.rejection(1, branch="hand/older")]
+        events = [dict(self.rejection(3, tests=["pkg::a", "pkg::b"]), ts=ts(8)),
+                  dict(self.rejection(1, branch="hand/older"), ts=ts(9))]
         self.assertEqual(channel.signals(iter(events)), [
             channel.Signal("queue:hand/older", "rejected hand/older", ts(1),
                            ("- Tip: `tip`", "- Step: `default`", "- Tests: (see the log)"),
@@ -60,6 +60,13 @@ class ChannelTest(unittest.TestCase):
                            ("- Tip: `tip`", "- Step: `default`", "- Tests: pkg::a, pkg::b"),
                            "gate-host:/queue/check.log", True),
         ])
+
+    def test_queue_signal_tests_ignore_malformed_values(self):
+        for tests, expected in ((None, "(see the log)"), ("pkg::wrong-shape", "(see the log)"),
+                                ([None, 3, {}, "pkg::valid"], "pkg::valid")):
+            with self.subTest(tests=tests):
+                signal, = channel.signals([self.rejection(tests=tests)])
+                self.assertEqual(signal.facts[-1], "- Tests: " + expected)
 
     def test_queue_landing_closes_its_branch_only_even_at_another_tip(self):
         events = [self.rejection(), self.rejection(2, branch="other"),

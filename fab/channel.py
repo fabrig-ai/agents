@@ -104,6 +104,7 @@ def signals(events: Iterable[dict]) -> list[Signal]:
     tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
     again. Other kinds of signals are left for their own folds.
     """
+    events = list(events)
     return sorted(_queue_signals(events), key=lambda signal: signal.since)
 
 
@@ -127,13 +128,15 @@ def _queue_signals(events: Iterable[dict]) -> list[Signal]:
             prior = opened.get(identifier)
             if prior is not None and prior["tip"] != event["tip"]:
                 del opened[identifier]
-            if ev == "queue.rejected" and isinstance(event.get("ts"), str):
+            if ev == "queue.rejected" and isinstance(event.get("queue_ts"), str):
                 opened[identifier] = event
     found = []
     for identifier, event in opened.items():
+        tests = event.get("tests")
+        tests = [test for test in tests if isinstance(test, str)] if isinstance(tests, list) else []
         facts = (f"- Tip: `{event['tip']}`", f"- Step: `{event.get('step', '-')}`",
-                 "- Tests: " + (", ".join(event.get("tests", [])) or "(see the log)"))
-        found.append(Signal(identifier, f"rejected {event['branch']}", event["ts"], facts,
+                 "- Tests: " + (", ".join(tests) or "(see the log)"))
+        found.append(Signal(identifier, f"rejected {event['branch']}", event["queue_ts"], facts,
                             f"{event.get('gate', 'gate')}:{event.get('log', '-')}", True))
     return found
 

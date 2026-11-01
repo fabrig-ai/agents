@@ -2540,18 +2540,18 @@ class MultiPlanTickTest(unittest.TestCase):
         one = self.plan_dir("one", tasks=("a",))
         two = self.plan_dir("two", tasks=("a",))
         write(two / "plan.toml", "invalid [")
+        self.append(dict(ev="branch.ready", branch="two/a", tip="two"))
         self.queue_records = [dict(ev="landed", branch=f"{draft}/a", ts=stamp, tip=draft, main="main")
                               for draft, stamp in (("one", "020"), ("two", "010"))]
         first = self.tick(one, two)
         self.assertEqual(first[0].kind, "load")
-        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read()],
-                         [("branch.landed", "one/a", "020"), ("queue.landed", None, "010")])
+        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read() if "queue_ts" in e],
+                         [("branch.landed", "one/a", "020")])
         self.plan_dir("two", tasks=("a",))
         self.tick(one, two)
         self.tick(one, two)
-        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read()],
-                         [("branch.landed", "one/a", "020"), ("queue.landed", None, "010"),
-                          ("branch.landed", "two/a", "010")])
+        self.assertEqual([(e["ev"], e.get("task"), e["queue_ts"]) for e in log.read() if "queue_ts" in e],
+                         [("branch.landed", "one/a", "020"), ("branch.landed", "two/a", "010")])
         self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", stamp])
                                           for stamp in ("", "", "010")])
 
@@ -2559,14 +2559,15 @@ class MultiPlanTickTest(unittest.TestCase):
         one = self.plan_dir("one", tasks=("a",))
         two = self.plan_dir("two", tasks=("a",))
         designer.enlist(one)
+        self.append(dict(ev="branch.ready", branch="two/a", tip="two"))
         self.queue_records = [dict(ev="landed", branch=f"{draft}/a", ts=stamp, tip=draft, main="main")
                               for draft, stamp in (("one", "020"), ("two", "010"))]
         self.tick()
         designer.enlist(two)
         self.tick()
         self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", ""])] * 2)
-        self.assertEqual([(e["ev"], e.get("task")) for e in log.read()],
-                         [("branch.landed", "one/a"), ("queue.landed", None), ("branch.landed", "two/a")])
+        self.assertEqual([(e["ev"], e.get("task")) for e in log.read() if "queue_ts" in e],
+                         [("branch.landed", "one/a"), ("branch.landed", "two/a")])
 
     def test_draft_without_queue_records_keeps_empty_cursor(self):
         one, two = self.plan_dir("one", tasks=("a",)), self.plan_dir("two", tasks=("a",))
@@ -2694,6 +2695,101 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(load.call_args.args[0], [two.resolve()])
         page.assert_not_called()
 
+    def test_failed_plan_task_rejection_is_known_from_ready(self):
+        one = self.plan_dir("one", tasks=("a",))
+        two = self.plan_dir("two", tasks=("a",))
+        write(two / "plan.toml", "invalid [")
+        self.append(dict(ev="branch.ready", task="two/a", branch="two/a", tip="tip"))
+        self.queue_records = [dict(ev="rejected", ts="001", branch="two/a", tip="tip",
+                                   step="default", log="/queue/red.log")]
+        actions = self.tick(one, two)
+        self.assertEqual(actions[0].kind, "load")
+        self.assertFalse(any("queue_ts" in record for record in log.read()))
+        self.assertEqual(channel.signals(log.read()), [])
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+
+    def test_retired_plan_task_rejection_is_known_from_started_branch(self):
+        directory = self.plan_dir("draft", tasks=("a",))
+        path = directory / "plan.toml"
+        write(path, "retired = true\n" + path.read_text())
+        self.append(run_started("draft/a", branch="hand/from-fab"), run_ended("draft/a"))
+        self.queue_records = [dict(ev="rejected", ts="001", branch="hand/from-fab", tip="tip",
+                                   step="default", log="/queue/red.log")]
+        self.assertEqual(self.tick(directory), [])
+        self.assertFalse(any("queue_ts" in record for record in log.read()))
+        self.assertEqual(channel.signals(log.read()), [])
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+        self.collects.assert_not_called()
+
+    def test_all_failed_plans_task_rejections_are_known_from_started_tasks(self):
+        one, two = self.plan_dir("one", tasks=("a",)), self.plan_dir("two", tasks=("a",))
+        for directory in (one, two):
+            write(directory / "plan.toml", "invalid [")
+        for draft in ("one", "two"):
+            record = run_started(f"{draft}/a")
+            record.pop("branch", None)
+            self.append(record, run_ended(f"{draft}/a"))
+        self.queue_records = [dict(ev="rejected", ts="001", branch=f"{draft}/a-r2", tip="tip",
+                                   step="default", log="/queue/red.log") for draft in ("one", "two")]
+        with patch.object(flow, "measure", side_effect=AssertionError("measured")), \
+                patch.object(dispatch, "_import_after_landing", side_effect=AssertionError("imported")), \
+                patch.object(dispatch, "decide", side_effect=AssertionError("decided")):
+            actions = self.tick(one, two)
+        self.assertEqual([action.kind for action in actions], ["load", "load"])
+        self.assertFalse(any("queue_ts" in record for record in log.read()))
+        self.assertEqual(channel.signals(log.read()), [])
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+        self.collects.assert_not_called()
+
+    def test_failed_fetch_keeps_log_known_branches_out_of_queue_signals(self):
+        directory = self.plan_dir("draft", tasks=("a",))
+        self.append(run_started("draft/a"), run_ended("draft/a"))
+        self.fake.on(["git", "fetch", "origin"], Result(1, err="fetch failed"))
+        self.queue_records = [dict(ev="rejected", ts="001", branch=branch, tip="tip",
+                                   step="default", log="/queue/red.log") for branch in (
+                                       "draft/a", "draft/a-r2", "calls/foreign", "answers/foreign",
+                                       "repairs/foreign", "draft/integration")]
+        actions = self.tick(directory)
+        self.assertEqual([action.kind for action in actions], ["load"])
+        self.assertFalse(any("queue_ts" in record for record in log.read()))
+        self.assertEqual(channel.signals(log.read()), [])
+        self.assertIn("## Open signals\n\n(none)", (log.home() / channel.PAGE).read_text())
+        self.collects.assert_not_called()
+
+    def test_no_plan_cursor_uses_newest_import_of_any_kind_then_plan_recovers(self):
+        directory = self.plan_dir("draft", tasks=("a",))
+        self.append(dict(ev="branch.landed", task="draft/older", branch="draft/older",
+                         tip="old", main="old", queue_ts="010"),
+                    dict(ev="queue.collateral", branch="hand/pushed", tip="tip", queue_ts="020"),
+                    dict(ev="branch.landed", task="other/a", branch="other/a",
+                         tip="other", main="other", queue_ts="025"),
+                    dict(ev="branch.ready", task="draft/a", branch="draft/a", tip="tip"))
+        self.queue_records = [dict(ev="landed", ts="015", branch="draft/a", tip="tip", main="main"),
+                              dict(ev="rejected", ts="030", branch="hand/pushed", tip="new",
+                                   step="default", tests=[], log="/queue/red.log")]
+        self.assertEqual(self.tick(), [])
+        self.assertEqual(self.tick(), [])
+        self.tick(directory)
+        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", stamp])
+                                          for stamp in ("025", "030", "010")])
+        imported = [record for record in log.read() if record.get("queue_ts") == "015"]
+        self.assertEqual([(record["ev"], record["task"]) for record in imported],
+                         [("branch.landed", "draft/a")])
+        self.assertEqual(len([record for record in log.read() if record["ev"] == "queue.rejected"]), 1)
+
+    def test_unowned_queue_tests_are_strings_even_with_malformed_tests(self):
+        values = (None, "pkg::wrong-shape", [None, 3, {}, "pkg::valid"])
+        samples = [(kind, tests) for kind in ("rejected", "collateral") for tests in values]
+        self.queue_records = [dict(ev=kind, ts=f"00{number}", branch=f"hand/{number}", tip="tip",
+                                   step="default", tests=tests, log="/queue/red.log")
+                              for number, (kind, tests) in enumerate(samples, 1)]
+        self.assertEqual(self.tick(), [])
+        self.assertEqual([record["tests"] for record in log.read()],
+                         [[], [], ["pkg::valid"]] * 2)
+        self.assertEqual(len(channel.signals(log.read())), 3)
+        self.assertNotIn("page - failed:", self.out.getvalue())
+        self.assertIn("- Tests: pkg::valid", (log.home() / channel.PAGE).read_text())
+
     def test_unowned_queue_records_import_once_without_advancing_the_task_cursor(self):
         directory = self.plan_dir("draft", tasks=("a",))
         self.append(dict(ev="branch.landed", task="draft/a", branch="draft/a", tip="a",
@@ -2740,7 +2836,8 @@ class MultiPlanTickTest(unittest.TestCase):
         record = log.read()[0]
         self.assertEqual((record["ev"], record["branch"], record["tests"]),
                          ("queue.rejected", "hand/pushed", []))
-        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", ""])] * 2)
+        self.assertEqual(self.queries(), [ssh("fake@gate", ["fab", "queue", "log", "--since", stamp])
+                                          for stamp in ("", "001")])
         self.assertTrue((log.home() / channel.PAGE).exists())
         self.assertEqual(len(channel.signals(log.read())), 1)
         page = (log.home() / channel.PAGE).read_text()

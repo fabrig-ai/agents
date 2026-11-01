@@ -390,9 +390,10 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
                   sh: Runner, log_path: Path | None, plan_drafts: Sequence[str]) -> None:
     """Import loaded tasks' and unowned branches' queue records once.
 
-    Read from the oldest loaded draft cursor, empty without loaded drafts. Only tasks'
-    and owned fab branches' records advance it. Skip torn lines and deduplicate by
-    queue timestamp, event kind, branch and tip (docs/design/fab.md, 13.8).
+    Read from the oldest loaded draft cursor, or the newest queue_ts without loaded
+    drafts. Log-known task branches and fab branch forms never become queue.* records.
+    Only tasks' and owned fab branches' records advance a draft cursor. Skip torn lines;
+    deduplicate by queue timestamp, event kind, branch and tip (docs/design/fab.md, 13.8).
     """
     owners = {f"{draft}/integration": draft for draft in plan_drafts}
     owners.update({event["branch"]: draft for event in events
@@ -405,6 +406,11 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             if identifier in tasks:
                 for prefix in ("answers", "repairs"):
                     owners[f"{prefix}/{event['run']}"] = tasks[identifier].draft
+    known_branches = {event["branch"] for event in events
+                      if event.get("ev") in ("branch.ready", "run.started")
+                      and isinstance(event.get("branch"), str)}
+    known_tasks = {event["task"] for event in events if event.get("ev") == "run.started"
+                   and isinstance(event.get("task"), str)}
     gate_hosts = sorted(name for name, host in hosts.items() if "gate" in host.roles)
     if gate_hosts:
         imported = {(event.get("queue_ts"), event.get("ev"), event.get("branch"),
@@ -412,7 +418,9 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
         since = min((max((event["queue_ts"] for event in events if "queue_ts" in event
                            and (drafts.under(draft, event.get("task"))
                                 or owners.get(event.get("branch")) == draft)), default="")
-                     for draft in plan_drafts), default="")
+                     for draft in plan_drafts),
+                    default=max((event["queue_ts"] for event in events if "queue_ts" in event),
+                                default=""))
         result = sh(ssh(hosts[gate_hosts[0]].ssh, ["fab", "queue", "log", "--since", since]))
         if not result.ok:
             # The queue's record is read again next tick; the other actions still run.
@@ -429,7 +437,8 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             owned = identifier in tasks or branch in owners
             if owned and entry["ev"] == "collateral":
                 continue
-            if not owned and (branch.startswith(("calls/", "answers/", "repairs/"))
+            if not owned and (branch in known_branches or identifier in known_tasks
+                              or branch.startswith(("calls/", "answers/", "repairs/"))
                               or branch.endswith("/integration")):
                 continue
             ev = ("branch." if owned else "queue.") + entry["ev"]
@@ -445,7 +454,9 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
                 names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
                 fields.update({field: entry[field] for field in names if field in entry})
                 if entry["ev"] != "landed":
-                    fields["tests"] = entry.get("tests", [])
+                    tests = entry.get("tests")
+                    fields["tests"] = ([test for test in tests if isinstance(test, str)]
+                                       if isinstance(tests, list) else [])
             events.append(log.append(ev, path=log_path, branch=branch,
                                      queue_ts=entry["ts"], **fields))
             imported.add(key)
@@ -812,7 +823,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
     if not loaded:
-        _page(plan_dirs, log_path)
+        if not only:
+            _page(plan_dirs, log_path)
         return actions
     _import_after_landing(log.read(log_path), hosts, sh=sh, log_path=log_path)
     calm = flow.measure(hosts, log.now(), sh=sh)
