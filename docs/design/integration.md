@@ -133,24 +133,52 @@ only as tweaks once a replay matches its run.
   inputs that are not in the tree (below). Two commands do it (the user,
   11-01; until then an operator did it by hand, every replay and the
   first `ready` probe):
-  - `fab trunk make PLAN_PATH [--base REV]` on hel8: PLAN_PATH is the
-    plan's path in fabrig (`temper/docs/plan/<draft>`, the draft its last
-    segment). It fetches `FAB_HOME/repos/fabrig`, makes
-    `<draft>/integration` at REV (default `origin/main`), pushes it, adds
-    the worktree `FAB_HOME/integration/<draft>` on it with its upstream
-    `origin/<draft>/integration`, logs `trunk.made` (draft, base, tip),
-    and prints the plan directory to give `fab call cut --plan`. It
-    refuses, changing nothing, when the branch exists on origin or the
-    worktree path exists.
-  - `fab plan inputs PLAN_DIR FILE...` (any plan): copies each file to
-    `PLAN_DIR/inputs/<its name>` (refusing a name already there unless
-    `--replace`), commits them (`<draft>: inputs`, author fab) and
-    delivers them as the plan's checkout takes them: on an integration
-    trunk's worktree, pushed to the trunk (fast-forward only); in this
-    repository, as branch `inputs/<draft>` through `fab land`; in fabrig
-    on main, as `ready/inputs/<draft>` to the queue, printing that the cut
-    waits for its landing. It prints the repository paths to give `fab
-    call cut --source`.
+  Both are the operator's commands on hel8, never an implementer's.
+  - `fab trunk make PLAN_PATH [--base REV]`: PLAN_PATH is the plan's path
+    in fabrig (`temper/docs/plan/<draft>`, the draft its last segment).
+    After a `fetch --prune` of `FAB_HOME/repos/fabrig` it refuses,
+    changing nothing: when PLAN_PATH is not a relative
+    `<prefix>docs/plan/<draft>` (the cut's own check); when REV holds
+    `PLAN_PATH/plan.toml`; when `<draft>/integration` exists on origin or
+    as a local branch of the clone; when the worktree path exists. It
+    first adds the worktree, `git worktree add -b <draft>/integration
+    FAB_HOME/integration/<draft> <REV>` (REV defaults to `origin/main`),
+    then pushes from it, `git push -u
+    --force-with-lease=refs/heads/<draft>/integration: origin
+    <draft>/integration` (the empty lease creates the branch only if
+    absent; `-u` sets the upstream). A refused push removes the worktree
+    and the local branch. Only after both succeed it logs `trunk.made`
+    (draft, base the REV given, tip its sha) and prints the plan
+    directory to give `fab plan inputs` and `fab call cut --plan`.
+  - `fab plan inputs PLAN_DIR FILE...  [--replace]` (any plan): FILE is a
+    file or a directory (copied whole, as the manual recipe's `reviews/`).
+    It never commits in the plan's checkout. After a fetch it adds a
+    temporary worktree of the checkout's repository, detached at
+    `origin/<trunk>`, copies the files to `PLAN_DIR/inputs/<name>` there,
+    commits them (`<draft>: inputs`, author fab) and pushes; the worktree
+    is removed in every outcome, so a refusal or a failure leaves no
+    commit, file or local branch. The push depends on the checkout: one
+    tracking `origin/<draft>/integration` pushes
+    `HEAD:refs/heads/<draft>/integration`, fast-forward only; this
+    repository pushes `inputs/<draft>` and runs `fab land inputs/<draft>`
+    (a refusal deletes `inputs/<draft>` from origin and exits 1 with fab
+    land's step); fabrig otherwise pushes `ready/inputs/<draft>`, which
+    the queue takes as any two-segment ready ref and the dispatcher
+    imports as an unowned `queue.*` record (a rejection shows on the page
+    as `queue:inputs/<draft>`), and it prints that the cut waits for its
+    `queue.landed` and for the plan's checkout to hold the files. After a
+    trunk push or a landing it fast-forwards the plan's checkout to its
+    upstream under `FAB_HOME/tick.lock`, so the cut finds the files
+    (`designer._prepare` requires each `--source` to be a file under the
+    checkout); a detached checkout, which the tick does not follow, is
+    left for the operator to move. It refuses, changing nothing: when
+    PLAN_DIR holds plan.toml or is listed in `FAB_HOME/plans` (the inputs
+    are the cut's); when a FILE does not exist, or two FILEs share a name;
+    when `inputs/<name>` exists at `origin/<trunk>` (unless `--replace`),
+    or exists untracked or changed in the checkout (that would break the
+    fast-forward); when the branch or ready ref it would push already
+    exists on origin; for a draft named `inputs`. It prints the repository
+    paths to give `fab call cut --source`.
   The tick follows a
   plan checkout that tracks a branch: after its fetch it fast-forwards the
   checkout to its upstream, so it always reads the plan and specs at the

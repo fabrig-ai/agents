@@ -83,7 +83,8 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `question.answered` | task, by, answer | the task may run again; it names a task, never a call's subject |
 | `call.started` / `call.ended` | call, role, subject; outcome, tokens, cache_write, peak, turns, minutes | a Claude call; its usage (reports.md 3) |
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
-| `call.parked` | call, subject, reason, report | a call's branch waits for the user (calls.md 2) |
+| `call.parked` | call, subject, role, reason, report | a call's branch waits for the user, or a call the tick started could not compile its brief (call "", or its chain's root for amend and settle; calls.md 2) |
+| `trunk.made` | draft, base, tip | an integration trunk made for a fabrig plan, base the REV given, tip its sha (integration.md 3) |
 | `chain.settled` | call, subject, settle, verdict, text | a held chain judged by a settle call: land, amend or user (calls.md 2) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (channel.md 2) |
 | `issue.opened` | subject, kind, number, url | an open user ask has a forge issue (channel.md 3) |

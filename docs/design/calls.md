@@ -324,6 +324,35 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **The structure review stays its own call** (gates.md 2), never the
   skeleton author's.
 
+- **A call whose brief cannot be compiled parks its subject** (the user,
+  11-01; it was started again every tick, as trunk-overlaps' retire was
+  nine times in three minutes). `_call` adds `--tick` to `fab call`'s
+  argv (every role's parser, triage's included). Only a call with
+  `--tick` parks; a call run by hand, or with `--brief-only`, prints its
+  error and exits 1 as today, never parking: the operator reads the
+  error, and a park would need an answer to clear the operator's own
+  mistake. Only a ValueError or OSError raised while building the brief
+  text parks: past `BRIEF_LIMIT`, or a source, design or report it cannot
+  read. Nothing else parks, and the next tick tries again: a refused
+  precondition (an unknown part, a chain no longer in its role's state, a
+  retired plan), a git failure (`fab.sh.Failed`, a fetch included), any
+  failure inside `fab.calls.start`. The park is `call.parked` with the
+  subject, the role, the reason `brief failed: <the error's first line>`
+  and report "", `call` "" except for amend and settle, which belong to a
+  chain: their park names the chain, `call` its root and `subject` the
+  chain's subject, so `call_review.chains` folds the chain as `parked`,
+  which starts nothing, and an answer resets it, its settle attempts
+  included, as for any parked chain. The tick's parked set
+  (`_parked_subjects`) is the subjects of open `call` asks and of open
+  `parked` asks whose call is ""; the triage start (`call_actions`) also
+  requires `triage.subject(draft)` to be outside it. `fab/calls.py`,
+  `fab/designer.py` and `fab/triage.py` `main` park alike. After logging
+  the park the call wants a wake (`wake.want("park <subject>")`), so the
+  page shows it at once. The ask closes at `call.answered` for the
+  subject (`fab page answer SUBJECT TEXT`, channel.md 2), then the next
+  tick tries once more and a second failure parks it again, or at a later
+  `call.started` of the subject (a run by hand that went through).
+
 ## 3. The designer's calls
 
 The designer of the user's model is four Claude calls (`fab/designer.py`),
@@ -418,19 +447,6 @@ before it lands (2).
   plan.
 - **Where they land:** as every call, through `fab land` for this
   repository, so they may change only what it allows (landing.md 2).
-
-- **A call whose brief cannot be compiled parks its subject** (the user,
-  11-01; it was started again every tick, as trunk-overlaps' retire was
-  nine times in three minutes). When a `fab call` the tick started fails
-  before `call.started` (past `BRIEF_LIMIT`, a missing file, any error
-  while compiling the brief), it logs `call.parked` with the subject, the
-  role, `call` "" and the reason `brief failed: <the error's first
-  line>`. The tick's parked set (`_parked_subjects`) holds such a subject
-  as it holds a call's question, so no call of that subject starts (an
-  answer, triage or amend start included) until `call.answered` names it
-  (`fab page answer SUBJECT TEXT`, channel.md 2); then the next tick
-  tries once more, and a second failure parks it again. The page and the
-  forge show it as a `parked` ask, its text the reason.
 
 ## 4. Probes
 

@@ -19,7 +19,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   - a plan's `[[question]]` with no answer, the cut's (calls.md 3);
   - a call that ended `Question:` (gates.md 2);
   - a call's chain referred by settle as `user: ...`, or parked because
-    settlement failed (calls.md 2); an ordinary second refusal or failed
+    settlement failed (calls.md 2), or a call the tick started whose brief
+    could not compile (`brief failed: ...`, calls.md 2), closed by
+    `call.answered` or a later `call.started` of its subject; an ordinary second refusal or failed
     amend goes to settle first. Amend and settle calls' own `Question:`
     reports open no ask. Older parked asks stay open until their chain
     settles; a later `chain.settled` for the subject closes its parked ask,
