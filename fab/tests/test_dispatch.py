@@ -4317,13 +4317,13 @@ class CatchUpTest(unittest.TestCase):
         self.tip = self.commit("both.txt", "trunk\n")
         git(self.clone, "push", "-q", "origin", f"HEAD:refs/heads/{self.plan.trunk}")
         git(self.clone, "switch", "-q", "main")
-        self.commit("both.txt", "main\n")
+        main = self.commit("both.txt", "main\n")
         git(self.clone, "push", "-q", "origin", "HEAD:main")
         self.assertIsNone(self.catch_up())
         self.assertEqual(git(self.origin, "rev-parse", self.plan.trunk), self.tip)
         (record,) = log.read(self.path)
-        self.assertEqual((record["ev"], record["step"], record["tip"]),
-                         ("branch.rejected", integration.CATCH_UP, self.tip))
+        self.assertEqual((record["ev"], record["step"], record["tip"], record["main"]),
+                         ("branch.rejected", integration.CATCH_UP, self.tip, main))
         self.assertIn("both.txt", record["findings"])
         self.assertEqual(git(self.clone, "status", "--porcelain"), "")
 
@@ -4408,6 +4408,105 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertTrue(any(entry["ev"] == "branch.landed" and entry["task"] == "draft/repair-1"
                             and entry["into"] == self.plan.trunk for entry in log.read(self.path)))
 
+    def test_main_moved_passes_sha_and_takes_only_the_catch_up_step(self):
+        write(self.path, "")
+        self.append(event("branch.landed", into=self.plan.trunk, main="trunk-tip", tip="a-tip",
+                          ts="2026-11-01T10:00:00Z"),
+                    dict(ev="note", ts="2026-11-01T10:30:00Z"))
+        tasks = {**self.tasks, "draft/b": task("b", repo="fabrig")}
+        ancestor = ["git", "merge-base", "--is-ancestor", "origin/main", f"origin/{self.plan.trunk}"]
+        self.fake.on(ancestor, Result(1)).on(["git", "rev-parse", "origin/main"], Result(0, "main-sha\n"))
+        with patch.object(integration, "next_step", wraps=integration.next_step) as next_step, \
+                patch.object(dispatch, "_catch_up", return_value="caught") as catch, \
+                patch.object(dispatch, "_integration_check") as check:
+            dispatch._integration(self.plan, tasks, self.home, self.hosts, sh=self.fake, log_path=self.path)
+        self.assertEqual(next_step.call_args.kwargs, {"main": "main-sha"})
+        catch.assert_called_once_with(self.plan, "trunk-tip", self.home, sh=self.fake, log_path=self.path)
+        check.assert_not_called()
+        self.assertEqual(self.fake.argvs(), [ancestor, ["git", "rev-parse", "origin/main"]])
+        self.assertTrue(all(call.cwd == str(self.home) for call in self.fake.calls))
+        self.assertIn("integration draft catch-up", self.output.getvalue())
+
+    def test_main_contained_still_starts_mid_check_with_default_and_mid_logged(self):
+        tasks = {f"draft/t{n}": task(f"t{n}", repo="fabrig") for n in range(11)}
+        write(self.path, "")
+        self.append(*(event("branch.landed", f"t{n}", into=self.plan.trunk, main=f"tip{n}", tip=f"task{n}",
+                            ts=f"2026-11-01T10:{n:02d}:00Z") for n in range(10)))
+        dispatch._integration(self.plan, tasks, self.home, self.hosts, sh=self.fake, log_path=self.path)
+        check = log.read(self.path)[-1]
+        self.assertEqual((check["kind"], check["mid"], check["base"]), ("check", True, "tip9"))
+        launch = next(argv for argv in self.commands() if argv[:3] == ["fab", "check", "start"])
+        self.assertIn("--default", launch)
+        self.assertNotIn(["git", "reset", "-q", "--hard", f"origin/{self.plan.trunk}"], self.fake.argvs())
+
+    def test_main_contained_or_replay_passes_none(self):
+        for ready in (True, False):
+            with self.subTest(ready=ready):
+                self.fake.calls.clear()
+                with patch.object(integration, "next_step", return_value=None) as next_step:
+                    dispatch._integration(replace(self.plan, ready=ready), self.tasks, self.home, self.hosts,
+                                          sh=self.fake, log_path=self.path)
+                self.assertEqual(next_step.call_args.kwargs, {"main": None})
+                self.assertEqual(self.fake.argvs(), [["git", "merge-base", "--is-ancestor", "origin/main",
+                                  f"origin/{self.plan.trunk}"]] if ready else [])
+
+    def test_main_ancestry_error_is_not_treated_as_main_moving(self):
+        self.fake.on(["git", "merge-base"], Result(128, err="missing trunk"))
+        with patch.object(dispatch, "_catch_up") as catch, patch.object(dispatch, "_integration_check") as check:
+            dispatch._integration(self.plan, self.tasks, self.home, self.hosts, sh=self.fake, log_path=self.path)
+        catch.assert_not_called()
+        check.assert_not_called()
+        self.assertEqual(log.read(self.path)[-1]["ev"], "note")
+        self.assertIn("missing trunk", log.read(self.path)[-1]["text"])
+
+    def test_catch_up_refusal_starts_implement_repair_from_trunk_then_merges_and_checks(self):
+        self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
+                          step=integration.CATCH_UP, main="main-sha", findings="CONFLICT: skein/src/lib.rs"))
+        loaded, tasks = dispatch._load_plan(self.directory, log.read(self.path))
+        repair = tasks["draft/catch-up-1"]
+        self.assertEqual((repair.kind, repair.path), ("repair", ""))
+        self.assertIn("main-sha", repair.body)
+        actions = self.tick()
+        start, = [action for action in actions if action.kind == "start"]
+        self.assertEqual((start.task, start.run_kind), ("draft/catch-up-1", "implement"))
+        record = log.read(self.path)[-1]
+        self.assertEqual((record["task"], record["base"], record["branch"]),
+                         ("draft/catch-up-1", "origin/draft/integration", "draft/catch-up-1"))
+        self.assertIn("CONFLICT: skein/src/lib.rs", (log.home() / "runs/draft/catch-up-1-1/brief.md").read_text())
+        self.append(run_ended("draft/catch-up-1"))
+        actions = self.tick()
+        self.assertTrue(any(action.kind == "merge" and action.task == "draft/catch-up-1" for action in actions))
+        check = log.read(self.path)[-1]
+        self.assertEqual((check["kind"], check["base"]), ("check", "fixed-tip"))
+        self.assertTrue(any(entry["ev"] == "branch.landed" and entry["task"] == "draft/catch-up-1"
+                            and entry["into"] == self.plan.trunk for entry in log.read(self.path)))
+
+    def test_catch_up_repair_question_skips_foreman_and_report_answer_reaches_next_brief(self):
+        self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
+                          step=integration.CATCH_UP, main="main-sha", findings="CONFLICT: skein/src/lib.rs"))
+        self.tick()
+        self.append(run_ended("draft/catch-up-1", outcome="question"),
+                    event("question.asked", task="draft/catch-up-1", run="draft/catch-up-1-1",
+                          text="Keep both formats?"))
+        with patch.object(foreman, "start", side_effect=AssertionError("unexpected foreman")) as foreman_start:
+            actions = self.tick()
+        foreman_start.assert_not_called()
+        self.assertIn(Action("call", task="draft", run_kind="answer"), actions)
+        self.assertFalse(any(action.kind == "foreman" for action in actions))
+        self.append(call_started("answer-1", "answer", "draft"), call_ended("answer-1"))
+        write(log.home() / "calls/answer-1/report.md",
+              "Done: answered\nAnswer draft/catch-up-1: Keep both formats and add a fixture.\n"
+              "Answered: draft/catch-up-1\n")
+        dispatch._finish(Action("finish", task="answer-1"), log_path=self.path)
+        answer = log.read(self.path)[-1]
+        self.assertEqual((answer["ev"], answer["task"], answer["answer"]),
+                         ("question.answered", "draft/catch-up-1", "Keep both formats and add a fixture."))
+        # The answer call is finished before another tick can deliver it.
+        self.append(dict(ev="call.finished", call="answer-1", role="answer", outcome="done"))
+        self.tick()
+        brief = (log.home() / "runs/draft/catch-up-1-2/brief.md").read_text()
+        self.assertIn("## Answers\n\n- Keep both formats and add a fixture.", brief)
+
     def test_collect_failed_check_keeps_report_releases_slot_then_starts_repair(self):
         self.tick()
         report = "Failed: fmt red\nfmt:1:0.1\n/check.log\n"
@@ -4491,8 +4590,9 @@ class IntegrationCheckTickTest(unittest.TestCase):
         notes = [entry for entry in log.read(self.path) if entry["ev"] == "note"]
         self.assertEqual(len(notes), 1)
         self.assertEqual((notes[0]["text"], notes[0]["tip"]), ("red 3 times; needs judgement", "trunk-tip"))
-        # Only the read of origin's branches for early starts; nothing is started.
-        self.assertEqual([call.argv[:2] for call in self.fake.calls], [["git", "for-each-ref"]] * 2)
+        # Read origin's branches and main's ancestry; nothing is started.
+        self.assertEqual([call.argv[:2] for call in self.fake.calls],
+                         [["git", "for-each-ref"], ["git", "merge-base"]] * 2)
 
     def test_import_queue_accepts_integration_landing_without_a_spec(self):
         gate = Host("gate", "fake@gate", ("gate",))

@@ -626,13 +626,12 @@ def _settle_merge(merged: Result, checkout: Path, *, sh: Runner) -> str | None:
 
 def _catch_up(plan: Plan, tip: str, checkout: Path, *, sh: Runner,
               log_path: Path | None) -> str | None:
-    """Merge origin/main into a ready plan's trunk, at tip, before its check; return the tip
-    to check.
+    """Merge origin/main into a ready plan's trunk, at tip; return the caught-up tip.
 
     A trunk that contains main is left as it is: tip. A merge (old-form baseline conflicts
     recounted) is pushed and logged as branch.landed into the trunk, task <draft>/integration,
     branch main. Any other conflict is aborted and logged as branch.rejected, step
-    integration.CATCH_UP, at the trunk's tip; then None."""
+    integration.CATCH_UP, at the trunk's tip with main's sha; then None."""
     subject = f"{plan.draft}/integration"
     sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
     sh(["git", "reset", "-q", "--hard", f"origin/{plan.trunk}"], cwd=str(checkout), check=True)
@@ -644,7 +643,7 @@ def _catch_up(plan: Plan, tip: str, checkout: Path, *, sh: Runner,
     findings = _settle_merge(merged, checkout, sh=sh)
     if findings is not None:
         log.append("branch.rejected", path=log_path, task=subject, branch="main", tip=tip,
-                   step=integration.CATCH_UP, findings=findings)
+                   step=integration.CATCH_UP, main=main, findings=findings)
         return None
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     caught = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
@@ -1566,16 +1565,27 @@ def _integration_tasks(plan: Plan, tasks: Mapping[str, Task], events: list[dict]
 
 def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                  hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
-    """Take the trunk's next check, ready or stop after the plan's other actions."""
+    """Read main's ancestry after the checkout's fetch and take the trunk's next action."""
     events = log.read(log_path)
     tasks = _integration_tasks(plan, tasks, events)
-    step = integration.next_step(plan, tasks, events)
-    if step is None:
-        return
     subject = f"{plan.draft}/integration"
-    detail = step.detail
+    step = None
     try:
-        if step.kind == "check":
+        main = None
+        if plan.landing == "integration" and plan.ready:
+            argv = ["git", "merge-base", "--is-ancestor", "origin/main", f"origin/{plan.trunk}"]
+            ancestor = sh(argv, cwd=str(checkout))
+            if ancestor.code == 1:
+                main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
+            elif not ancestor.ok:
+                raise Failed(argv, ancestor)
+        step = integration.next_step(plan, tasks, events, main=main)
+        if step is None:
+            return
+        detail = step.detail
+        if step.kind == "catch-up":
+            _catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)
+        elif step.kind == "check":
             tip = (_catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)
                    if plan.ready else step.tip)
             if tip is not None:
@@ -1601,7 +1611,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
     except (OSError, ValueError, Failed) as error:
         detail = "failed: " + " ".join(str(error).splitlines())
         log.append("note", path=log_path, task=subject, text=detail)
-    print(f"integration {plan.draft} {step.kind} {detail}")
+    print(f"integration {plan.draft} {step.kind if step else 'catch-up'} {detail}")
 
 
 def _integration_check(plan: Plan, tip: str, hosts: Mapping[str, Host], events: list[dict], *,
