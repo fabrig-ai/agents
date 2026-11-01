@@ -337,7 +337,9 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
                  branch: str, report: str, plan: Plan | None = None) -> str:
     """The answerer's brief: its role text; the call's facts; the user's drafts when the plan
     is given; each queued question (task, run, text, foreman) with its task spec, the
-    asking run's report path and, when present, its foreman report path; the inventory."""
+    asking run's report path and, when present, its foreman report path; the inventory.
+    A stop question carries `stop`, its preceding plan.stopped report: show its task, report
+    and text under `Question: <draft>/integration (stop)`, with no task spec."""
     sections = [
         ("Role", ROLES["answer"].read_text(encoding="utf-8")),
         ("Call facts", _facts(call_id, branch, report)),
@@ -345,6 +347,10 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
     if plan is not None:
         sections.append(("The user's drafts", drafts_text(plan, root)))
     for question in questions:
+        if "stop" in question:
+            sections.append((f"Question: {question['task']} (stop)",
+                             f"- Task: {question['task']}\n- Report: `{question['stop']}`\n\n{question['text']}"))
+            continue
         task = tasks[question["task"]]
         path = Path(task.path)
         label = path.relative_to(root) if path.is_absolute() else path
@@ -684,6 +690,27 @@ def _chain_call(role: str, root: str, repo: Path, events: list[dict],
     return text, chain.subject + "/settle", dict(report_only=True, fields={"settles": chain.root})
 
 
+def _answer_questions(tasks: Mapping[str, Task], events: list[dict]) -> list[dict]:
+    """Queued questions with stop reports captured before each ask, in log order."""
+    queued = {(item.task, item.run, item.text, item.asked): item
+              for item in foreman.questions(tasks, events) if item.state == "queued"}
+    open_asks = {id(event) for event in open_questions(event for event in events if "task" in event)}
+    stops, questions = {}, []
+    for event in events:
+        if event.get("ev") == "plan.stopped" and "task" in event:
+            stops[event["task"]] = event.get("report", "")
+        elif id(event) in open_asks:
+            key = tuple(event.get(field) for field in ("task", "run", "text", "ts"))
+            item = queued.get(key)
+            if item is None:
+                continue
+            question = dict(task=item.task, run=item.run, text=item.text, foreman=item.report)
+            if item.task not in tasks:
+                question["stop"] = stops.get(item.task, "")
+            questions.append(question)
+    return questions
+
+
 def main(argv: list[str]) -> int:
     """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
     Delegate cut, contract, decision and retire to fab.designer.main, and triage
@@ -728,8 +755,7 @@ def main(argv: list[str]) -> int:
             # An integration plan's repairs have no spec file; their questions come too.
             tasks = integration.with_repairs(plan, tasks, events) if plan.landing == "integration" else tasks
             tasks = {**tasks, **tier_reds.tasks(plan, events)}
-            questions = [dict(task=item.task, run=item.run, text=item.text, foreman=item.report)
-                         for item in foreman.questions(tasks, events) if item.state == "queued"]
+            questions = _answer_questions(tasks, events)
             text = answer_brief(questions, tasks, root, plan=plan, **facts)
             subject = plan.draft
         if args.brief_only:

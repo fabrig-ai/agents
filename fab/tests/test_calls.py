@@ -525,6 +525,20 @@ class BriefTest(unittest.TestCase):
             self.assertIn("# Inventory", empty)
             self.assertNotIn("# Question:", empty)
 
+    def test_answer_stop_section_has_its_report_and_no_spec(self):
+        for report in ("/runs/demo/check-3/report.md", "gate:/queue/rejected.log", ""):
+            with self.subTest(report=report), tmp_home() as root:
+                plan, tasks = fixture(root)
+                question = dict(task="demo/integration", run="demo/check-3", text="Third red: choose a repair?",
+                                stop=report)
+                text = calls.answer_brief([question], tasks, root, plan=plan,
+                                          call_id="a", branch="b", report="r")
+                section = text.split("# Question:", 1)[1].split("# Inventory", 1)[0]
+                self.assertEqual(section, f" demo/integration (stop)\n\n- Task: demo/integration\n"
+                                         f"- Report: `{report}`\n\nThird red: choose a repair?\n\n")
+                self.assertNotIn("Task spec", text)
+                self.assertNotIn("- Run:", section)
+
     def test_answer_limit(self):
         with tmp_home() as root:
             _, tasks = fixture(root)
@@ -1150,6 +1164,60 @@ class MainTest(unittest.TestCase):
                 self.assertIn("Which red fix?", output.getvalue())
                 self.assertIn("# Repair a red after landing", output.getvalue())
                 self.assertIn("## Task spec (none: its body)", output.getvalue())
+
+    def test_answer_stop_reports_follow_each_open_ask_even_with_equal_fields(self):
+        with tmp_home() as root:
+            _, tasks = fixture(root)
+            ask = dict(ev="question.asked", ts="03", task="demo/integration", run="", text="Stopped", park=True)
+            events = [{"ev": "question.asked"}, {"ev": "question.answered"},
+                      {"ev": "question.asked", "task": "demo/integration"},
+                      dict(ask), dict(ev="plan.stopped", task="demo/integration", report="/one.md"),
+                      dict(ask), dict(ev="plan.stopped", task="demo/integration", report="/two.md")]
+            expected = dict(task="demo/integration", run="", text="Stopped", foreman="")
+            self.assertEqual(calls._answer_questions(tasks, events),
+                             [dict(expected, stop=""), dict(expected, stop="/one.md")])
+            events.extend([dict(ev="question.answered", task="demo/integration"), dict(ask)])
+            self.assertEqual(calls._answer_questions(tasks, events), [dict(expected, stop="/two.md")])
+
+    def test_answer_stop_uses_last_report_before_ask_and_keeps_repair_question(self):
+        with tmp_home() as root:
+            fixture(root)
+            directory = root / "docs/plan/demo"
+            path = directory / "plan.toml"
+            write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
+            log.append("branch.landed", task="demo/one", branch="demo/one", into="demo/integration", main="tip")
+            log.append("run.started", task="demo/integration", run="demo/check-1", kind="check", base="tip")
+            log.append("run.ended", run="demo/check-1", outcome="failed")
+            log.append("run.started", task="demo/repair-1", run="demo/repair-1-1", kind="implement")
+            log.append("run.ended", run="demo/repair-1-1", outcome="question")
+            log.append("question.asked", task="demo/repair-1", run="demo/repair-1-1", text="Which repair?")
+            stamp = log.now()
+            records = [dict(ev="plan.stopped", task="demo/integration", report="/old.md"),
+                       dict(ev="question.asked", task="demo/integration", run="", text="Old stop", park=True),
+                       dict(ev="question.answered", task="demo/integration"),
+                       dict(ev="plan.stopped", task="demo/integration", report="/previous.md"),
+                       dict(ev="plan.stopped", task="demo/integration", report="gate:/latest.log"),
+                       dict(ev="plan.stopped", task="other/integration", report="/other.md"),
+                       dict(ev="question.asked", task="demo/integration", run="", text="Third refusal?", park=True),
+                       dict(ev="plan.stopped", task="demo/integration", report="/after.md")]
+            for record in records:
+                log.append(**record, ts=stamp)
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                self.assertEqual(calls.main(["answer", "--plan", str(directory), "--brief-only"]), 0)
+            start.assert_not_called()
+            text = output.getvalue()
+            self.assertIn("# Question: demo/integration (stop)\n\n- Task: demo/integration\n"
+                          "- Report: `gate:/latest.log`\n\nThird refusal?", text)
+            self.assertIn("# Question: demo/repair-1 (demo/repair-1-1)", text)
+            self.assertIn("Which repair?", text)
+            self.assertIn("## Task spec (none: its body)\n\n# Repair the integration check", text)
+            self.assertIn(f"- Report: `{log.home()}/runs/demo/repair-1-1/report.md`", text)
+            self.assertEqual(text.count("## Task spec"), 1)
+            for excluded in ("Old stop", "/old.md", "/previous.md", "/other.md", "/after.md"):
+                self.assertNotIn(excluded, text)
+            self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
 
     def test_brief_only_for_all_roles_through_cli(self):
         for role in ("skeleton", "answer", "review"):

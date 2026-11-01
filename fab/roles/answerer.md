@@ -24,6 +24,9 @@ nothing else.
   its body) has nowhere to append to: write its answer in your report, one
   line `Answer <task id>: <the answer>`, and list it under `Answered:`. fab
   gives the answer to its next run. Change no file for it.
+  A stop's question (`<draft>/integration`: the trunk stopped after three
+  tries) is answered as a spec-less task's is; the answer lifts the stop and
+  reaches the trunk's later repairs; change no file for it.
 - **What is the user's** (budgets, machines, what is hard to reverse, a
   change of direction) you do not decide: say so in your report with the
   options and your recommendation.

@@ -78,6 +78,37 @@ class QuestionsTest(unittest.TestCase):
         specless = replace(TASK, path="")
         self.assertEqual(foreman.questions({TASK.id: specless}, _asking())[0].state, "queued")
 
+    def test_stop_question_queues_without_adding_a_task(self):
+        tasks = {TASK.id: TASK}
+        events = [_event("question.asked", task="draft/integration", run="", text="Third refusal", park=True)]
+        self.assertEqual(foreman.questions(tasks, iter(events)),
+                         [foreman.Question("draft/integration", "", "Third refusal", "03", "queued", "03")])
+        self.assertEqual(tasks, {TASK.id: TASK})
+
+    def test_stop_question_of_another_draft_is_left_out(self):
+        events = [_event("question.asked", task="other/integration", run="", text="Stopped", park=True)]
+        self.assertEqual(foreman.questions({TASK.id: TASK}, events), [])
+        self.assertEqual(foreman.questions({}, events), [])
+
+    def test_stop_answer_closes_only_earlier_questions_in_log_order(self):
+        ask = _event("question.asked", task="draft/integration", run="", text="Stopped", park=True)
+        events = [ask, _event("question.answered", task="draft/integration")]
+        self.assertEqual(foreman.questions({TASK.id: TASK}, events), [])
+        later = {**ask, "text": "Stopped again"}
+        self.assertEqual(foreman.questions({TASK.id: TASK}, [*events, later]),
+                         [foreman.Question("draft/integration", "", "Stopped again", "03", "queued", "03")])
+
+    def test_stop_without_park_is_specless_even_after_a_question_run(self):
+        events = [{**event, "task": "draft/integration"} for event in _asking()]
+        self.assertEqual(foreman.questions({TASK.id: TASK}, events)[0].state, "queued")
+
+    def test_stop_questions_use_each_tasks_draft(self):
+        other = replace(TASK, id="other/task")
+        events = [_event("question.asked", task=f"{draft}/integration", run="", text="Stopped", park=True)
+                  for draft in ("draft", "other")]
+        self.assertEqual([question.task for question in foreman.questions({TASK.id: TASK, other.id: other}, events)],
+                         ["draft/integration", "other/integration"])
+
     def test_review_question_queues_since_asked(self):
         self.assertEqual(self.question(_asking("review")), replace(QUESTION, state="queued"))
 

@@ -55,8 +55,9 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
     """Every open question of the given tasks, in the order of their question.asked, with
     where it stands.
 
-    Open: a question.asked whose task is in tasks, with no later question.answered for that
-    task (as fab.calls.open_questions). It is the foreman's when its `run` has, before the
+    Open: a question.asked whose task is in tasks or is <draft>/integration for a draft
+    of those tasks, with no later question.answered for that task (as fab.calls.open_questions).
+    A stop without a task is specless and queued. It is the foreman's when its `run` has, before the
     question.asked, a run.started with kind in ASKING and a run.ended with outcome question
     (fab.run.collect logs the question.asked right after that run.ended). Its foreman runs
     are the run.started records after the question.asked with kind KIND, task
@@ -77,6 +78,7 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
 
     Walk the events once in log order, keeping each record's index, so equal timestamps keep
     their order. Pure: no file is read. Records missing a field the rule reads are skipped."""
+    stops = {f"{task.draft}/integration" for task in tasks.values()}
     starts, ends, foremen, reports, asked, answered = {}, {}, {}, {}, [], {}
     for position, event in enumerate(events):
         kind = event.get("ev")
@@ -89,12 +91,13 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
             if "report" in event:
                 reports.setdefault(event["run"], event)
         elif kind == "question.asked" and all(key in event for key in ("task", "run", "text", "ts")):
-            if event["task"] in tasks:
+            if event["task"] in tasks or event["task"] in stops:
                 asked.append((position, event))
         elif kind == "question.answered" and "task" in event:
             answered[event["task"]] = position
-    # A task with no spec file (an integration repair) has no options to settle by: it queues.
-    return [_question(event, position, starts, ends, foremen, reports, specless=not tasks[event["task"]].path)
+    # A stop or task with no spec file has no options to settle by: it queues.
+    return [_question(event, position, starts, ends, foremen, reports,
+                      specless=event["task"] not in tasks or not tasks[event["task"]].path)
             for position, event in asked if answered.get(event["task"], -1) < position]
 
 
