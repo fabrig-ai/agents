@@ -3,3 +3,26 @@ repo = "agents"
 sources = ["docs/plan/test-budget/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of test-budget: the request's one task. bin/fab test's budget
+# is the process's CPU time, children included, not wall time, so a busy
+# machine no longer fails a fast suite; the summary prints both. One direct
+# part, one task; the spec in tasks/, the standing rules in notes/common.md,
+# the decisions and the critical path in notes/decisions.md.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "cpu-budget"
+title = "bin/fab test's budget is CPU time, children included; the summary prints wall and CPU"
+mode = "direct"
+needs = []
+design = "docs/design/fab.md, 4"
+
+[[slice]]
+id = 1
+story = "A suite past 30 s of wall time but under 30 s of CPU passes bin/fab test, so fab land no longer refuses a good branch on a loaded machine; one past 30 s of CPU fails, and the summary prints both"
+parts = ["cpu-budget"]
+walk = false
