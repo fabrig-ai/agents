@@ -802,8 +802,8 @@ def _untry(branch: str, hosts: Mapping[str, Host], *, sh: Runner) -> None:
 
 def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
              log_path: Path | None, section: str = "") -> bool:
-    """Deliver a call or spec branch to its plan's trunk, retaining queued repair text."""
-    if plan.landing == "integration":
+    """Deliver to the trunk until it lands, then to main, retaining queued repair text."""
+    if plan.landing == "integration" and not integration.trunk_landed(plan, log.read(log_path)):
         return _merge_branch(branch, plan, checkout, sh=sh, log_path=log_path)
     if plan.repo == "fabrig":
         return _queue_branch(branch, checkout, sh=sh, log_path=log_path, section=section)
@@ -1155,8 +1155,9 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     return actions
 
 
-def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runner) -> Path:
-    """Fetch and follow each checkout's upstream once, sharing failures across its plans."""
+def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], events: Sequence[dict], *,
+              sh: Runner) -> Path:
+    """Fetch once, detaching at main after trunk landing or following upstream; share failures."""
     result = sh(["git", "rev-parse", "--show-toplevel"], cwd=str(_plan_ancestor(plan_dir)))
     if not result.ok or not result.out.strip():
         return plan_dir.resolve()
@@ -1165,10 +1166,16 @@ def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], *, sh: Runn
         fetched[checkout] = None
         try:
             sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
-            upstream = sh(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
-                          cwd=str(checkout))
-            if upstream.ok:
-                sh(["git", "merge", "--ff-only", "@{upstream}"], cwd=str(checkout), check=True)
+            landed = any(event.get("ev") == "branch.landed"
+                         and event.get("task") == f"{plan_dir.name}/integration"
+                         and "queue_ts" in event for event in events)
+            if landed:
+                sh(["git", "checkout", "-q", "--detach", "origin/main"], cwd=str(checkout), check=True)
+            else:
+                upstream = sh(["git", "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}"],
+                              cwd=str(checkout))
+                if upstream.ok:
+                    sh(["git", "merge", "--ff-only", "@{upstream}"], cwd=str(checkout), check=True)
         except (OSError, ValueError, Failed) as error:
             fetched[checkout] = error
     failure = fetched[checkout]
@@ -1188,7 +1195,7 @@ def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
     loaded, actions, seen, fetched = [], [], {}, {}
     for directory in directories:
         try:
-            checkout = _checkout(directory, fetched, sh=sh) if fetch else None
+            checkout = _checkout(directory, fetched, events, sh=sh) if fetch else None
             plan, tasks = _load_plan(directory, events, checkout=checkout, sh=sh)
             if plan.retired:
                 print(f"retired {plan.draft}")

@@ -487,7 +487,8 @@ def main(argv: list[str]) -> int:
 
     The others load the plan and its tasks as fab.calls.main does (no problems check),
     statuses from fab.state.fold over fab.log.read(). Each runs fab.calls.start(role,
-    subject(draft, role, part), root, brief, base=plan.trunk), prints `<outcome> <branch>` and exits 0 when
+    subject(draft, role, part), root, brief, base=plan.trunk), except retire uses main
+    after the integration trunk lands. Prints `<outcome> <branch>` and exits 0 when
     the outcome is done, 1 otherwise; an OSError, ValueError or fab.sh.Failed prints
     `fab call: <error>` on stderr and exits 1, starting nothing."""
     args = _arguments(argv)
@@ -505,8 +506,9 @@ def main(argv: list[str]) -> int:
             enlist(args.plan)
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
         fields = {"options": args.set} if args.role == "cut" and args.set else None
+        base = "main" if args.role == "retire" and integration.trunk_landed(plan, events) else plan.trunk
         result = calls.start(args.role, subject(plan.draft, args.role, getattr(args, "part", None)),
-                             repo, text, sh=run, base=plan.trunk, fields=fields)
+                             repo, text, sh=run, base=base, fields=fields)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except (OSError, ValueError, Failed) as error:

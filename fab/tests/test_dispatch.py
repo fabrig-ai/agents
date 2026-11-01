@@ -4586,9 +4586,64 @@ class CheckoutFollowTest(unittest.TestCase):
         self.assertEqual(self.fake.argvs().count(["git", "fetch", "origin"]), 1)
         self.assertTrue(all(call.cwd == str(self.home) for call in self.fake.calls[1:4]))
 
+    def test_landed_trunk_detaches_after_each_fetch_before_loading(self):
+        one = write_plan(self.home / "one", "one")
+        two = write_plan(self.home / "two", "two")
+        detach = ["git", "checkout", "-q", "--detach", "origin/main"]
+        events = [dict(ev="branch.landed", task="one/integration", queue_ts="001")]
+        path = one / "plan.toml"
+        write(path, path.read_text().replace('landing = "queue"', 'landing = "integration"'))
+
+        main_plan = "retired = true\n" + path.read_text()
+
+        def advance(call):
+            write(path, main_plan)
+            return Result(0)
+
+        self.fake.on(detach, advance)
+        with redirect_stdout(io.StringIO()):
+            loaded, failures = dispatch._load_plans([one, two], events, sh=self.fake)
+        self.assertEqual(failures, [])
+        self.assertEqual([entry[0].draft for entry in loaded], ["two"])
+        self.assertEqual(self.fake.argvs()[:3], [["git", "rev-parse", "--show-toplevel"],
+                                               ["git", "fetch", "origin"], detach])
+        self.assertEqual(self.fake.argvs().count(detach), 1)
+        self.assertNotIn(self.upstream, self.fake.argvs())
+        self.assertNotIn(self.follow, self.fake.argvs())
+        self.assertEqual(self.fake.calls[2].cwd, str(self.home))
+        dispatch._checkout(one, {}, events, sh=self.fake)
+        self.assertEqual(self.fake.argvs().count(detach), 2)
+        self.assertEqual(self.fake.argvs().count(["git", "fetch", "origin"]), 2)
+
+    def test_other_landings_still_follow_upstream(self):
+        one = write_plan(self.home / "one", "one")
+        self.fake.on(self.upstream, Result(0, "origin/one/integration\n"))
+        events = [dict(ev="branch.landed", task="two/integration", queue_ts="001"),
+                  dict(ev="branch.landed", task="one/a", queue_ts="002"),
+                  dict(ev="branch.landed", task="one/integration", into="one/integration")]
+        dispatch._checkout(one, {}, events, sh=self.fake)
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"],
+                                           ["git", "fetch", "origin"], self.upstream, self.follow])
+
+    def test_landed_trunk_fetch_or_detach_failure_is_shared(self):
+        one = write_plan(self.home / "one", "one")
+        two = write_plan(self.home / "two", "two")
+        events = [dict(ev="branch.landed", task="one/integration", queue_ts="001")]
+        for command in (["git", "fetch", "origin"], ["git", "checkout", "-q", "--detach", "origin/main"]):
+            with self.subTest(command=command):
+                fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home)))
+                fake.on(command, Result(1, err="cannot advance checkout"))
+                with redirect_stdout(io.StringIO()):
+                    loaded, failures = dispatch._load_plans([one, two], events, sh=fake)
+                self.assertEqual(loaded, [])
+                self.assertEqual(len(failures), 2)
+                self.assertTrue(all("cannot advance checkout" in failure.detail for failure in failures))
+                self.assertEqual(fake.argvs().count(["git", "fetch", "origin"]), 1)
+                self.assertEqual(fake.argvs().count(command), 1)
+
     def test_no_upstream_skips_merge(self):
         self.fake.on(self.upstream, Result(128))
-        self.assertEqual(dispatch._checkout(self.home, {}, sh=self.fake), self.home)
+        self.assertEqual(dispatch._checkout(self.home, {}, [], sh=self.fake), self.home)
         self.assertNotIn(self.follow, self.fake.argvs())
 
     def test_failed_fast_forward_is_shared_as_plan_load_failure(self):
@@ -4902,7 +4957,7 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.out = io.StringIO()
         self.enterContext(redirect_stdout(self.out))
         self.land = self.enterContext(patch.object(dispatch.land, "main", side_effect=AssertionError("unexpected land")))
-        self.queue = self.enterContext(patch.object(dispatch, "_queue_branch", side_effect=AssertionError("unexpected queue")))
+        self.queue = self.enterContext(patch.object(dispatch, "_queue_branch", wraps=dispatch._queue_branch))
 
     def append(self, *events):
         for entry in events:
@@ -4927,6 +4982,44 @@ class IntegrationDeliveryTest(unittest.TestCase):
         self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
         self.assertEqual(self.fake.argvs().count(push), 2)
         self.assertEqual(log.read(), [])
+
+    def test_landed_trunk_calls_ready_once_and_finish_after_queue_landing(self):
+        for role in ("retire", "cut", "review"):
+            with self.subTest(role=role):
+                self.path = self.home / f"{role}.jsonl"
+                self.fake.calls.clear()
+                self.append(*chain_history("review", role=role, subject=f"draft/{role}"),
+                            dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+                action = Action("finish", task="root", run="root", run_kind=role, branch="calls/root")
+                with patch.object(dispatch, "_merge_branch", side_effect=AssertionError("unexpected merge")):
+                    self.take(action)
+                    self.take(action)
+                    ready, = [entry for entry in log.read(self.path) if entry["ev"] == "branch.ready"]
+                    self.assertEqual((ready["task"], ready["branch"], ready["tip"]),
+                                     ("calls/root", "calls/root", "branch-tip"))
+                    push = ["git", "push", "origin", "branch-tip:refs/heads/ready/calls/root"]
+                    self.assertEqual(self.fake.argvs(), [
+                        ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"], push])
+                    self.assertFalse(any(entry["ev"] == "call.finished" for entry in log.read(self.path)))
+                    self.append(dict(ev="branch.landed", task="calls/root", branch="calls/root", queue_ts="002"))
+                    self.take(action)
+                finished = log.read(self.path)[-1]
+                self.assertEqual((finished["ev"], finished["role"], finished["outcome"]),
+                                 ("call.finished", role, "done"))
+        self.land.assert_not_called()
+        self.assertEqual(log.read(), [])
+
+    def test_landed_trunk_agents_call_uses_land(self):
+        self.plan = replace(self.plan, repo="agents")
+        self.append(*chain_history("review", role="retire", subject="draft/retire"),
+                    dict(ev="branch.landed", task="draft/integration", queue_ts="001"))
+        self.land.side_effect = None
+        self.land.return_value = 0
+        with patch.object(dispatch, "_merge_branch", side_effect=AssertionError("unexpected merge")):
+            self.take(Action("finish", task="root", run="root", run_kind="retire", branch="calls/root"))
+        self.land.assert_called_once_with(["calls/root"])
+        self.queue.assert_not_called()
+        self.assertEqual(log.read(self.path)[-1]["ev"], "call.finished")
 
     def test_running_cut_merges_only_its_pushed_unmerged_branch(self):
         self.append(call_started("cut", "cut", "draft/cut"))
