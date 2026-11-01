@@ -584,6 +584,16 @@ class BriefTest(unittest.TestCase):
         self.assertIn("brief.md", argv[2])
         self.assertEqual(calls.claude_argv(brief, worktree, model="another")[4], "another")
 
+    def test_role_effort_keeps_designers_above_other_claude_roles(self):
+        """Designer calls use xhigh while existing role efforts stay fixed."""
+        for role in designer.ROLES:
+            with self.subTest(role=role):
+                self.assertEqual(calls.role_effort(role), "xhigh")
+        for role in ("skeleton", "amend", "review"):
+            with self.subTest(role=role):
+                self.assertEqual(calls.role_effort(role), "high")
+        self.assertEqual(calls.role_effort("settle"), "medium")
+
 
 class ClaudeUsageTest(unittest.TestCase):
     def stream(self, result=True):
@@ -678,6 +688,19 @@ class StartTest(unittest.TestCase):
             self.assertEqual(log.read(), [])
             self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
             self.assertFalse(any(argv[0] == "claude" for argv in fake.argvs()))
+
+    def test_cut_call_uses_xhigh_effort(self):
+        """Starting a designer passes xhigh through to the Claude command."""
+        with tmp_home() as root:
+            def claude(call):
+                write(Path(call.cwd).parent / "report.md", "Done: cut plan\n")
+                return Result(0)
+
+            fake = FakeRunner().on(["claude"], claude)
+            result = calls.start("cut", "demo/cut", root, "Brief.", sh=fake)
+            self.assertEqual(result["outcome"], "done")
+            command = next(argv for argv in fake.argvs() if argv[0] == "claude")
+            self.assertEqual(command[command.index("--effort") + 1], "xhigh")
 
     def test_reply_report_only_call_uses_medium_effort_and_records_usage(self):
         with tmp_home() as root:

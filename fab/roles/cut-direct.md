@@ -7,10 +7,11 @@ thin specs rather than explore at length. These rules
 come before the ones above where they differ.
 
 - **Read** the drafts and inputs in this brief, then only the code you
-  must name in the specs. Survey the code in parallel: start one Explore
-  subagent per family of sites (for example: the call sites a contract
-  replaces, the private copies of a primitive, the test surfaces) while
-  you write the contract tasks, and use their findings for the site tasks.
+  must name in the specs. Where you judge a survey worth it, survey the code
+  in parallel: start one Explore subagent, `model` `opus`, `effort` `high`,
+  per family of sites (for example: the call sites a contract replaces, the
+  private copies of a primitive, the test surfaces) while you write the
+  contract tasks, and use their findings for the site tasks.
 - **Decide** what the draft leaves to the implementer's lead: pick the
   recommended option of each question, record the choice and why in
   `notes/decisions.md`, and bind it in the specs. A question the brief or

@@ -464,10 +464,12 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
     return pending
 
 
-# Each Claude role's effort, as the user's model sets it (execution-modes.md, the roles table):
-# the answerer, settler, issue reply and triager are medium; the designer's calls, the skeleton author,
-# its amendments and the structure reviewer are high. Passed explicitly, so a user's own default never leaks in.
-EFFORTS = {"answer": "medium", "reply": "medium", "triage": "medium", "settle": "medium"}
+# Each Claude role's effort, as the user's model sets it (execution-modes.md, the roles table), but for
+# the designer's calls (fab.designer.ROLES), xhigh at the user's word of 11-01 (docs/design/integration.md, 3):
+# the answerer, settler, issue reply and triager are medium; the skeleton author, its amendments and the
+# structure reviewer are high. Passed explicitly, so a user's own default never leaks in.
+EFFORTS = {"cut": "xhigh", "contract": "xhigh", "decision": "xhigh", "retire": "xhigh",
+           "answer": "medium", "reply": "medium", "triage": "medium", "settle": "medium"}
 EFFORT = "high"
 
 

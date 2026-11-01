@@ -660,6 +660,16 @@ class BriefTest(unittest.TestCase):
             with self.subTest(role=name):
                 self.assertIn(line, calls.ROLES["cut"].with_name(name).read_text().splitlines())
 
+    def test_cut_roles_set_claude_survey_and_designer_efforts(self):
+        """Cut instructions use Claude surveys at high and designers at xhigh."""
+        role = calls.ROLES["cut"]
+        run_text = " ".join(role.with_name("cut-run.md").read_text().split())
+        direct_text = " ".join(role.with_name("cut-direct.md").read_text().split())
+        self.assertNotIn("codex exec", run_text)
+        self.assertIn("`effort` `high`", run_text)
+        self.assertIn("`effort` `xhigh`", run_text)
+        self.assertIn("`effort` `high`", direct_text)
+
     def test_cut_options_follow_draft_and_emit_one_toml_assignment_per_key(self):
         plan = designer.uncut("new", "agents", [SOURCE])
         text = designer.cut_brief(plan, self.root, **FACTS,

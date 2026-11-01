@@ -150,23 +150,17 @@ the first pieces matter most: until your first push, no slot works.
 
 ## Surveys
 
-Surveys and investigations are read-only Codex runs at high effort. Start
-one from your worktree with its brief in a file:
-
-```
-codex exec -m gpt-6.1-sol -c model_reasoning_effort=high --sandbox read-only \
-  --skip-git-repo-check -o <its report> - < <its brief>
-```
-
-Several run at once in the background (`&`, then `wait`); each writes its
-last message, its answer, to its report.
-A survey builds nothing: it reads the code and answers the brief.
+Survey only where you judge it worth it. A survey or investigation is a
+read-only Claude sub-agent you start with the Agent tool, `model` `opus`
+(Opus 5.5), `effort` `high`, in the background. Several may run at once.
+Each answers its brief and builds nothing.
 
 ## Designers
 
 Where the design is too wide for one writer to keep the slots fed, split
-it across Claude designer subagents (the Agent tool, in the background),
-one per part or family of parts. Fix the contracts between their parts
+it across Claude designer subagents (the Agent tool, `model` `opus`,
+`effort` `xhigh`, in the background), one per part or family of parts.
+Fix the contracts between their parts
 first and give each designer a brief in a file: the draft's sections it
 cuts, what the surveys found, those contracts, and this brief's rules for
 a task and its spec. A designer writes its part's specs and notes into
