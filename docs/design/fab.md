@@ -1695,17 +1695,27 @@ only as tweaks once a replay matches its run.
     runs as an implement run from the trunk's tip and is merged like any
     task, which brings main in. Its questions, answers and the open-repair
     waits are a repair's; a catch-up repair is never one of the three reds
-    that stop a plan. A refusal at a newer main is a new repair, but the
-    plan stops for judgement when a catch-up refusal is at a main sha that
-    already had a catch-up repair merged (that repair did not bring main
-    in), or is the `CATCH_LIMIT`th (3) refusal since the plan's last clean
-    catch-up (its `branch.landed` for task `<draft>/integration`, branch
-    `main`), so repairs that never bring main in cannot follow a moving main
-    for ever. The stop holds until a clean catch-up is logged after it: the
-    person resolving it merges main into the trunk and pushes it, and the
-    next tick, finding the trunk containing `origin/main` while the stop
-    holds, logs that `branch.landed` (tip origin/main's sha, `main` the
-    trunk's tip, `by` `hand`), which clears the stop.
+    that stop a plan. A refusal at a newer main is a new repair.
+  - **A catch-up repair is checked when it merges.** Right after the tick
+    merges `<draft>/catch-up-<n>` into the trunk, it checks that the trunk
+    contains that repair's main sha. If it does, it logs the clean catch-up:
+    `branch.landed` for task `<draft>/integration`, branch `main`, tip the
+    sha, `main` the trunk's tip, `by` `repair`. If not, the repair did not
+    bring main in: it logs a catch-up refusal at that same sha (findings
+    saying so), and a catch-up refusal at a sha whose repair has merged
+    stops the plan for judgement. As a backstop, the plan also stops at the
+    `CATCH_LIMIT`th (3) catch-up refusal since its last clean catch-up (any
+    `branch.landed` for task `<draft>/integration`, branch `main`: the
+    tick's own merge, a checked repair's, or a hand one), so a run of
+    repairs that work never stops it (a conflict outside the old-form
+    baselines, such as `Cargo.lock` when two drafts add crates, may come on
+    many moves of main). A stop holds until a clean catch-up is
+    logged after it: the person resolving it merges main, at least the
+    stopping refusal's sha, into the trunk and pushes it, and the next tick,
+    finding the trunk containing that sha while the stop holds, logs that
+    `branch.landed` (tip the sha, `main` the trunk's tip, `by` `hand`),
+    which clears the stop; main may have moved again meanwhile, and the
+    next catch-up takes that as usual.
   - **A queue rejection is checked again:** the trunk is caught up and
     checked once more, then readied again (the queue asked to forget its
     tried tip when the tip is unchanged). A red check goes to repairs as
