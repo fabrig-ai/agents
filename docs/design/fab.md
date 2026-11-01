@@ -2589,16 +2589,19 @@ anything.
   is on origin and has not landed on main (no `branch.landed` for task
   `<draft>/integration` carrying `queue_ts`, as `fab.integration.queue_step`
   reads it). A replay (`ready` false) sits on an old base and is never
-  probed. Pairs are formed within one `plan.repo`; the git commands run in
-  the checkout of the pair's first plan in draft-name order, which the tick
-  has fetched.
+  probed. Pairs are formed within one `plan.repo`; every git command for a
+  repository runs in the checkout of its first probed plan in draft-name
+  order, which the tick has fetched, so cached tree ids always live in the
+  object store they are used from.
   - **Each trunk as if caught up.** A trunk can lag main (13.12's catch-ups
     wait), and a trunk behind main would show main's changes it lacks as
     overlaps with every trunk ahead of it. So for each probed trunk fab
     first runs `git merge-tree --write-tree --no-messages origin/main
     origin/<trunk>`: exit 0 gives the trunk's tree with main merged in.
     Exit 1 with a tree id first means the trunk has a catch-up conflict of
-    its own (13.12 repairs it): its pairs are skipped this tick.
+    its own (13.12 repairs it): its pairs are skipped this tick. Any other
+    result is a failure, as for a pair below: its pairs are skipped, and the
+    note is logged only when it differs from that trunk's last one.
   - **Each pair:** `git merge-tree --write-tree --name-only --no-messages -z
     --merge-base=origin/main <tree a> <tree b>`. Exit 0 is no overlap. Exit
     1 is an overlap only when stdout's first NUL-separated field is a hex
@@ -2611,8 +2614,11 @@ anything.
     drafts cost n + n(n-1)/2 of them under the tick's lock (five drafts:
     15, ~9 s). To keep that off ticks where nothing moved, results are
     cached in `FAB_HOME/overlaps.json`, keyed by main's sha and the trunk
-    tips; a pair or trunk whose key is unchanged is not run again. Losing
-    the file loses only time.
+    tips; a pair or trunk whose key is unchanged is answered from the cache.
+    It holds results only (a trunk's tree, a pair's `files` and `more`),
+    never failures, and a cached tree is dropped when a pair that used it
+    fails. It is written with `fab.atomic.write`. Losing the file loses only
+    time.
   - **The event:** `trunks.overlap` with `drafts` (the two drafts in name
     order), `tips` (their trunk tips, in that order), `files` (the
     conflicting paths in merge-tree's order, at most 40), `more` (how many
@@ -2623,10 +2629,11 @@ anything.
     overlap cleared.
   - **Closing pairs that leave:** in a tick where every listed plan loaded
     (13.4's rule), a pair whose last `trunks.overlap` has files and that
-    is not among this tick's probed pairs (a trunk landed, a plan retired
-    or unlisted, `ready` turned off) gets a closing `trunks.overlap` with
-    empty `files` and `reason` `gone`. A pair skipped for a catch-up
-    conflict or a failure is still probed, not gone.
+    is not among this tick's pairs (a trunk landed, a plan retired or
+    unlisted, `ready` turned off) gets a closing `trunks.overlap` with empty
+    `files` and `reason` `gone`. This tick's pairs are those formed from the
+    probed plans, whether run, answered from the cache, or skipped for a
+    catch-up conflict or a failure.
   - The pure part (`fab/overlaps.py`): the plans to probe from the loaded
     plans and the log, the pairs, the parse of merge-tree's output, whether
     a result is news, and the pairs gone. The shell is one function the
@@ -2634,9 +2641,11 @@ anything.
 - **What it is for, for now: report only.** Nothing waits on an overlap
   and nothing is started by one: the trunk that lands second still meets
   the conflict at its catch-up and repairs it there (13.12). The status
-  page (13.14) shows each pair whose last `trunks.overlap` has files: the
-  two drafts by their public labels and the count of files (`files` plus
-  `more`), never a path (13.14: the page is public, the repository
+  page (13.14) shows each pair whose last `trunks.overlap` has files, in a
+  panel after Drafts, from the snapshot key `overlaps` (a list of
+  `{drafts, files}`): the two drafts by their public labels (a draft not
+  known from run starts shows as `other`, as 13.14's labels do) and the
+  count of files (`files` plus `more`), never a path (13.14: the page is public, the repository
   private). Whether an overlap should also reorder work, or start an early
   repair, waits for the numbers: how often pairs overlap, and how often an
   overlap becomes a catch-up repair.
@@ -2648,11 +2657,14 @@ anything.
   same `plan.repo`, and folds statuses with `fab.state.fold` over
   `fab.log.read()`; the rendered text is passed into `cut_brief` as a new
   argument. In the plans file's order, per plan: its draft; for an
-  integration plan whose trunk has not landed, every task with its `files`,
+  integration plan whose trunk has not landed, every task with its `files`
+  (an integration plan whose trunk has landed is left out entirely),
   those merged into the trunk marked `merged` (they are not on main yet);
   for a queue plan, its tasks not landed, with their `files`; a plan whose
   cut is in flight, `cut in flight`, with the tasks its pushed plan
-  already lists. Tasks by id; at most 200 lines in all, the rest counted.
+  already lists. Spec tasks only (the repair and catch-up tasks folded from
+  the log name `**`, which tells the cut nothing), by id; at most 200 lines
+  in all, the rest counted.
   A cut whose options set `ready=false` (a replay) gets no such section: a
   replay differs from its run only in who executes it (13.12). The cut's
   role texts (`fab/roles/cut-run.md` for direct integration cuts,
