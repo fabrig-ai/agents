@@ -2,9 +2,9 @@
 
 You are a read-only Codex run. The landing refused a task's branch, and no
 repair or rebase run starts until you have read the refusal. This brief
-holds the refusal, the failing step's log and the task spec; your checkout
-is the refused branch. Read its code and the design the spec cites only as
-far as the red needs.
+holds the refusal, the failing step's log and the task spec (or the task's
+body when it has no spec); your checkout is the refused branch. Read its
+code and the design the spec cites only as far as the red needs.
 
 ## What you decide
 
@@ -30,7 +30,8 @@ Its first line is one of:
 - `Done: fix: <what to change, in one line>`, then at most thirty lines:
   what failed, where to look and what to change. These lines are written
   into the spec as its `## Repair` (or, for a conflict, `## Rebase`) section
-  as they stand, and the next run reads them.
+  as they stand, or appended to the task's body when it has no spec, and
+  the next run reads them.
 - `Done: retry: <why the red is not the branch's, in one line>`, then at
   most ten lines: the log lines that show it.
 - `Failed: <why you cannot say, in one line>`: the repair run starts with

@@ -125,13 +125,15 @@ def brief(refusal: Refusal, task: Task, *, run_id: str, report: str, spec: str,
 
     1. role, the role text (ROLE's), its trailing newlines removed.
     2. `# The refusal`: one line each, `- Run: <run_id>`, `- Task: <task.id> (spec
-       \\`<task.path>\\`)`, `- Branch: \\`<refusal.branch>\\` at \\`<refusal.tip or "-">\\``,
+       \\`<task.path>\\`)` (or `- Task: <task.id> (no spec file)` when task.path is empty),
+       `- Branch: \\`<refusal.branch>\\` at \\`<refusal.tip or "-">\\``,
        `- Step: \\`<refusal.step>\\``, `- Next run: <refusal.kind>`, `- Retried unchanged
        since its last run: <yes or no>`, `- Report: write it to \\`<report>\\``, then the
        line `Your checkout is the task's repository at origin/<refusal.branch>, read-only.`
     3. `# The failing step's log`: text, the lines fab.run.refusal_text gives, in a ```text
        fence (its trailing newline removed first).
-    4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim.
+    4. `# The task spec`: spec, the spec file's whole text (its `+++` header too), verbatim;
+       when task.path is empty, `# The task`: task.body verbatim instead.
 
     Pure: the caller reads the files and the log."""
     task_fact = f"- Task: {task.id}" + (f" (spec `{task.path}`)" if task.path else " (no spec file)")
@@ -153,8 +155,9 @@ def start(refusal: Refusal, task: Task, host: Host, events: Iterable[dict], *,
 
     1. The run id fab.run.next_run(fab.foreman.task_field(task.id), events): the question
        foremen's numbering, `<task>/foreman-<n>`.
-    2. On this machine: spec, the text of the file at task.path, and role, ROLE's text (an
-       OSError from either propagates and starts nothing); text, fab.run.refusal_text(<the record>, task.repo, sh=sh), the
+    2. On this machine: spec, the text of the file at task.path or task.body when no
+       path is set, and role, ROLE's text (an OSError reading a file propagates and starts
+       nothing); text, fab.run.refusal_text(<the record>, task.repo, sh=sh), the
        record holding step, log and tip, and findings when refusal.findings is not empty.
     3. fab.run.launch_detached(host, run_id, task.repo, "origin/<refusal.branch>", sh=sh,
        log_path=log_path, task=fab.foreman.task_field(task.id), kind=KIND,
