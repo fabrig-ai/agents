@@ -279,7 +279,7 @@ class RunStartTest(unittest.TestCase):
                     self.assertEqual(commands[4], ["git", "-C", str(worktree), "checkout",
                                                    "--ignore-other-worktrees", "-B", branch, "origin/" + branch])
                 else:
-                    self.assertEqual(commands[3], ["git", "-C", str(repo), "worktree", "add", "-b",
+                    self.assertEqual(commands[3], ["git", "-C", str(repo), "worktree", "add", "-B",
                                                    branch, str(worktree), "origin/main"])
                 self.assertEqual(commands[-2], ["bash", "-c",
                     f"mkdir -p {directory} && cat > {directory}/brief.md.tmp && mv -- {directory}/brief.md.tmp {directory}/brief.md"])
@@ -328,7 +328,7 @@ class RunStartTest(unittest.TestCase):
                                        "--detach", str(ROOT / "wt" / run_id), source], commands)
                     else:
                         self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add",
-                                       "-b", branch, str(ROOT / "wt" / run_id), source], commands)
+                                       "-B", branch, str(ROOT / "wt" / run_id), source], commands)
 
     def test_start_names_spec_relative_to_checkout_when_inside(self):
         for kind in ("implement", "rebase"):
@@ -1224,5 +1224,5 @@ class OptimisticRunTest(unittest.TestCase):
                     if repo == "fabrig":
                         self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes", "-C", task.id, "checked-tip"], commands)
                     else:
-                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-b", task.id,
+                        self.assertIn(["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-B", task.id,
                                        str(ROOT / "wt" / run_id), "checked-tip"], commands)

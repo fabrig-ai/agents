@@ -3412,7 +3412,7 @@ class OptimisticStartTest(unittest.TestCase):
         first = next(event for event in log.read(self.path) if event.get("task") == "draft/a")
         self.assertEqual((first["ev"], first["base"]), ("run.started", "skeleton-tip"))
         launch = [call.argv[-1] for call in self.fake.calls if call.argv[0] == "ssh"]
-        self.assertTrue(any("worktree add -b draft/a" in command and command.endswith("skeleton-tip'")
+        self.assertTrue(any("worktree add -B draft/a" in command and command.endswith("skeleton-tip'")
                             for command in launch))
         spec, tasks = dispatch._load_plan(self.directory, log.read(self.path), checkout=self.checkout, sh=self.fake)
         self.assertEqual(state.part_statuses(spec, tasks, {}), {"core": "designed"})

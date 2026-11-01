@@ -192,7 +192,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
 
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
-    (implement, review, rebase: a new branch from origin/<trunk>; repair: the existing
+    (implement, review, rebase: the branch made afresh from origin/<trunk>, an earlier run's local branch reset; repair: the existing
     origin/<branch>); write the brief to FAB_HOME/runs/<run>/brief.md; then
     `codex-run task --effort <task.effort> --to NOTIFY BRIEF WORKTREE REPORT`, REPORT being
     FAB_HOME/runs/<run>/report.md, review adding --read-only. codex-run prints `<id> <state>`.
@@ -317,7 +317,9 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), source])
         remote(["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source])
     else:
-        remote(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree), base])
+        # -B, not -b: an earlier run's local branch stays in the clone after its worktree goes,
+        # and -b refused every rerun's start once (findings-loop, 11-01).
+        remote(["git", "-C", str(repo), "worktree", "add", "-B", branch, str(worktree), base])
     for need, need_branch in early:
         merged = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
                                    "user.email=fab@localhost", "merge", "--no-edit", f"origin/{need_branch}"]))
