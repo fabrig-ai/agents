@@ -78,3 +78,17 @@ The functions changed, the tests added, and the machine action.
 Your commit message says: machine action, `bin/install.sh <gate host>` once
 landed, so `fab-queue.service` restarts on the new `reusable` (decision 3);
 builders follow main at their next run start.
+
+## Answers
+
+- 2026-11-01, the answerer (run precheck-receipt-2): every test passes but
+  `bin/fab test` exceeds 30 s of CPU on the builder; what now? Not this
+  task's, and no change to make: commit 5fab700 stands. The overrun is
+  hetzner6's: unchanged main took 34.8 s of CPU there, and the runs just
+  before and after this one 24.7 and 25.5 s, while on hel8, where `fab land` runs
+  (`docs/design/fab.md`, 2), the branch took 23.5 s and the branch merged
+  with main 23.2 s. For this task "`bin/fab test` green" is every test
+  passing; the budget line alone, past 30 s with no test failing, goes under
+  `## Left` with `fab/testrun.py` as the file and the figures you saw. Do not
+  touch tests or the budget, do not investigate further: verify, report
+  `Done:`.
