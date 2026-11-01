@@ -20,6 +20,7 @@ COMMANDS = {
     "land": ("fab.land", "land a branch of this repository"),
     "run": ("fab.run", "start, inspect and collect Codex runs"),
     "check": ("fab.integration", "check an integration trunk as a user unit"),
+    "trunk": ("fab.trunk", "make a plan's integration trunk and its worktree"),
     "codex": ("fab.codex", "start a Codex run as a user unit (the builder's side of fab run)"),
     "hosts": ("fab.hosts", "the machines and their disk budget"),
     "logins": ("fab.logins", "the shelf of Claude, Codex and QA logins: lend, return, swap, check"),
