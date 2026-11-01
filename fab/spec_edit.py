@@ -37,6 +37,21 @@ def commit(task: Task, checkout: Path, edit: Callable[[str], str], *, branch: st
 
     fab.foreman.commit is this with with_answer as edit; its steps and argvs are unchanged."""
     relative = Path(task.path).resolve().relative_to(checkout.resolve())
+    return commit_path(str(relative), checkout, edit, branch=branch, message=message,
+                       worktree=worktree, sh=sh, trunk=trunk)
+
+
+def commit_path(path: str, checkout: Path, edit: Callable[[str], str], *, branch: str,
+                message: str, worktree: Path, sh: Runner = run, trunk: str = "main") -> str | None:
+    """Commit and push an edited repository path, or return None when unchanged.
+
+    Use commit's worktree, command order and cleanup (docs/design/fab.md, 13.15).
+    Read a missing file as empty text and stage it with `git add -- <path>` before
+    committing. Refuse absolute paths and paths outside checkout before commands.
+    """
+    if Path(path).is_absolute():
+        raise ValueError("path must be relative to checkout")
+    relative = (checkout / path).resolve().relative_to(checkout.resolve())
 
     def git(*argv, cwd=checkout):
         return sh(["git", *argv], cwd=str(cwd), check=True)
@@ -45,11 +60,17 @@ def commit(task: Task, checkout: Path, edit: Callable[[str], str], *, branch: st
         git("fetch", "origin")
         git("worktree", "add", "-B", branch, str(worktree), f"origin/{trunk}")
         path = worktree / relative
-        spec = path.read_text()
+        try:
+            spec = path.read_text()
+            missing = False
+        except FileNotFoundError:
+            spec, missing = "", True
         new = edit(spec)
         if new == spec:
             return None
         atomic.write(path, new)
+        if missing:
+            git("add", "--", str(relative), cwd=worktree)
         git("-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "-q", "-m",
             message, "--", str(relative), cwd=worktree)
         git("push", "-q", "--force", "origin", f"HEAD:refs/heads/{branch}", cwd=worktree)
