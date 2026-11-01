@@ -78,3 +78,15 @@ Tests in `fab/tests/test_designer.py`:
 
 The section's format as built, a sample of it from the test, and the two
 role lines.
+
+## Repair (2026-11-01, step gate:size, foreman trunk-overlaps/cut-beside/foreman-1)
+
+extract cut role and option rendering so cut_brief meets the 60-line cap
+The branch owns this gate finding: `fab/designer.py:221` reports `cut_brief` at 78 lines (cap 60).
+In `fab/designer.py`, extract the block from `direct = parsed.get(...)` through construction of `option_sections` into a private helper taking `plan`, parsed options and `plan_path`, returning `run_role`, `role_text` and `option_sections`.
+Keep option parsing and brief section assembly in `cut_brief`; keep both functions within the cap.
+Preserve the public signature, documented section order, role selection and option text.
+Preserve `beside=None` omission and empty-string `(none)` rendering immediately after the sources section, per `docs/design/fab.md` §13.17.
+Use existing `fab/tests/test_designer.py` coverage for role selection, options, direct instructions and beside-section ordering to verify unchanged behavior.
+Keep the repair within `fab/designer.py`; no design or role-text change is needed.
+Run `bin/fab test` and rerun the size gate before handing back.
