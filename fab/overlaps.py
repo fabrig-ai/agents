@@ -68,30 +68,45 @@ def parse_pair(code: int, stdout: str) -> tuple[list[str], int] | None:
     return paths[:FILES], max(0, len(paths) - FILES)
 
 
+def well_formed(event: dict) -> bool:
+    """Whether an overlap record is safe to fold (docs/design/fab-integration.md, 4).
+
+    drafts and tips are lists of two strings, files a list of strings, and
+    more a non-negative int excluding bool. Other fields are unrestricted.
+    """
+    if event.get("ev") != "trunks.overlap":
+        return False
+    for field in ("drafts", "tips", "files"):
+        values = event.get(field)
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            return False
+        if field != "files" and len(values) != 2:
+            return False
+    return type(event.get("more")) is int and event["more"] >= 0
+
+
 def is_news(pair: tuple[str, str], files: Sequence[str], more: int,
             events: Sequence[dict]) -> bool:
-    """Whether (files, more) differs from the pair's last overlap, absent as empty.
+    """Whether (files, more) differs from the pair's last valid overlap, absent as empty.
 
     Compare paths in merge-tree order; tips and reason do not make news
     (docs/design/fab-integration.md, 4).
     """
     last = next((event for event in reversed(events)
-                 if event.get("ev") == "trunks.overlap" and event.get("drafts") == list(pair)), {})
+                 if well_formed(event) and event["drafts"] == list(pair)), {})
     return (list(files), more) != (last.get("files", []), last.get("more", 0))
 
 
 def open_pairs(events: Sequence[dict]) -> dict[tuple[str, str], dict]:
     """Open pairs to their last overlap record, by name (docs/design/fab-integration.md, 4).
 
-    Open means the last record has files. Skip records whose drafts are not
-    a list of two strings; log order, rather than timestamps, decides last.
+    Open means the last well-formed record has files. Skip malformed records;
+    log order, rather than timestamps, decides last.
     """
     latest = {}
     for event in events:
-        drafts = event.get("drafts")
-        if (event.get("ev") == "trunks.overlap" and isinstance(drafts, list)
-                and len(drafts) == 2 and all(isinstance(draft, str) for draft in drafts)):
-            latest[tuple(drafts)] = event
+        if well_formed(event):
+            latest[tuple(event["drafts"])] = event
     return {pair: latest[pair] for pair in sorted(latest) if latest[pair].get("files")}
 
 

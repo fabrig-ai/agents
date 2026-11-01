@@ -20,6 +20,21 @@ def record(pair=("a", "b"), files=("shared.py",), more=0, tips=("a-tip", "b-tip"
                 more=more, reason=reason)
 
 
+def _malformed_records():
+    """Each record violates one required field and remains malformed after JSON encoding."""
+    invalid = {
+        "drafts": (None, "a b", [], ["a"], ["a", "b", "c"], ["a", 1], [[], "b"]),
+        "tips": (None, "a-tip b-tip", [], ["a-tip"], ["a", "b", "c"], ["a-tip", 1]),
+        "files": (None, "shared.py", {}, [1], [["shared.py"]]),
+        "more": (-1, True, False, "0", None, 0.5),
+    }
+    records = [dict(record(), **{field: value})
+               for field, values in invalid.items() for value in values]
+    records.extend({key: value for key, value in record().items() if key != field}
+                   for field in invalid)
+    return records
+
+
 class OverlapsTest(unittest.TestCase):
     def setUp(self):
         self.enterContext(tmp_home())
@@ -83,6 +98,36 @@ class OverlapsTest(unittest.TestCase):
                              (1, TREE + "\npath\n"), (1, "\0" + TREE + "\0path\0")):
             with self.subTest(code=code, stdout=stdout):
                 self.assertIsNone(overlaps.parse_pair(code, stdout))
+
+    def test_well_formed_accepts_only_the_overlap_contract(self):
+        for valid in (record(), record(files=()), record(more=12),
+                      dict(ev="trunks.overlap", drafts=["b", "a"], tips=["", "tip"],
+                           files=["path"] * 41, more=0)):
+            with self.subTest(valid=valid):
+                self.assertTrue(overlaps.well_formed(valid))
+        for invalid in [*_malformed_records(), {}, dict(record(), ev="note")]:
+            with self.subTest(invalid=invalid):
+                self.assertFalse(overlaps.well_formed(invalid))
+        for field in ("drafts", "tips", "files"):
+            with self.subTest(field=field):
+                self.assertFalse(overlaps.well_formed(dict(record(), **{field: tuple(record()[field])})))
+
+    def test_malformed_records_do_not_replace_the_last_well_formed_overlap(self):
+        valid = record(files=("kept.py",), more=2, tips=("kept-a", "kept-b"))
+        closing = dict(drafts=["a", "b"], tips=["kept-a", "kept-b"], files=[], more=0, reason="gone")
+        for invalid in _malformed_records():
+            with self.subTest(invalid=invalid):
+                events = [valid, invalid]
+                self.assertFalse(overlaps.is_news(("a", "b"), ["kept.py"], 2, events))
+                self.assertTrue(overlaps.is_news(("a", "b"), [], 0, events))
+                self.assertEqual(overlaps.open_pairs(events), {("a", "b"): valid})
+                self.assertEqual(overlaps.gone_pairs([], events), [closing])
+                self.assertFalse(overlaps.is_news(("a", "b"), [], 0, [invalid]))
+                self.assertEqual(overlaps.open_pairs([invalid]), {})
+                self.assertEqual(overlaps.gone_pairs([], [invalid]), [])
+                closed = [record(files=()), invalid]
+                self.assertFalse(overlaps.is_news(("a", "b"), [], 0, closed))
+                self.assertEqual(overlaps.open_pairs(closed), {})
 
     def test_news_compares_only_last_files_and_more(self):
         pair = ("a", "b")
@@ -199,6 +244,18 @@ class OverlapProbeTest(unittest.TestCase):
 
     def events(self, kind):
         return [event for event in log.read(self.path) if event["ev"] == kind]
+
+    def test_overlap_probe_ignores_malformed_records_as_if_absent(self):
+        expected_lines = self.probe()
+        expected = {key: value for key, value in self.events("trunks.overlap")[0].items() if key != "ts"}
+        for invalid in _malformed_records():
+            with self.subTest(invalid=invalid):
+                atomic.write(self.path, json.dumps(dict(invalid, ts=log.now())) + "\n")
+                self.assertEqual(self.probe(), expected_lines)
+                events = self.events("trunks.overlap")
+                self.assertEqual(len(events), 2)
+                self.assertEqual({key: value for key, value in events[-1].items() if key != "ts"}, expected)
+                self.assertEqual(self.events("note"), [])
 
     def test_overlap_probe_caches_news_and_reprobes_a_new_tip(self):
         paths = [f"path-{number}" for number in range(43)]

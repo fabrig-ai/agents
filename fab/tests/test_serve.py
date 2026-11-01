@@ -370,6 +370,37 @@ class OverlapsTest(unittest.TestCase):
                 for private in record["files"] + record["tips"]:
                     self.assertNotIn(private, output)
 
+    def test_serve_overlaps_ignore_each_malformed_record(self):
+        invalid = {
+            "drafts": (None, "alpha beta", [], ["alpha"], ["alpha", "beta", "gamma"], ["alpha", 1]),
+            "tips": (None, "a b", [], ["a"], ["a", "b", "c"], ["a", 1]),
+            "files": (None, "private/path", {}, [1], [["private/path"]]),
+            "more": (-1, True, False, "0", None, 0.5),
+        }
+        opened = event("trunks.overlap", drafts=["alpha", "beta"], tips=["a", "b"],
+                       files=["private/kept"], more=2)
+        changed = dict(opened, files=["private/bad"], more=9)
+        records = [dict(changed, **{field: value})
+                   for field, values in invalid.items() for value in values]
+        records.extend({key: value for key, value in changed.items() if key != field}
+                       for field in invalid)
+        known = [event("run.started", 90000, task=name + "/task") for name in ("alpha", "beta")]
+        for bad in records:
+            for previous in ([], [opened]):
+                with self.subTest(bad=bad, previous=bool(previous)):
+                    events = known + previous + [bad]
+                    before = copy.deepcopy(events)
+                    current = serve.snapshot(events, NOW, [])
+                    expected = [{"drafts": ["alpha", "beta"], "count": 3}] if previous else []
+                    self.assertEqual(current["overlaps"], expected)
+                    page = serve.render(current)
+                    self.assertEqual(events, before)
+                    if previous:
+                        self.assertIn('<tr><td>alpha · beta</td><td class="num">3</td></tr>', page)
+                    else:
+                        self.assertIn('<p class="empty">No drafts overlap.</p>', page)
+                    self.assertNotIn("private/", page)
+
     def test_serve_overlaps_closed_pairs_disappear(self):
         for reason in ("probe", "gone"):
             with self.subTest(reason=reason):
