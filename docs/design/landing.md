@@ -25,8 +25,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `answers/<run>` and `repairs/<run>`, whose run ids hold slashes, and
   `ladder/<draft>/backlog-<n>`; fixed 11-01, found by dogfood/design: only
   two-segment names were taken, so those branches never landed), a batch
-  merged on main, the selected checks through `heavy --gate`, bisection of a red batch, a push
-  that expects main's parent, ready and task branches deleted. Its record is
+  merged on main, the selected checks through `heavy --gate`, bisection of
+  a red batch, a push that expects main's parent, ready and task branches deleted. Its record is
   `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
   `collateral`), which the dispatcher reads; the tips it has tried and
   their collateral reds (3) are its only other state. A `rejected` at

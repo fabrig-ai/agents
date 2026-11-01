@@ -343,7 +343,8 @@ only as tweaks once a replay matches its run.
     host>:<log>`, the host being the first with role gate, as the import
     reads; "" for a catch-up, whose findings the text quotes, at most 20
     lines), and with it the stop's question: `question.asked` for task
-    `<draft>/integration`, `park` true, its text the record's. It logs
+    `<draft>/integration`, `run` the last red check's run for `red` and ""
+    otherwise, `park` true, its text the record's. It logs
     them when the trunk stops and none has been logged since the stop's
     last lift; merges while it holds log none. While it holds, the trunk
     takes no further step (no catch-up, check or ready; of the plan's tasks
@@ -351,13 +352,17 @@ only as tweaks once a replay matches its run.
     flight end and merge as usual).
   - **The answerer judges a stop,** as it does a repair's question
     (execution-modes.md: judgement comes in batches, from an answer call):
-    `fab.foreman.questions` and the answer call's brief take the stop's
-    question though `<draft>/integration` is no task (it never folds as
-    one), and an integration plan answers it at once. Its report line
-    `Answer <draft>/integration: <text>` is logged as that question's
-    `question.answered` and lifts the stop; an answer call that cannot
-    settle it ends `Question:`, which reaches the page as any call's
-    (channel.md 2). After a lift the stop's counts start afresh (end reds,
+    `fab.foreman.questions` takes a `question.asked` whose task is
+    `<draft>/integration` for a draft of the given tasks, queued at once,
+    without a task for it (none is added to the plan's tasks, so nothing
+    folds it); the answer brief shows it as `Question: <draft>/integration
+    (stop)`, its text and `- Report:` the `plan.stopped`'s report, with no
+    task spec; an integration plan answers it at once. Its id on the
+    report's `Answered:` line, with `Answer <draft>/integration: <text>`
+    giving the answer, is logged as that question's `question.answered`
+    (`_finish`), as a repair's is, and lifts the stop; an answer call that
+    cannot settle it ends `Question:`, which reaches the page as any
+    call's (channel.md 2). After a lift the stop's counts start afresh (end reds,
     catch-up refusals since a clean catch-up, queue rejections; a main
     sha's catch-up repair counts as merged only when it merged after the
     answer), so the next red, refusal or rejection is a first; repair ids
@@ -367,7 +372,8 @@ only as tweaks once a replay matches its run.
     and every later one, as a repair's own answers are. A clean catch-up
     after a `catch-up` stop lifts it too: the tick then logs the stop's
     `question.answered` (answer `lifted by a clean catch-up`, `by` `tick`),
-    so it leaves the answerer's queue. A later stop logs a new
+    so it leaves the answerer's queue; the tick's own lift is folded into
+    no repair. A later stop logs a new
     `plan.stopped` and question.
   - A check run counts as the draft's run in flight and takes a place.
   - A repair has no spec file, so its question skips the foreman (no
@@ -457,8 +463,9 @@ only as tweaks once a replay matches its run.
   record says it landed), never merged into the landed trunk; so is any
   other call of the plan delivered after its trunk landed. Once the trunk
   has landed (`fab.integration.trunk_landed`), the tick reads the plan from
-  main: its fetch of the plan checkout detaches it at `origin/main` (which
-  holds the trunk's tip; the queue deleted the trunk), so the retire's
+  main: each fetch of the plan checkout moves it, detached, to
+  `origin/main` (which holds the trunk's tip; the queue deleted the
+  trunk), so the retire's
   `retired = true` ends the plan once the queue lands it. Fixed 11-01
   (found by dogfood/design): the tick merged the retire into the trunk, so
   the plan's status files and `retired = true` never reached main.

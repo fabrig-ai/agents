@@ -58,7 +58,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **A run is one Codex execution** on a builder, in a slot (fabrig) or a
   worktree (repositories that build nothing heavy). `fab run start` prepares
   the checkout at the task's base, writes the brief, and starts
-  `codex-run task` there.
+  `codex-run task` there. A rerun continues from the work its earlier run
+  pushed: an implement rerun starts from `origin/<branch>` when it exists,
+  in a slot or a worktree, and merges the base in (a conflict is left for
+  the run). Fixed 11-01, found by the findings loop: a worktree rerun
+  started from the base and dropped it.
 - **Builders follow the dispatcher:** before any builder command, `fab run
   start` reads the running fab package's checkout `HEAD` and, over one ssh
   under `flock -w 60 FAB_HOME/install.lock`, checks for

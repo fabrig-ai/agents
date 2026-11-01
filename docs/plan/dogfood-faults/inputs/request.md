@@ -1,8 +1,8 @@
 # Request: fab faults found by dogfood/design
 
 From the director, 2026-11-01 (agents/loop's brief, backlog item 1): fix the
-fab faults the session dogfood/design found while writing temper's landing
-model from fab's code, and bring the designs and status files back in line
+fab faults the session dogfood/design found while writing temper's
+landing model from fab's code, and bring the designs and status files back in line
 with the code. Each fault was confirmed in the code on agents main 1dc102c
 before this request (item 5 by reading only). The designs now say what fab should do, each
 fix marked "fixed 11-01"; build them as designed:
@@ -17,8 +17,8 @@ fix marked "fixed 11-01"; build them as designed:
    delivered after that, is delivered as a queue plan's call is
    (`_deliver`'s queue-plan path; integration plans are fabrig's, so
    fabrig's queue), never merged into the trunk; and `_checkout`
-   (`fab/dispatch.py`, given the log) detaches a plan checkout at
-   `origin/main` once its trunk has landed, so the tick reads the retired
+   (`fab/dispatch.py`, given the log), at every fetch once its trunk has
+   landed, moves the plan checkout (detached) to `origin/main` so the tick reads the retired
    plan.toml from main (the queue deletes the trunk branch when it lands it).
 2. **The queue takes ready refs of any depth** (`docs/design/landing.md` 2).
    `fab.queue.candidates` (`fab/queue.py:49`) takes only two-segment names, so
@@ -34,12 +34,19 @@ fix marked "fixed 11-01"; build them as designed:
    - `plan.stopped` and the stop's `question.asked` (task
      `<draft>/integration`, `park` true), logged when the trunk stops and
      none since the stop's last lift; none on merges while it holds;
-   - `fab.foreman.questions` and the answer call's brief (`fab/calls.py`,
-     `integration.with_repairs`) take that question though
-     `<draft>/integration` is no task: it must never fold as one in
-     `fab.state.fold` or count in `next_step`'s tasks; the answer call's
-     `Answer <draft>/integration: <text>` line is logged as its
-     `question.answered`, as a repair's is;
+   - the question's `run`: the last red check's run for `red`, "" otherwise;
+   - `fab.foreman.questions` and the answer call's brief (`fab/calls.py`
+     `answer_brief`; not `integration.with_repairs`, which feeds the tick's
+     tasks) take that question without a task for it: nothing may fold it
+     in `fab.state.fold` or count it in `next_step`'s tasks; the brief shows
+     `Question: <draft>/integration (stop)`, its text and the
+     `plan.stopped`'s report, no spec; its id on the answer report's
+     `Answered:` line, with `Answer <draft>/integration: <text>`, is logged
+     as its `question.answered` (`_finish`), as a repair's is;
+   - `fab/roles/answerer.md`: "A stop's question (`<draft>/integration`: the
+     trunk stopped after three tries) is answered as a spec-less task's is;
+     the answer lifts the stop and reaches the trunk's later repairs; change
+     no file for it.";
    - the lift: counts start afresh after that `question.answered` in
      `next_step`, `queue_step`, `catch_up_waiting` and `_catch_up_refusals`
      (its `merged` set too: a main sha's repair counts as merged only when
@@ -47,7 +54,8 @@ fix marked "fixed 11-01"; build them as designed:
      folded under Answers into the repairs not merged when it was logged
      and every later one (`repair_tasks`);
    - a clean catch-up after a `catch-up` stop logs the stop's
-     `question.answered` (answer `lifted by a clean catch-up`, `by` `tick`);
+     `question.answered` (answer `lifted by a clean catch-up`, `by` `tick`),
+     folded into no repair;
    - `plan.stopped` joins no wake list (`fab/wake.py`): the stop's
      `question.asked`, logged with it, is in `wake.AGAIN` already, so the
      next round starts the answer call.
@@ -85,19 +93,22 @@ fix marked "fixed 11-01"; build them as designed:
      base for every kind but repair, so an implement rerun after a
      `Question:` drops the work its earlier run pushed; the slot path
      continues from `origin/<branch>` when it exists and merges the base in
-     (`docs/design/integration.md` 3's "reruns start from their pushed
-     branch"). Build the same continuation in the worktree path, sharing
+     (`docs/design/tick.md` 3, "A rerun continues from the work its
+     earlier run pushed"). Build the same continuation in the worktree path, sharing
      item 5's "absent `origin/<branch>`" check.
    - **Call units start without FAB_HOME.** `fab.dispatch._call` runs
      `systemd-run --user` without the tick's environment, so a tick with a
      non-default `FAB_HOME` (a replay's) starts calls that write to the
      default home. Build: pass `--setenv=FAB_HOME=<fab.log.home()>`.
-   - **`fab/roles/cut-direct.md` says every branch is merged into the
+   - **`fab/roles/cut-direct.md` says the branch is merged into the
      trunk** ("Your branch is merged into the plan's trunk, not readied for
-     the queue", and "Its base is the trunk's tip"): true for an
-     integration plan only. Word it for both: an integration plan's
-     branches merge into its trunk; a queue plan's land on main (this
-     repository through `bin/fab land`, fabrig through its queue).
+     the queue", and "Its base is the trunk's tip"). It is read only by
+     direct queue plans (`fab/designer.py`, `_cut_role`; a direct
+     integration plan gets `cut-run.md`), so it is wrong for every plan
+     that reads it. Word it for a queue plan: the cut's branch lands on
+     main once reviewed (this repository through `bin/fab land`, fabrig
+     through its queue); a spec's base is main's tip once its needs have
+     landed.
 
 Not in this request: units for `fab issues sync` and `fab report daily`
 (agents/status and ops own the units); `fab draft start` itself.
