@@ -1,0 +1,31 @@
+landing = "queue"
+
+# The thin cut of precheck-starved: the request's one task. fab precheck runs
+# its default and fuzzy steps through the queue's collector
+# (fab.queue_cpu.run_steps), so a step red only by starvation is green there
+# as in the gate, its receipt counts the starved tests and its log names them.
+# One direct part, one task; the spec in tasks/, the standing rules in
+# notes/common.md, the decisions and the critical path in notes/decisions.md.
+draft = "precheck-starved"
+repo = "agents"
+sources = [
+  "docs/plan/precheck-starved/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "precheck-collector"
+title = "fab precheck runs its default and fuzzy steps through the queue's collector: starvation alone is green, the receipt counts the starved, the log names them"
+mode = "direct"
+needs = []
+design = "docs/design/landing.md, 2"
+
+[[slice]]
+id = 1
+story = "A precheck whose default suite is cancelled by nextest's global timeout with nothing asserting writes a green receipt with starved > 0 and a log naming the starved tests, so the run readies the branch instead of asking; an assertion failure stays red"
+parts = ["precheck-collector"]
+walk = false
