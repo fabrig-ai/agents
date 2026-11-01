@@ -62,10 +62,15 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     In-flight calls and open chains reserve answer, review and amend only within the
     draft. Fresh skeleton and contract parts share its flow target, in design order.
     Successful calls stay designed; parked subjects and open chains block their subject.
+    Reply calls and issues/ subjects reserve nothing.
     Queued questions use ANSWER_AT, ANSWER_AFTER or draft-local blocking; reviews use
     REVIEW_AT or REVIEW_AFTER since this draft's last review started. Retire follows
     review once every part is done. Pure; docs/design/fab.md, 12, 13.1 and 13.4.
     """
+    ignored = {event["call"] for event in events if event.get("ev") == "call.started"
+               and (event.get("role") == "reply"
+                    or str(event.get("subject", "")).startswith("issues/"))}
+    events = [event for event in events if event.get("call") not in ignored]
     started = {event["call"]: event for event in events if event.get("ev") == "call.started"}
     ended = {event["call"] for event in events if event.get("ev") == "call.ended"}
     flight = {key: event for key, event in started.items()

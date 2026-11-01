@@ -601,6 +601,30 @@ class ClaudeUsageTest(unittest.TestCase):
 
 
 class StartTest(unittest.TestCase):
+    def test_reply_report_only_call_uses_medium_effort_and_records_usage(self):
+        with tmp_home() as root:
+            def claude(call):
+                directory = Path(call.cwd).parent
+                brief = (directory / "brief.md").read_text()
+                self.assertIn(f"Report: write it to `{directory / 'report.md'}`", brief)
+                self.assertIn(calls.ROLES["reply"].read_text(), brief)
+                write(directory / "report.md", "Done: reply\n\nHere is the context.\n")
+                return Result(0, json.dumps({"type": "result", "num_turns": 1,
+                                             "usage": {"input_tokens": 5, "output_tokens": 8}}))
+
+            fake = FakeRunner().on(["claude"], claude)
+            brief = calls.ROLES["reply"].read_text() + "\n\n# Call facts\n\n(assigned)\n"
+            result = calls.start("reply", "issues/7", root, brief, sh=fake)
+            self.assertEqual(result["outcome"], "done")
+            command = next(argv for argv in fake.argvs() if argv[0] == "claude")
+            self.assertEqual(command[command.index("--effort") + 1], "medium")
+            self.assertFalse(any(argv[:2] == ["git", "push"] for argv in fake.argvs()))
+            started, ended = log.read()
+            self.assertEqual((started["role"], started["subject"]), ("reply", "issues/7"))
+            self.assertEqual((ended["outcome"], ended["tokens"], ended["turns"]), ("done", "5/0/8", 1))
+            self.assertEqual(call_review.chains(log.read()), {})
+            self.assertEqual(channel.asks((), log.read()), [])
+
     def test_start_commands_artifacts_events_usage_and_outcome(self):
         with tmp_home() as root:
             plan, tasks = fixture(root)

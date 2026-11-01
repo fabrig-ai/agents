@@ -559,6 +559,23 @@ class DecideTest(unittest.TestCase):
 
 
 class CallActionsTest(unittest.TestCase):
+    def test_reply_calls_and_issue_subjects_reserve_no_work_or_limits(self):
+        with tmp_home():
+            plan = make_plan(part("core"))
+            now = "2026-11-01T00:00:00.000Z"
+            expected = dispatch.call_actions(plan, {}, [], ["core"], now)
+            for role, subject in (("reply", "issues/1"), ("reply", "draft/core"),
+                                  ("skeleton", "issues/1")):
+                for outcome in (None, "done", "question", "failed"):
+                    with self.subTest(role=role, subject=subject, outcome=outcome):
+                        events = [call_started("conversation", role, subject)]
+                        if outcome:
+                            events.append(call_ended("conversation", outcome, role=role, subject=subject))
+                        self.assertEqual(dispatch.call_actions(plan, {}, events, ["core"], now), expected)
+                        actions = dispatch.decide(plan, {}, events, {})
+                        self.assertFalse(any(action.kind in ("collect", "vet", "finish", "hold")
+                                             for action in actions))
+
     def setUp(self):
         self.enterContext(tmp_home())
         # These tests are about batching; blocking() has its own tests below.
