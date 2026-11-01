@@ -83,11 +83,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
-| `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time (section 11) |
+| `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, commits, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time (section 11) |
 | `red.opened` | red, tip, keys, suspects, tasks, draft, route, reason | an after-landing red's tests, grouped, sent to a foreman or to the page (section 11) |
 | `red.settled` | red, run, verdict, reason, owner, section | the tick acted on a red's foreman: fix or none (a repair task follows) or left (the page) (13.1) |
 | `red.closed` | red, reason, tip | every test of the red recovered or is no longer red in a run without faults, or its signal was cleared (section 11) |
-| `queue.rejected` / `queue.landed` / `queue.collateral` | branch, tip, step, log, tests; branch, tip, main; branch, tip, step, tests, log | the queue's record of a branch no fab task owns, `queue_ts` its time (13.8) |
+| `queue.rejected` / `queue.landed` / `queue.collateral` | branch, tip, step, log, tests; branch, tip, main; branch, tip, step, tests, log | the queue's record of a branch no fab task owns, `queue_ts` its time, `gate` the gate host's name (13.8) |
 | `signal.cleared` | signal, by, text | a signal taken off the user's page by hand (13.6) |
 | `note` | text | anything a person wants on the record |
 
@@ -514,7 +514,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   short is redone whole.
 - **The verdict comes home:** each tick imports the after-landing
   machine's records into the log (`al_ts` the record's time, read from the
-  newest imported): a `run` as `tiers.run` (its `reds` too), a `test` whose
+  newest imported): a `run` as `tiers.run` (its `reds` and `commits` too:
+  the evidence file counts the commits that are no branch's, which the
+  tick cannot know otherwise), a `test` whose
   state is new or unattributed as `tiers.red` (tip, key, state, profile,
   binary, test, error, branches, log, rerun), and one whose state is
   recovered as `tiers.recovered` (tip, key, profile, binary, test). Standing
@@ -628,8 +630,11 @@ which folds where each red stands, and the tick.
   tick logs `red.closed` (reason `recovered`, `absent` or `cleared`, tip the
   run that closed the last key, "" for a clear). A key closes on a later
   `tiers.recovered` for it, in any run, or on a later `tiers.run` without
-  faults and not wall-starved that does not list it in `reds` (`absent`:
-  it passed as a flake, or was removed, ignored or renamed); a hand clear
+  faults, not wall-starved and with `starved` 0 and `unobserved` 0 that
+  does not list it in `reds` (`absent`: it passed as a flake, or was
+  removed, ignored or renamed). A starved test is not in `reds`, and one
+  test past nextest's slow-timeout leaves `wall_starved` false, so without
+  the counts starvation would close a red; there is no per-key tracking; a hand clear
   of the red's signal (13.6) closes them all. A red closes on its last
   key's reason, `recovered` when every key recovered. Its state (`fab.tier_reds.reds(events)`, from the log and in log
   order): foreman, deciding, decided, repairing (its task exists and has
@@ -703,7 +708,8 @@ which folds where each red stands, and the tick.
   implement run from main and is readied, its left puts the red on the page
   and starts nothing, its failure starts the task with the red alone; the
   red closes on `tiers.recovered`, or as absent on a fault-free run without
-  it; a landed repair whose covering run still lists the key makes it
+  it and with nothing starved or unobserved, but not on a run where it
+  starved; a landed repair whose covering run still lists the key makes it
   unfixed; a faulted pair is a signal until a run does not fault it; a red
   task parks after two runs and its question skips the foreman.
 
@@ -1205,7 +1211,8 @@ before it lands (13.1).
   call's, answer's, repair section's or trunk): `rejected` as
   `queue.rejected` (branch, tip, step, log, tests), `landed` as
   `queue.landed` (branch, tip, main) and `collateral` as `queue.collateral`
-  (branch, tip, step, tests, log), each with `queue_ts`, deduplicated by
+  (branch, tip, step, tests, log), each with `queue_ts` and `gate` (the
+  gate host's name, for the page's `<gate>:<log>`), deduplicated by
   the same key as its tasks' records; its cursor stays the tasks'.
   - A `queue.rejected` opens the signal `queue:<branch>` on the user's page
     (13.6): branch, tip, step, failing tests and the log on the gate. It
