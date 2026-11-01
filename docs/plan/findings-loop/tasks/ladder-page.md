@@ -67,3 +67,16 @@ either changed):
 ## Report
 
 The page's new parts, and whether forge or serve needed a change.
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/ladder-page/foreman-1)
+
+Extract rendering helpers in fab/serve.py so render meets the 60-line cap.
+The gate finding is `fab/serve.py:347`: `render` is 130 lines (cap 60).
+This branch modifies `render` to display finding asks, so the finding requires repair.
+Move the nested tile, card and subscriptions-table functions to module-level helpers.
+Extract the tiles and Drafts panel construction into focused helpers as needed.
+Keep `render` and each extracted helper within 60 lines.
+Preserve HTML escaping, section order, empty states, issue links and the Finding questions row.
+Keep the behavior required by `docs/design/fab.md`, section 13.14.
+Limit the repair to `fab/serve.py`, with `fab/tests/test_serve.py` changes only if needed.
+Run the serve tests with Python `-B`, then `bin/fab test` and the size gate.
