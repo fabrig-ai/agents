@@ -3,3 +3,25 @@ repo = "agents"
 sources = ["docs/plan/brief-guard/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of brief-guard: a finding repair leaves the plan's rung briefs
+# (docs/design/qa.md, 2, "A repair leaves the briefs"). One direct part, one
+# task, as the request says; the spec is tasks/guard.md, the cut's decisions
+# and critical path notes/decisions.md.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "guard"
+title = "A finding repair that edits a rung brief is refused at readying, and its text says to leave them"
+mode = "direct"
+needs = []
+design = "docs/design/qa.md, 2"
+
+[[slice]]
+id = 1
+story = "A finding repair whose branch changes a rung brief file is refused with gate:briefs and goes to its refusal foreman; any other repair, and any other kind of task, readies as before"
+parts = ["guard"]
+walk = false
