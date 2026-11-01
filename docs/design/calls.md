@@ -493,7 +493,15 @@ before it lands (2).
 - A call from main that starts from main's tip: `fab.calls.start` fetches
   first only for fabrig, a branch, a report-only call or another base, so a
   retire started right after its plan's last landing misses that landing
-  (`calls.status.md`, mechanisms-out's retire).
+  (`calls.status.md`, mechanisms-out's retire). It runs the install from
+  before that landing too, which follows main only at the next tick, so
+  designer-effort's retire ran at the effort its plan replaced.
+- Surveys in the other designer roles: `cut.md`, `cut-fabrig.md`,
+  `contract.md`, `decision.md` and `retire.md` say nothing of them, so a
+  sub-agent one of those calls starts has no model or effort named (1).
+  A check of what a call started, read from its stream, should one be seen at
+  another model or effort. Both left by plan designer-effort, whose request
+  changed two roles.
 - The mechanisms the calls still do (mechanisms-out's design review, 11-01;
   `coord/loop/README.md`, "North-star breaches seen"; the request left them):
   `[buffer]` in the cut's plan.toml; calls pushing their own branch

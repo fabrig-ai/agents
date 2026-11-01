@@ -4,6 +4,17 @@
 
 ## Present
 
+- **A cut's surveys and designers are Claude sub-agents** (3, "The run's own
+  texts"; the user, 11-01; plan `docs/plan/designer-effort`, retired 11-01;
+  502d014). `fab/roles/cut-run.md`'s Surveys has no `codex exec`: a survey, only
+  where the cut judges it worth it, is a read-only sub-agent through the Agent
+  tool, `model` `opus`, `effort` `high`, in the background, several at once;
+  the reverse-dependency survey of its scope rule stays, as such a survey. Its
+  Designers start `model` `opus`, `effort` `xhigh`. `cut-direct.md`'s Explore subagents
+  are `model` `opus`, `effort` `high`, where it judges a survey worth it. The
+  call's own effort is `calls.status.md`'s. Tested on the role text only
+  (`test_designer.py` `test_cut_roles_set_claude_survey_and_designer_efforts`).
+  Not seen live: no cut has started since it landed.
 - **Drafts beside each other** (4, 11-01): built by fab's loop as plan
   `docs/plan/trunk-overlaps` (four tasks, landed 12:09-12:27Z): the overlap
   probe (`fab/overlaps.py`, its cache, its call after every plan ticks), the
@@ -138,6 +149,14 @@
 
 ## Gaps and departures
 
+- **The designer and its surveys depart from the draft, at the user's word**
+  (3; 11-01, designer-effort): `execution-modes.md`'s roles table has the
+  designer at high and the surveyor as Codex, medium, read-only; its Feature
+  mode starts four surveys at T+0:00 and one before each skeleton call. Here
+  the designer is xhigh and surveys are the designer's own Claude sub-agents at
+  high, only where it judges them worth it. The draft's Claude to Codex weight,
+  target at or under 0.2, was estimated on its roles and has not been measured
+  on these: no cut has run on them.
 - **Only the options are restored** (3, 5; mechanisms-out): the seeded
   `draft`, `repo` and `sources` are kept by the brief's and roles' text alone,
   as the design says, and `[buffer]` is still the cut's (calls.md 5).

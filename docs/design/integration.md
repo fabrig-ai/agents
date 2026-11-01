@@ -571,7 +571,7 @@ only as tweaks once a replay matches its run.
 - **Departures from the user's drafts, at the user's word** (11-01,
   `execution-modes.md`'s roles table: the designer's calls run at xhigh, not
   high, and a designer's surveys are Claude sub-agents at high, not Codex
-  at medium; 10-31, the same draft): no surveys (not built), no skeletons or test
+  at medium; 10-31, the same draft): no survey runs (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
   review, and the code reaches main as one integration branch through one
   check instead of each task through the merge queue. The self-critique

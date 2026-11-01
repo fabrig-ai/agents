@@ -113,6 +113,11 @@
 
 ## Gaps and departures
 
+- **Surveys are not built as runs** (`docs/design/tick.md`, 7; 8): no run kind
+  `survey` exists, and neither intake nor a skeleton call starts one. Since
+  plan `docs/plan/designer-effort` (retired 11-01; 502d014) a designer that
+  judges it worth it starts Claude sub-agents instead (calls.md 1,
+  `integration.status.md`).
 - **`fab draft start` is not built** (`docs/design/tick.md`, 7):
   `fab.cli.main` dispatches through `COMMANDS`, which has no `draft`
   command. Intake still starts the cut by hand through `fab.calls.main`.

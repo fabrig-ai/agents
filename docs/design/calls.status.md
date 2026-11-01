@@ -4,6 +4,17 @@
 
 ## Present
 
+- **The designer's calls run at xhigh** (1; the user, 11-01; plan
+  `docs/plan/designer-effort`, retired 11-01; 502d014). `fab.calls.EFFORTS`
+  names `cut`, `contract`, `decision` and `retire` at `xhigh`, by name, since
+  `fab/designer.py` imports `fab.calls`; a test over `designer.ROLES` fails a
+  fifth role with no entry. `start` passes `role_effort(role)` to `claude_argv`.
+  `EFFORT` stays `high` for the skeleton author, `amend` (a designer chain's
+  too) and the structure reviewer; answer, reply, triage and settle stay
+  medium. A cut's sub-agents are `integration.status.md`'s. Tested with fake
+  runners (`test_calls.py` `test_role_effort_keeps_designers_above_other_claude_roles`,
+  `test_cut_call_uses_xhigh_effort`). Not seen live: this plan's own retire ran
+  at high (below) and no designer call has started since.
 - **Held call chains go to settle** (2; 11-01, the user: second refusals are
   not the user's): a second refusal, failed amend or three infra reviews
   starts a report-only medium-effort `settle` call under the plan's answer
@@ -187,6 +198,16 @@
 
 ## Gaps and departures
 
+- **A designer's surveys are role text, in two roles** (1; designer-effort):
+  a sub-agent's `model` and `effort` are what `cut-run.md` and `cut-direct.md`
+  say, and `test_cut_roles_set_claude_survey_and_designer_efforts` pins those
+  words only; nothing checks what a call starts, and `call.started` logs no
+  effort. `opus` is the Agent tool's alias, not `fab.calls.MODEL`'s explicit
+  id. `cut-run.md` says read-only but names no agent type, where
+  `cut-direct.md`'s Explore is read-only by definition. `cut.md`,
+  `cut-fabrig.md`, `contract.md`, `decision.md` and `retire.md` say nothing of
+  surveys (the request: "No other role changes"), so 1's line reaches only
+  the cuts those two texts serve (5).
 - **A `fab land` refusal amended from its own heading** (2, 11-01): the
   amender's rebase at `rebase` (and at `test` after a conflicted
   `_amend_rebase`), its `--force-with-lease` push
@@ -226,7 +247,13 @@
   citation-sweep's retire (11-01): its worktree and inventory were 15a7d55,
   one commit behind its only part, 032cb12, and `changed_designs` on the stale
   ref listed no designs, though that commit changed `qa.status.md`. The call
-  fast-forwarded by hand.
+  fast-forwarded by hand. Seen again at designer-effort's retire (11-01):
+  `effort` landed as 502d014 at 21:21:44Z and the retire started in that tick's
+  round, its worktree and inventory e95ef79, one commit behind; the call
+  fast-forwarded by hand. The same window holds the code: the install follows
+  main at the next tick (machines.md, "Following main"; 21:21:47Z here), so
+  this `fab call retire` ran the old `EFFORTS`, `claude --effort high`, not the
+  xhigh its plan had just landed.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
@@ -246,7 +273,9 @@
   integration.md 3 were written before its cut (f2d3ddb to f380344, 0a3a84e),
   so the seven designs its brief quoted carried only other plans' diffs.
   Seen again at edge-fixes' retire (11-01): of its three designs, fab.md's
-  diff is d6fc657's and landing.md's is acceptance-fixes'.
+  diff is d6fc657's and landing.md's is acceptance-fixes'. Seen again at
+  designer-effort's retire (11-01): calls.md 1, integration.md 3 and tick.md 7
+  changed with the request (3e9e59f), before its cut, so its brief quoted none.
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
 - **The request's third spelling is a reading** (3; plan

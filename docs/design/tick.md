@@ -265,6 +265,10 @@ things fab follows, whatever the clock says:
 ## 8. Later
 
 - `fab draft start PATH`: the draft's surveys, then its cut (7).
+- The survey runs of 7, should fab rather than the designer start them: until
+  then a designer's own Claude sub-agents survey (the user, 11-01, plan
+  designer-effort), and nothing refreshes the primitives before a skeleton call
+  but the code-built inventory.
 - The tick's event and backstop units kept by fleet, as the queue's will be;
   lost-event notes counted in the code report; a wake retried before the
   backstop, if those notes show wakes are lost.
