@@ -1,7 +1,7 @@
 +++
 id = "ladder-plan"
 part = "ladder"
-kind = "feature"
+kind = "interface"
 needs = []
 files = ["fab/plan.py", "fab/walks.py", "fab/tests/test_plan.py", "fab/tests/test_walks.py", "fab/tests/ladder_plans.py", "fab/designer.py", "fab/state.py", "fab/tests/test_designer.py", "fab/tests/test_state.py", "fab/tests/test_dispatch.py"]
 effort = "medium"
@@ -103,6 +103,5 @@ Extract ladder/rung checks into a private function accepting `plan` and `plan_di
 Keep `problems`’ final sorting and all existing diagnostics; keep both functions within 60 lines.
 The shape finding is a task metadata conflict: the spec requires the added `plan_dir` parameter, but declares `kind = "feature"`.
 `docs/design/fab.md`, section 12, permits signature changes only for `interface` or `migration`; `fab/gates.py:EXEMPT` implements that rule.
-Coordinator action is required to classify this task as `interface` before landing; that metadata change is outside the repair’s allowed files.
+The task is now `interface` (the plan owner, 11-01): the signature change may land.
 Preserve the specified signature and `load` passing `plan_dir`; do not bypass the gate or change its exemptions.
-No files changed, builds run, or report file written: this run is read-only.

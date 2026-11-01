@@ -28,7 +28,8 @@ Its first line is one of:
   by `Owner: <task id>` (a fab suspect or a task of a suspect trunk's plan),
   then at most thirty lines: what failed, where on main and what to change.
   These lines become the new red task's Repair section; no owner's spec
-  is edited.
+  is edited. The repair run reads them as its instructions: write them to
+  it, never about your own run (that you changed nothing or are read-only).
 - `Done: retry: <why the red is not the suspects', in one line>`, then at
   most ten lines of evidence. Here retry means leave a signal, not rerun
   a landed branch.

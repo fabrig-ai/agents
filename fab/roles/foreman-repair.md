@@ -31,7 +31,9 @@ Its first line is one of:
   what failed, where to look and what to change. These lines are written
   into the spec as its `## Repair` (or, for a conflict, `## Rebase`) section
   as they stand, or appended to the task's body when it has no spec, and
-  the next run reads them.
+  the next run reads them as its instructions: write them to that run, and
+  never describe your own (that you changed nothing or are read-only), or it
+  will stop as if it were read-only too (findings-loop, 11-01).
 - `Done: retry: <why the red is not the branch's, in one line>`, then at
   most ten lines: the log lines that show it.
 - `Failed: <why you cannot say, in one line>`: the repair run starts with
