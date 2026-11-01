@@ -212,3 +212,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   does not have); receipts reused for batches of more than one, once
   numbers show how often a set's receipts all name its main; receipts on
   the gate pruned.
+- `bin/fab land` keeping a branch's merge commits (2): today its rebase
+  drops them, and with them what a rerun's merge of the base resolved
+  (tick.md 3); dogfood-faults/reruns (11-01) was refused three times on
+  code that lived only in a merge. Whether to rebase with merges, refuse a
+  branch holding one, or land its squashed diff is open.

@@ -28,13 +28,54 @@
   from the object store is a failure, not an overlap (`overlaps-git`,
   08afbf7). The checkout wording of 4 was matched to the code with the
   design.
+- **Retire works from main once the trunk has landed** (3, "It then works
+  from main"; plan `docs/plan/dogfood-faults`, retired 11-01; 600f5a4):
+  `fab.designer.main` starts the retire call from `main` when
+  `fab.integration.trunk_landed`; `fab.dispatch._deliver` merges into the
+  trunk only until then, after which a call's branch goes through the queue
+  plan's path (`_queue_branch` for fabrig); `_checkout`, given the round's
+  events, detaches the plan checkout at `origin/main` on every fetch once
+  the queue's `branch.landed` for `<draft>/integration` is logged, and
+  fast-forwards to the upstream otherwise. Departure: `_checkout` runs
+  before the plan loads, so it takes the draft from the plan directory's
+  name (`docs/plan/<draft>`, as every plan's is) rather than
+  `trunk_landed`'s `plan.draft`. Tested with fake runners and fixture logs
+  (`test_designer.py`, `test_dispatch.py`).
+- **A stop asks the answerer** (3, "A stop asks" and "The answerer judges a
+  stop"; plan dogfood-faults; 6e03edc, 4962fb5, feb2272):
+  `fab.integration.stopped` gives the `plan.stopped` (`why` `red`,
+  `catch-up` or `queue`, `report` the last red check's report, the gate's
+  `<host>:<log>` or "" with the refusal's findings, at most 20 lines, in
+  the text) and its parked `question.asked` (`run` the red check's or ""),
+  once since the last lift; `fab.dispatch._integration` logs them. `lifted`
+  is the last `question.answered` for `<draft>/integration`: `next_step`'s
+  end reds, `catch_up_waiting`, `_catch_up_refusals` (its `merged` set
+  cleared too) and `queue_step`'s rejections count from it; repair ids
+  count on. `_repair_answers` folds an answer not by `tick` into every
+  repair not merged when it was logged. `fab.dispatch._lift_catch_up` logs
+  `lifted by a clean catch-up` (`by` `tick`) when `catch_up_lifts`.
+  `fab.foreman.questions` takes the stop's question with no task (specless,
+  queued); `fab.calls._answer_questions` attaches the `plan.stopped`'s
+  report and `answer_brief` shows `Question: <draft>/integration (stop)`
+  with no spec; `fab/roles/answerer.md` has the request's sentence.
+  `plan.stopped` joins no wake list (`question.asked` is in `wake.AGAIN`).
+  Tested with fixture logs (`test_integration.py`, `test_dispatch.py`,
+  `test_foreman.py`, `test_calls.py`).
+- **A rebase onto the trunk consumes the amendment** (2, "Optimistic
+  start"; plan dogfood-faults; f19f942): `fab.call_review.task_rebase`
+  takes `trunk` (default `main`) and counts a done rebase run from
+  `origin/<trunk>`; `fab.dispatch` passes `plan.trunk`. Tested in
+  `test_call_review.py` and `test_dispatch.py`.
 
 ## Gaps and departures
 
 - **An integration trunk through the queue is untried live:** the catch-up
   with main (before a check and along the way), catch-up repairs, the
   re-check after a rejection and the stops are tested against fakes and real
-  git only; no plan has yet run with `ready = true`.
+  git only; no plan has yet run with `ready = true`. So are the stop's
+  question and its lift, the retire from main and the plan checkout
+  detached at `origin/main` (dogfood-faults, 11-01): no trunk has stopped
+  or landed since they were built.
 - **The flow of a real run (3) is on main, not run live yet**
   (10-31): the options with the run's defaults (agents-rebuild names the
   old flow), the trunk throughout, the tick's merges with the baseline

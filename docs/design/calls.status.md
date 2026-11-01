@@ -35,7 +35,16 @@
   retire (11-01, ~106k characters, every design quoted, none listed), and
   findings-loop's (~194 KB with six designs listed; ~404k quoted whole),
   and findings-repair's (~195 KB, eleven listed: the designs' rename,
-  477b3e0, made every design changed in its window).
+  477b3e0, made every design changed in its window), and dogfood-faults'
+  (~156 KB, every changed design quoted, none listed).
+- **A direct queue plan's cut reads that its branch lands on main** (3;
+  plan `docs/plan/dogfood-faults`, retired 11-01; 7a8eeea):
+  `fab/roles/cut-direct.md`, which `fab.designer._cut_role_options` gives
+  only direct queue plans (a direct integration plan gets `cut-run.md`),
+  says a spec's base is main's tip once its needs have landed and that the
+  branch lands on main once reviewed (this repository through `bin/fab
+  land`, fabrig through its queue); it said the branch merged into the
+  trunk.
 - **The tick drives the calls of 2 and 3:** call reviews and amend calls
   (`fab/call_review.py`), the foreman's answers (`fab/foreman.py`), the
   refusal foreman's repairs and rebases (`fab/repairs.py`,
@@ -108,6 +117,10 @@
   so its brief quoted neither, and quoted machines.md and tick.md,
   which another session's builder-install work changed meanwhile. The
   retire call found its own designs from plan.toml's `design` fields.
+  Seen again at dogfood-faults' retire (11-01): its brief quoted calls.md,
+  fab.md, machines.md and reports.md, which mechanisms-out and hel8-units
+  changed, and channel.md, which the plan changed and restored, beside the
+  four it changed (gates, integration, landing, tick).
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
 - **Designs a retire brief lists are read by the call** (3, 11-01), as the

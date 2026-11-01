@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of dogfood-faults: the fab faults dogfood/design found, built
 # as the designs now say (each marked "fixed 11-01"), and the status files

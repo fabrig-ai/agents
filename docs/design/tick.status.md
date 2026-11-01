@@ -14,6 +14,21 @@
   by a person or replay setup, skips sync before the fetch under the same
   lock and notes `install pinned`. Dispatcher hosts are skipped.
   Services still move and restart only with `bin/install.sh`.
+- **Reruns start from the right place** (3; plan `docs/plan/dogfood-faults`,
+  retired 11-01; 53dfbf6): `fab.run._prepare_and_launch` probes
+  `refs/remotes/origin/<branch>` once after the fetch (in the slot, or the
+  repository's clone for worktrees). In a slot or a worktree, an implement
+  or repair start uses `origin/<branch>` when it exists and the task's base
+  when it does not; an implement continuation merges the base in and aborts
+  a conflicting merge for the run to resolve; review and rebase start from
+  the base. Before it, an `Infra:` rerun that had pushed nothing failed its
+  start every tick, and a worktree implement rerun dropped its pushed work.
+  Tested with fake runners (`test_run.py`, `test_dispatch.py`'s
+  `OptimisticStartTest`).
+- **A failed task run parks for the answerer** (11-01, findings-loop; 44f2a0a):
+  `fab.run.collect` logs a failed implement, repair or rebase run's report as a
+  `question.asked` with `park` (calls.md 2), so it queues at once; it parked
+  unheard before.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
   run by hand, live since 20:27Z.
 - **A ladder plan in the tick** (qa.md 2; plan findings-loop, retired
@@ -45,7 +60,9 @@
   `fab.dispatch.call_actions` scopes call limits and review times by draft;
   `_part_calls` uses `fab.drafts.design_calls` to share the flow target
   between parallel skeleton and contract calls. `_call` uses
-  `fab.drafts.unit` to name units by role and subject.
+  `fab.drafts.unit` to name units by role and subject, and since 11-01
+  (dogfood-faults; a074df1) passes `--setenv=FAB_HOME=<fab.log.home()>`,
+  so a tick with another home (a replay's) starts calls that write to it.
 - **The buffer's order** (`docs/design/tick.md`, 7; since 10-31):
   `fab.buffer.group` and `order` put consolidations before refusals' repairs
   and rebases, then contracts, then slice tasks, breaking ties by slice,
@@ -73,9 +90,6 @@
 
 ## Gaps and departures
 
-- **A failed task run parks for the answerer** (11-01, findings-loop): `fab.run.collect`
-  logs a failed implement, repair or rebase run's report as a `question.asked` with `park`
-  (calls.md 2), so it queues at once; it parked unheard before.
 - **`fab draft start` is not built** (`docs/design/tick.md`, 7):
   `fab.cli.main` dispatches through `COMMANDS`, which has no `draft`
   command. Intake still starts the cut by hand through `fab.calls.main`.

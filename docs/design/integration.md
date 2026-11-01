@@ -187,7 +187,8 @@ only as tweaks once a replay matches its run.
   The tick follows a
   plan checkout that tracks a branch: after its fetch it fast-forwards the
   checkout to its upstream, so it always reads the plan and specs at the
-  trunk's tip.
+  trunk's tip, until the trunk has landed (then it detaches the checkout at
+  `origin/main`, 3).
 - **Merging, not landing, and light** (the user, 10-31, after the first
   replay). For an integration plan, a task whose run ended done is merged
   by the tick, in the plan's checkout and under the tick's lock: reset to

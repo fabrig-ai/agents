@@ -23,6 +23,18 @@
   fabrig `eb6c40aaf5` passed 265 default and 7 fuzzy tests, reporting smith
   and jig CPU separately. The lead lands and deploys this change; no live
   queue unit was changed. Turning budget excesses red remains in Later (2, 14).
+- **The queue takes ready refs of two segments or more** (2; plan
+  `docs/plan/dogfood-faults`, retired 11-01; 6e72974):
+  `fab.queue.candidates` keeps every `ready/<name>` whose name has at least
+  two segments, and the full name carries through ordering, tried tips,
+  the leased cleanup and the records. `_import_queue` already took full
+  branch names (`answers/<run>` and `repairs/<run>` owned through the
+  foreman runs, `ladder/` through `_backlog_branches`), so it was left as
+  it was. Tested with fake commands and disposable git remotes
+  (`test_queue.py`). It is live once `fab-queue.service` on the gate
+  restarts on that code (services move only with `bin/install.sh`); then
+  `ready/ladder/v0.1.0-ladder/backlog-1` (unlanded since 11-01 14:52Z)
+  becomes a candidate.
 - **Landing this repository:** `bin/fab land`, live since 20:22Z; every
   change to `fab/` since then landed through it.
 - **fabrig's landing:** `fab gate`, `fab queue`, `fab precheck` on main.
@@ -39,6 +51,15 @@
   `fab queue install`, which the deploy runs on every machine (section 2).
   It ran as a transient unit on hetzner8 from 10-30 21:15Z (it landed the
   cutover) until 10-31 10:08Z, when hetzner8 also became a builder.
+- **`bin/fab land` drops a branch's merge commits** (2, "It rebases onto
+  main"; seen at dogfood-faults/reruns, 11-01): `git rebase` replays only a
+  branch's ordinary commits, so a change that lives only in a merge commit
+  never lands and is never tested. The rerun's merge of main into its
+  branch (tick.md 3) held the task's fixture fix and later edits; three
+  landings (`7751332`, `bb9b2e3`, `d74f981`) tested the first commit alone
+  and refused, until the answerer had the run squash the change into one
+  ordinary commit (53dfbf6). Code and design agree; the fault is the
+  design's (4, Later).
 - **The landing checks are a skeleton:** `fab/receipts.py` (a receipt
   kept on the gate, read, reusable for a tip and main, covering a test, and
   carried from the builder at ready) and `fab/reds.py` (the test steps'

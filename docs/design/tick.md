@@ -156,7 +156,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   are independent, since a part waits for its needs' design. They are
   started in plan order, each in its own role. A call's user unit is named
   by its role and subject (`fab-call-<role>-<subject>`), so one subject
-  never has two calls running, even before the log shows the first.
+  never has two calls running, even before the log shows the first. It
+  carries the tick's `FAB_HOME` (`systemd-run --setenv`), so a tick with
+  another home (a replay's) starts calls that write to it (fixed 11-01,
+  found by the findings loop: calls wrote to the default home).
 
 ## 6. Events drive the tick
 
