@@ -105,3 +105,18 @@ The shape finding is a task metadata conflict: the spec requires the added `plan
 `docs/design/fab.md`, section 12, permits signature changes only for `interface` or `migration`; `fab/gates.py:EXEMPT` implements that rule.
 The task is now `interface` (the plan owner, 11-01): the signature change may land.
 Preserve the specified signature and `load` passing `plan_dir`; do not bypass the gate or change its exemptions.
+
+## Rebase (2026-11-01, step rebase, foreman findings-loop/ladder-plan/foreman-3)
+
+resolve duplicate ladder implementations during rebase, preserving the refused tip’s combined behavior.
+The rebase fails applying `5ea8416` after replaying overlapping ladder work from `17c6e44`.
+These are branch-history conflicts; `origin/main` contains no `fab/walks.py`.
+Resolve content conflicts in `fab/tests/test_designer.py`, `fab/tests/test_dispatch.py`, `fab/tests/test_plan.py`, and `fab/tests/test_state.py`.
+Resolve add/add conflicts in `fab/walks.py` and `fab/tests/test_walks.py` into one implementation and test suite.
+Use refused tip `0b83bbee` as the reference for the intended combined contents of these six files, preserving any intervening main changes.
+Keep `edition` hashing ordered paths and texts and `editions` reading `origin/main`, naming unreadable briefs, and returning `{}` without git calls when there are no rungs.
+Keep the designer lifecycle coverage and state coverage for empty-plan rejection and ladder status.
+In the dispatcher test, change only the approved registered-plan fixture to `write_ladder`, retaining its `budget` question and existing assertions.
+When replaying the remaining changes, preserve `fab/plan.py`’s `_ladder_problems` extraction, sorted diagnostics, and required `plan_dir` signature.
+Do not restore the earlier oversized `problems` implementation or duplicate rung definitions and tests.
+Keep the final diff within the task’s allowed files and validate with `bin/fab test` and the landing gates.
