@@ -89,7 +89,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       next holds it for settle, under the chain's one amend count. A
       passing `fetch` or `push` failure costs one amend that finds nothing
       to change and ends done, after which the finish is tried again; no
-      separate retry exists, so nothing loops.
+      separate retry exists, so nothing loops. Two exceptions end the chain
+      instead: a finish whose branch a `branch.landed` already names (landed
+      by hand) logs `call.finished` done, and a `fetch` refusal whose branch
+      is gone from origin logs `call.finished` failed, since no amend could
+      start on it.
     - The amend brief carries the refusal's `log` (the last 20 lines of
       `fab land`'s output, whose `CONFLICT` lines name the paths), under a
       heading naming `fab land`'s refusal, not a queue rejection. For
@@ -104,8 +108,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       `changed_designs` gives at `origin/main` and not at the branch's tip,
       and asks it to check their status files.
     - A hold from a `fab land` refusal has the reason `refused by fab land
-      after its amendment`; its settle brief says a land verdict would be
-      refused again, so its verdict is amend or user, and a second settle
+      after its amendment`; its settle brief says a land verdict would land
+      the tip `fab land` just refused (refused again at `rebase`, `paths` or
+      `test`), so its verdict is amend or user, and a second settle
       of such a hold (amend being no longer an option) is user only. A land
       verdict on such a hold parks the chain with `settle failed`
       (`_judge_chain`).
