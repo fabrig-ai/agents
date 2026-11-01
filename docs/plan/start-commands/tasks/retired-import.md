@@ -59,3 +59,13 @@ In `fab/tests/test_dispatch.py`, beside the existing `_round` and
 
 The functions changed, the records a tick writes for a retired plan, and
 the tests added.
+
+## Rebase (2026-11-01, step rebase, foreman start-commands/retired-import/foreman-1)
+
+retain both independently added test classes when rebasing over main
+The rebase of ce7c302 conflicts in `fab/tests/test_dispatch.py`.
+Main commit 3806c34adfffc75b0995df20e816f8133cf793fc adds `CutOptionsFinishTest` at the same insertion point where this branch adds `RetiredFinishTest`, between `RetireFinishTest` and `IntegrationDeliveryTest`.
+Resolve by retaining both complete classes, each with its own `setUp` and methods.
+Preserve main’s `tomllib` import and cut-option tests, plus this branch’s retired-plan import and finish tests.
+`fab/dispatch.py` auto-merged; preserve both sets of changes without expanding this task’s scope.
+Stage the resolved test file, continue the rebase, and run `bin/fab test`.
