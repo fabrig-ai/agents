@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import re
 import tomllib
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from fab import log
@@ -14,7 +15,7 @@ OPTIONS = ("landing", "ready", "reviews", "direct", "early")
 MODES = ("feature", "migration", "fix", "probe", "direct")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
 EFFORTS = ("medium", "high")
-RESERVED = ("cut", "retire", "review")  # call subjects `<draft>/<name>` (fab.designer); not part ids
+RESERVED = ("cut", "retire", "review", "triage")  # call subjects `<draft>/<name>` (fab.designer); not part ids
 
 
 class PlanError(ValueError):
@@ -52,6 +53,24 @@ class Slice:
 
 
 @dataclass(frozen=True)
+class Rung:
+    """One backend's ordered brief files and the rungs below it (docs/design/fab.md, 13.15)."""
+
+    id: str
+    backend: str
+    brief: tuple[str, ...]
+    after: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class Ladder:
+    """The happy-path citation and repository backlog path (docs/design/fab.md, 13.15)."""
+
+    happy_path: str
+    backlog: str
+
+
+@dataclass(frozen=True)
 class Plan:
     """A plan defaults to integration landing, ready, without reviews, with every part direct
     (docs/design/fab.md, 13.12). load_plan and fab.designer.uncut inherit these defaults."""
@@ -70,6 +89,9 @@ class Plan:
     reviews: bool = False
     direct: bool = True
     early: bool = True  # an integration plan's tasks may start early (docs/design/fab.md, 13.12)
+
+    rungs: dict[str, Rung] = field(default_factory=dict, kw_only=True)
+    ladder: Ladder | None = field(default=None, kw_only=True)
 
     @property
     def trunk(self) -> str:
@@ -107,21 +129,23 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
     plan = load_plan(plan_dir / "plan.toml")
     tasks = load_tasks(plan_dir / "tasks", plan.draft, plan.repo)
     tasks = checked_tasks(plan, tasks, log.read())
-    issues = problems(plan, tasks)
+    issues = problems(plan, tasks, plan_dir)
     if issues:
         raise PlanError(f"{plan_dir}: " + "\n".join(issues))
     return plan, tasks
 
 
 def load_plan(path: Path) -> Plan:
-    """Read plan.toml: required keys draft, repo, parts; defaults sources=(), buffer low=1.0 high=2.0,
+    """Read plan.toml: required keys draft, repo; defaults sources=(), buffer low=1.0 high=2.0,
     retired=false; the Plan defaults supply landing="integration", ready=true, reviews=false,
     direct=true (docs/design/fab.md, 13.12).
-    A part's contract defaults to false and needs_landed to ().
+    Parts default to none; a part's contract defaults to false and needs_landed to ().
+    A ladder has string happy_path and backlog; each rung requires id, backend and brief
+    (paths as strings), with after defaulting to () (docs/design/fab.md, 13.15).
     Each `[[question]]` table requires id, text and parts (strings) and defaults answer="".
 
     Raises PlanError for a missing key, a wrong type, an unknown mode or landing,
-    or a part id used twice.
+    or a part or rung id used twice.
     """
     def value(table, key, expected, default=None, *, required=False):
         if key not in table:
@@ -149,9 +173,9 @@ def load_plan(path: Path) -> Plan:
     buffer = value(data, "buffer", (dict,), {})
     low = value(buffer, "low", (int, float), 1.0)
     high = value(buffer, "high", (int, float), 2.0)
-    parts, slices, questions = _plan_tables(data, path, value, strings)
+    parts, slices, questions, rungs, ladder = _plan_tables(data, path, value, strings)
     return Plan(draft, repo, sources, float(low), float(high), parts, slices,
-                value(data, "retired", (bool,), False), questions,
+                value(data, "retired", (bool,), False), questions, rungs=rungs, ladder=ladder,
                 **{key: _option(key, data[key], str(path)) for key in OPTIONS if key in data})
 
 
@@ -189,7 +213,7 @@ def parse_options(entries: Sequence[str]) -> dict[str, object]:
 def _plan_tables(data, path, value, strings):
     """Read the plan's ordered tables with load_plan's field checks."""
     parts = {}
-    for item in value(data, "part", (list,), required=True):
+    for item in value(data, "part", (list,), []):
         if not isinstance(item, dict):
             raise PlanError(f"{path}: part must be a table")
         part = Part(value(item, "id", (str,), required=True),
@@ -223,7 +247,22 @@ def _plan_tables(data, path, value, strings):
                                   value(item, "text", (str,), required=True),
                                   strings(item, "parts", required=True),
                                   value(item, "answer", (str,), "")))
-    return parts, tuple(slices), tuple(questions)
+    ladder = None
+    if "ladder" in data:
+        item = value(data, "ladder", (dict,), required=True)
+        ladder = Ladder(value(item, "happy_path", (str,), required=True),
+                        value(item, "backlog", (str,), required=True))
+    rungs = {}
+    for item in value(data, "rung", (list,), []):
+        if not isinstance(item, dict):
+            raise PlanError(f"{path}: rung must be a table")
+        rung = Rung(value(item, "id", (str,), required=True),
+                    value(item, "backend", (str,), required=True),
+                    strings(item, "brief", required=True), strings(item, "after"))
+        if rung.id in rungs:
+            raise PlanError(f"{path}: rung {rung.id} is used twice")
+        rungs[rung.id] = rung
+    return parts, tuple(slices), tuple(questions), rungs, ladder
 
 
 def parse_task(text: str, path: str, draft: str, default_repo: str) -> Task:
@@ -298,15 +337,18 @@ def load_tasks(directory: Path, draft: str, default_repo: str) -> dict[str, Task
     return tasks
 
 
-def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
+def problems(plan: Plan, tasks: dict[str, Task], plan_dir: Path | None = None) -> list[str]:
     """What does not hold together, one line each, in a stable order (empty when sound):
 
     a part's need or a slice's part naming no part; a task naming no part or needing no task;
     a cycle among part needs or among task needs; a part in no slice; a part whose id is in
     RESERVED; a question id used twice; a question naming no part; a part's needs_landed
-    naming a part outside its needs; a non-direct part in a direct plan.
+    naming a part outside its needs; a non-direct part in a direct plan. A plan needs
+    parts or rungs; rungs need unique [a-z0-9-]+ ids, known acyclic after references,
+    a ladder and queue landing; a ladder needs rungs. With plan_dir, every brief must
+    name a file under it (docs/design/fab.md, 4 and 13.15).
     """
-    issues = []
+    issues = _ladder_problems(plan, plan_dir)
     included = {part for item in plan.slices for part in item.parts}
     for part in plan.parts.values():
         if plan.direct and part.mode != "direct":
@@ -343,6 +385,35 @@ def problems(plan: Plan, tasks: dict[str, Task]) -> list[str]:
     issues.extend(_cycles({key: part.needs for key, part in plan.parts.items()}, "part"))
     issues.extend(_cycles({key: task.needs for key, task in tasks.items()}, "task"))
     return sorted(issues)
+
+
+def _ladder_problems(plan: Plan, plan_dir: Path | None) -> list[str]:
+    """Ladder/rung diagnostics, checking local briefs only with plan_dir (13.15)."""
+    issues = []
+    if not plan.parts and not plan.rungs:
+        issues.append("plan has neither parts nor rungs")
+    if plan.rungs and plan.ladder is None:
+        issues.append("rungs require [ladder]")
+    if plan.ladder is not None and not plan.rungs:
+        issues.append("[ladder] requires rungs")
+    if plan.rungs and plan.landing != "queue":
+        issues.append("rungs require queue landing")
+    seen_rungs = set()
+    for rung in plan.rungs.values():
+        if re.fullmatch(r"[a-z0-9-]+", rung.id) is None:
+            issues.append(f"rung {rung.id!r} id must match [a-z0-9-]+")
+        if rung.id in seen_rungs:
+            issues.append(f"rung {rung.id} is used twice")
+        seen_rungs.add(rung.id)
+        for need in rung.after:
+            if need not in plan.rungs:
+                issues.append(f"rung {rung.id} after names unknown rung {need}")
+        if plan_dir is not None:
+            for brief in rung.brief:
+                if not (plan_dir / brief).is_file():
+                    issues.append(f"rung {rung.id} brief file missing: {brief}")
+    issues.extend(_cycles({key: rung.after for key, rung in plan.rungs.items()}, "rung"))
+    return issues
 
 
 def _cycles(graph: dict[str, tuple[str, ...]], kind: str) -> list[str]:

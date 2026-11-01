@@ -1024,14 +1024,9 @@ walk = false
         path = self.home / "custom/log.jsonl"
         self.append(dict(ev="call.ended", call="cut", subject="draft/cut", outcome="question"), path=path)
         write(log.home() / "calls/cut/report.md", "Question: Buy a host?\n")
-        registered = self.home / "other"
-        write(registered / "plan.toml", '''draft = "other"
-repo = "agents"
-landing = "queue"
-reviews = true
-direct = false
-part = []
-[[question]]
+        from fab.tests.ladder_plans import write_ladder
+        registered = write_ladder(self.home / "other", "other")
+        write(registered / "plan.toml", (registered / "plan.toml").read_text() + '''[[question]]
 id = "budget"
 text = "Choose the budget"
 parts = []
