@@ -60,3 +60,14 @@ probe? Yes: its own acceptance (`bin/fab test` green) needs it. Make that
 fixture return `Result(1)` for `rev-parse -q --verify` (the first start has
 pushed nothing) and keep its skeleton-base assertion; change nothing else in
 that file. `files` now lists it.
+
+## Repair (2026-11-01, step test, foreman dogfood-faults/reruns/foreman-3)
+
+make OptimisticStartTest.remote report the task branch absent for the new probe
+The failing test is `OptimisticStartTest.test_green_tip_starts_before_review_ends_and_specs_count_for_status_needs_and_buffer`.
+In `fab/tests/test_dispatch.py`, its remote fixture must return `Result(1)` for `git -C <clone> rev-parse -q --verify refs/remotes/origin/<branch>`.
+Otherwise its default success makes `_prepare_and_launch` continue from `origin/draft/a`, failing the skeleton-base assertion.
+Keep that assertion and change nothing else in this file, as the spec’s Answers authorizes.
+The inspected checkout already contains this guard at lines 4266–4267; retain it and verify before making further changes.
+Run the failing test and `bin/fab test` with Python `-B`.
+The behavior follows `docs/design/tick.md`, section 3.
