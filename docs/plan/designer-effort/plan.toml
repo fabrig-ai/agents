@@ -3,3 +3,25 @@ repo = "agents"
 sources = ["docs/plan/designer-effort/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of designer-effort: the designer's calls run at xhigh, and their
+# surveys are Claude sub-agents at high (the user, 11-01). One direct part of
+# one task, as the request asks; the spec in tasks/, the standing rules in
+# notes/common.md, the decisions and the critical path in notes/decisions.md.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "effort"
+title = "The designer's calls run at xhigh; their surveys are Claude sub-agents at high"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 1; docs/design/integration.md, 3"
+
+[[slice]]
+id = 1
+story = "A designer call passes --effort xhigh to claude, and its role text starts surveys as read-only Opus 5.5 sub-agents at high and designers at xhigh"
+parts = ["effort"]
+walk = false
