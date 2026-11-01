@@ -14,6 +14,7 @@ landing = "queue"
 # notes/decisions.md. trunk-landed waits for precheck-receipt because the
 # request orders them; they share no file.
 
+retired = true
 [buffer]
 low = 1.0
 high = 2.0
