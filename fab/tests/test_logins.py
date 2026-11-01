@@ -5,13 +5,14 @@ import secrets
 import stat
 import unittest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
+from datetime import datetime, timezone
 from pathlib import Path
 from unittest.mock import patch
 
 from fab import cli, log, logins
 from fab.hosts import Host
 from fab.sh import Result, run
-from fab.tests.support import tmp_home
+from fab.tests.support import FakeRunner, tmp_home
 
 # Runs `ssh [-o X]... TARGET COMMAND` here, with HOME the target's directory under FAKE_SSH_HOMES.
 FAKE_SSH = """#!/bin/sh
@@ -30,7 +31,9 @@ for line in sys.stdin:
         out = {"result": {"account": {"type": "chatgpt", "email": os.environ.get("CODEX_HOME", "default"),
                                       "planType": "pro"}}}
     elif message.get("id") == 3:
-        out = {"result": {"rateLimits": {"primary": {"usedPercent": 72, "resetsAt": 1793774975}}}}
+        out = {"result": {"rateLimits": {"limitId": "codex",
+                "primary": {"usedPercent": 17, "resetsAt": 1793774000, "windowDurationMins": 300},
+                "secondary": {"usedPercent": 72, "resetsAt": 1793774975, "windowDurationMins": 10080}}}}
     elif message.get("id") == 1:
         out = {"result": {}}
     else:
@@ -80,7 +83,8 @@ class LoginsTest(unittest.TestCase):
         """The real runner, but `fab logins account` answers from self.accounts; every output kept."""
         if "logins account" in " ".join(argv):
             self.accounts.append(list(argv))
-            return Result(0, json.dumps({"email": "a@example.invalid", "plan": "pro", "used": 40}) + "\n")
+            return Result(0, json.dumps({"email": "a@example.invalid", "plan": "pro", "used": 40,
+                                         "limits": [{"name": "week", "used": 40, "resets": 1793774975}]}) + "\n")
         result = run(argv, **kwargs)
         self.outputs.append(result.out + result.err)
         return result
@@ -259,6 +263,11 @@ class LoginsTest(unittest.TestCase):
         self.assertEqual(self.accounts[-1][-1], "bash -lc 'fab logins account codex --validate'")
         login = self.shelf.login("codex-1")
         self.assertEqual((login.email, login.plan, login.used), ("a@example.invalid", "pro", 40))
+        checked = log.read()[-1]
+        self.assertEqual(checked["limit_names"], ["week"])
+        self.assertEqual(checked["limit_used"], [40])
+        self.assertEqual(checked["limit_resets"], [1793774975])
+        self.assertNotIn("limits", checked)
         self.shelf.give_back("codex-1")
         self.shelf.check("codex-1")
         self.assertEqual(self.accounts[-1][-4:], ["codex", "--home", str(log.home() / "logins-check/codex-1"),
@@ -279,15 +288,113 @@ class LoginsTest(unittest.TestCase):
 
     def test_account_reads_the_products_own_answers(self):
         codex = logins.account("codex", home="/codex/home")
-        self.assertEqual(codex, {"email": "/codex/home", "plan": "pro", "used": 72, "resets": 1793774975})
+        self.assertEqual(codex, {"email": "/codex/home", "plan": "pro", "used": 72, "resets": 1793774975,
+                                 "limits": [{"name": "5 h", "used": 17, "resets": 1793774000},
+                                            {"name": "week", "used": 72, "resets": 1793774975}]})
         directory = self.home / "claude-dir"
         directory.mkdir()
         self.assertEqual(logins.account("claude", home=str(directory), validate=True),
-                         {"email": "someone@example.invalid", "plan": "max"})
+                         {"email": "someone@example.invalid", "plan": "max", "limits": []})
         (directory / "expired").write_text("")
         self.assertEqual(logins.account("claude", home=str(directory), validate=True),
                          {"error": "Failed to authenticate"})
         self.assertEqual(logins.account("claude", home=str(directory)), {"error": "not logged in"})
+
+    def test_codex_limits_all_buckets_and_duration_names(self):
+        def window(minutes):
+            return {"windowDurationMins": minutes, "usedPercent": 81, "resetsAt": 1793774975}
+
+        buckets = {"z": {"limitId": "private model name", "primary": window(1440),
+                          "secondary": window(90)},
+                   "a": {"limitId": "codex", "primary": window(300), "secondary": window(10080)}}
+        limits = logins._codex_limits({"rateLimitsByLimitId": buckets, "rateLimits": buckets["z"]})
+        self.assertEqual([limit["name"] for limit in limits], ["5 h", "week", "other 1 d", "other 90 min"])
+        self.assertTrue(all(limit["used"] == 81 and limit["resets"] == 1793774975 for limit in limits))
+        for minutes, name in ((120, "2 h"), (2880, "2 d"), (1, "1 min"), (None, "?"), (0, "?")):
+            with self.subTest(minutes=minutes):
+                self.assertEqual(logins._codex_limits({"rateLimits": {"primary": window(minutes)}})[0]["name"],
+                                 "other " + name)
+        self.assertEqual(logins._codex_limits({}), [])
+
+    def test_claude_usage_lines_names_and_utc_resets(self):
+        now = datetime(2026, 11, 1, 12, tzinfo=timezone.utc).timestamp()
+        limits = logins._claude_limits("""Current session: 85% used · resets 3:09pm (UTC)
+Current week (all models): 12.5% used · resets Nov 4, 2am (UTC)
+Current week (Sonnet): 3% used · resets Nov 5, 1:30pm
+Current week (Fable): 99% used · resets Nov 4, 2am (UTC)
+Current week (fable): 99% used
+Other text with private@example.invalid
+Current week [extra]: 0% used""", now)
+        self.assertEqual([limit["name"] for limit in limits], ["5 h", "week", "week (Sonnet)", "week [extra]"])
+        self.assertEqual([limit["used"] for limit in limits], [85, 12.5, 3, 0])
+        self.assertEqual(limits[0]["resets"], datetime(2026, 11, 1, 15, 9, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(limits[1]["resets"], datetime(2026, 11, 4, 2, tzinfo=timezone.utc).timestamp())
+        self.assertIsNone(limits[-1]["resets"])
+        for value in ("bad", "0am", "13pm", "1:60pm", "Nov 31, 2am"):
+            self.assertIsNone(logins._claude_reset(value, now))
+        self.assertEqual(logins._claude_reset("10am", now),
+                         datetime(2026, 11, 2, 10, tzinfo=timezone.utc).timestamp())
+        self.assertEqual(logins._claude_reset("11am", now), now - 3600)
+        self.assertEqual(logins._claude_reset("Jan 1, 12am", now),
+                         datetime(2027, 1, 1, tzinfo=timezone.utc).timestamp())
+
+    def test_claude_usage_requires_a_free_local_command_and_keeps_account_on_failure(self):
+        answer = {"local_command": "usage", "num_turns": 0, "total_cost_usd": 0,
+                  "result": "Current week (all models): 25% used"}
+        runner = FakeRunner().on(["claude", "-p", "/usage"], Result(0, json.dumps(answer)))
+        with patch.object(logins, "run", side_effect=runner) as command:
+            found = logins.account("claude")
+        self.assertEqual(found["limits"], [{"name": "week", "used": 25, "resets": None}])
+        self.assertEqual(runner.argvs(), [["claude", "-p", "/usage", "--output-format", "json",
+                                         "--no-session-persistence", "--strict-mcp-config", "--tools", "",
+                                         "--model", "claude-haiku-5-5", "--settings", '{"disableAllHooks": true}']])
+        self.assertEqual(command.call_args.kwargs["env"]["TZ"], "UTC")
+        for replacement in ({"local_command": "model"}, {"num_turns": 1}, {"total_cost_usd": .01},
+                            {"num_turns": None}, {"total_cost_usd": None}, {"num_turns": False}, {"is_error": True}):
+            with self.subTest(replacement=replacement):
+                runner = FakeRunner().on(["claude"], Result(0, json.dumps({**answer, **replacement})))
+                with patch.object(logins, "run", side_effect=runner):
+                    self.assertEqual(logins.account("claude"),
+                                     {"email": "someone@example.invalid", "plan": "max", "limits": []})
+        for result in (Result(1, json.dumps(answer)), Result(0, "invalid"), Result(0, "[]")):
+            with patch.object(logins, "run", return_value=result):
+                self.assertEqual(logins.account("claude")["limits"], [])
+        with patch.object(logins, "run", side_effect=OSError("absent")):
+            self.assertEqual(logins.account("claude")["limits"], [])
+
+    def test_check_all_skips_refused_logins_and_continues_after_failed_checks(self):
+        entries = [logins.Login(name, kind, "", "") for name, kind in
+                   (("codex-1", "codex"), ("claude-1", "claude"), ("claude-box-1", "claude-box"),
+                    ("github-1", "github"), ("chatgpt-1", "chatgpt"))]
+        out = io.StringIO()
+        with patch.object(logins, "Shelf", return_value=self.shelf), \
+                patch.object(self.shelf, "logins", return_value={login.id: login for login in entries}), \
+                patch.object(self.shelf, "check", side_effect=[logins.Refused("lent to a run"),
+                                                              {"error": "expired"}, {"limits": []}]) as check, \
+                redirect_stdout(out):
+            self.assertEqual(logins.main(["check", "--all"]), 0)
+        self.assertEqual([call.args[0] for call in check.call_args_list], ["codex-1", "claude-1", "claude-box-1"])
+        self.assertEqual([json.loads(line) for line in out.getvalue().splitlines()],
+                         [{"id": "codex-1", "skipped": True}, {"id": "claude-1", "error": "expired"},
+                          {"id": "claude-box-1", "limits": []}])
+
+    def test_check_refuses_a_runs_login_without_checking_the_account(self):
+        login = logins.Login("codex-1", "codex", "", "", holder="run-1", host="b1", path="runs/run-1/auth.json")
+        with patch.object(self.shelf, "login", return_value=login), \
+                patch.object(self.shelf, "_account") as probe:
+            with self.assertRaisesRegex(logins.Refused, "lent to run-1"):
+                self.shelf.check(login.id)
+        probe.assert_not_called()
+        self.assertEqual(log.read(), [])
+
+    def test_check_records_a_failed_account_with_empty_limit_columns(self):
+        login = logins.Login("codex-1", "codex", "", "", holder="b1", host="b1", path=".codex/auth.json")
+        with patch.object(self.shelf, "login", return_value=login), \
+                patch.object(self.shelf, "_account", return_value={"error": "expired"}):
+            self.assertEqual(self.shelf.check(login.id), {"error": "expired"})
+        self.assertEqual(log.read()[-1]["error"], "expired")
+        for key in ("limit_names", "limit_used", "limit_resets"):
+            self.assertEqual(log.read()[-1][key], [])
 
     def test_fold_ignores_other_records_and_unknown_logins(self):
         folded = logins.fold([

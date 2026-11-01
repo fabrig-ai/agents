@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import fcntl
 import json
+import math
 import os
 import re
 import shlex
@@ -21,6 +22,7 @@ import sys
 import threading
 from collections.abc import Iterable, Mapping
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fab import hosts as fab_hosts
@@ -336,7 +338,7 @@ rm -rf -- {shlex.quote(login.path)}
             return self.login(name)
 
     def check(self, name: str) -> dict:
-        """The account and weekly use of login name, by its product, recorded as login.checked.
+        """The account and limits of login name, by its product, recorded as login.checked.
         Every check makes a real request (which may refresh the login): `claude auth status`
         alone answers from the account a previous login left cached. A machine login lent to
         its machine is checked there in place; a free one is lent to this machine in a private
@@ -361,7 +363,11 @@ rm -rf -- {shlex.quote(login.path)}
         else:
             raise Refused(f"{name} is lent to {login.holder}; check it where it is used")
         fields = {key: found.get(key) for key in ("email", "plan", "used", "resets")}
-        self._append("login.checked", id=name, **fields, error=found.get("error"))
+        limits = found.get("limits", [])
+        self._append("login.checked", id=name, **fields, error=found.get("error"),
+                     limit_names=[limit["name"] for limit in limits],
+                     limit_used=[limit["used"] for limit in limits],
+                     limit_resets=[limit["resets"] for limit in limits])
         return found
 
     def _account(self, host: str, kind: str, *, home: str | None = None, validate: bool = False) -> dict:
@@ -391,9 +397,10 @@ rm -rf -- {shlex.quote(login.path)}
 # The machine's side: what its products say about a login, never the login itself.
 
 def account(kind: str, *, home: str | None = None, validate: bool = False) -> dict:
-    """The account and weekly use of this machine's kind login (home: its CODEX_HOME or
-    CLAUDE_CONFIG_DIR), by the product's own commands. validate makes a real request first,
-    so an expired login says so (a Claude call of a few tokens; Codex refreshes its token)."""
+    """The account, weekly use and all limits of this machine's kind login (home: its
+    CODEX_HOME or CLAUDE_CONFIG_DIR), by the product's own commands. validate makes a real
+    request first, so an expired login says so (a Claude call of a few tokens; Codex refreshes
+    its token). Claude's local /usage can fail independently, leaving limits empty."""
     env = dict(os.environ)
     if kind == "codex":
         if home:
@@ -418,7 +425,95 @@ def account(kind: str, *, home: str | None = None, validate: bool = False) -> di
         return {"error": "claude auth status said nothing readable"}
     if not status.get("loggedIn"):
         return {"error": "not logged in"}
-    return {"email": status.get("email"), "plan": status.get("subscriptionType")}
+    found = {"email": status.get("email"), "plan": status.get("subscriptionType"), "limits": []}
+    try:
+        done = run(["claude", "-p", "/usage", "--output-format", "json",
+                    "--no-session-persistence", "--strict-mcp-config", "--tools", "",
+                    "--model", "claude-haiku-5-5", "--settings", '{"disableAllHooks": true}'],
+                   timeout=60, env=dict(env, TZ="UTC"), cwd=home or None)
+        answer = json.loads(done.out)
+        if (not done.ok or not isinstance(answer, dict) or answer.get("is_error")
+                or answer.get("local_command") != "usage" or _number(answer.get("num_turns")) != 0
+                or _number(answer.get("total_cost_usd")) != 0):
+            return found
+        found["limits"] = _claude_limits(answer.get("result"), datetime.now(timezone.utc).timestamp())
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        pass  # A failed usage check does not discard the account from auth status.
+    return found
+
+
+def _number(value: object) -> float | None:
+    """A finite product figure, never a boolean or free text."""
+    return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def _claude_reset(value: str, now: float) -> float | None:
+    """An English /usage reset in UTC, allowing the previous hour as the old page did."""
+    match = re.fullmatch(r"(?:(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) ([0-9]{1,2}), )?"
+                         r"([0-9]{1,2})(?::([0-9]{2}))?(am|pm)(?: \(UTC\))?", value)
+    if not match:
+        return None
+    month, day, hour, minute, half = match.groups()
+    hour, minute = int(hour), int(minute or 0)
+    if not 1 <= hour <= 12 or minute > 59:
+        return None
+    hour = hour % 12 + (12 if half == "pm" else 0)
+    today = datetime.fromtimestamp(now, timezone.utc)
+    threshold = now - 3600
+    if month:
+        month = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split().index(month) + 1
+        for year in range(today.year, today.year + 9):
+            try:
+                candidate = datetime(year, month, int(day), hour, minute, tzinfo=timezone.utc).timestamp()
+            except ValueError:
+                continue
+            if candidate >= threshold:
+                return candidate
+        return None
+    candidate = today.replace(hour=hour, minute=minute, second=0, microsecond=0)
+    if candidate.timestamp() < threshold:
+        candidate += timedelta(days=1)
+    return candidate.timestamp()
+
+
+def _claude_limits(result: object, now: float) -> list[dict]:
+    """Only Current limit lines, with public window names and no Fable limits."""
+    limits = []
+    for line in result.splitlines() if isinstance(result, str) else ():
+        match = re.fullmatch(r"Current ([A-Za-z0-9 ()\[\]]{1,40}): ([0-9]+(?:\.[0-9]+)?)% used"
+                             r"(?: · resets (.*))?", line)
+        if match:
+            name, used, reset = match.groups()
+            if "fable" in name.lower():
+                continue
+            name = {"session": "5 h", "week (all models)": "week"}.get(name, name)
+            limits.append({"name": name, "used": _number(float(used)),
+                           "resets": _claude_reset(reset, now) if reset else None})
+    return limits
+
+
+def _codex_limits(answer: dict) -> list[dict]:
+    """Every bucket's primary and secondary windows, using fixed duration labels."""
+    buckets = answer.get("rateLimitsByLimitId")
+    buckets = [buckets[key] for key in sorted(buckets)] if buckets else [answer.get("rateLimits")]
+    limits = []
+    for bucket in buckets:
+        if not isinstance(bucket, dict):
+            continue
+        prefix = "" if bucket.get("limitId") == "codex" else "other "
+        for field in ("primary", "secondary"):
+            window = bucket.get(field)
+            if not isinstance(window, dict):
+                continue
+            minutes = _number(window.get("windowDurationMins"))
+            name = "?"
+            if minutes is not None and minutes > 0 and minutes == int(minutes):
+                minutes = int(minutes)
+                name = ("week" if minutes == 10080 else f"{minutes // 1440} d" if minutes % 1440 == 0
+                        else f"{minutes // 60} h" if minutes % 60 == 0 else f"{minutes} min")
+            limits.append({"name": prefix + name, "used": _number(window.get("usedPercent")),
+                           "resets": _number(window.get("resetsAt"))})
+    return limits
 
 
 def _codex_account(env: dict, validate: bool) -> dict:
@@ -454,11 +549,16 @@ def _codex_account(env: dict, validate: bool) -> dict:
         if "error" in answer:
             return {"error": str((answer["error"] or {}).get("message", answer["error"]))[:200]}
     who = ((answers.get(2) or {}).get("result") or {}).get("account") or {}
-    weekly = (((answers.get(3) or {}).get("result") or {}).get("rateLimits") or {}).get("primary") or {}
+    windows = (answers[3].get("result") or {})
+    limits = _codex_limits(windows)
+    weekly = next((limit for limit in limits if limit["name"] == "week"), None)
+    if weekly is None:
+        primary = (windows.get("rateLimits") or {}).get("primary") or {}
+        weekly = {"used": primary.get("usedPercent"), "resets": primary.get("resetsAt")}
     if not who:
         return {"error": "not logged in"}
-    return {"email": who.get("email"), "plan": who.get("planType"), "used": weekly.get("usedPercent"),
-            "resets": weekly.get("resetsAt")}
+    return {"email": who.get("email"), "plan": who.get("planType"), "used": weekly["used"],
+            "resets": weekly["resets"], "limits": limits}
 
 
 def table(logins: Iterable[Login]) -> list[str]:
@@ -476,7 +576,7 @@ def table(logins: Iterable[Login]) -> list[str]:
 def main(argv: list[str]) -> int:
     """`fab logins list [--json]`, `capture HOST KIND [--path P] [--free]`, `lend ID HOST
     [--path P] [--holder RUN]`, `borrow KIND HOST --path P --holder RUN` (prints the id lent),
-    `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID...`
+    `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID... | --all`
     (on the shelf's machine); `account KIND [--home DIR] [--validate]` (on the login's)."""
     parser = argparse.ArgumentParser(prog="fab logins", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -504,12 +604,16 @@ def main(argv: list[str]) -> int:
     retiring = commands.add_parser("retire")
     retiring.add_argument("id")
     retiring.add_argument("reason")
-    commands.add_parser("check").add_argument("id", nargs="+")
+    checking = commands.add_parser("check")
+    checking.add_argument("id", nargs="*")
+    checking.add_argument("--all", action="store_true")
     accounting = commands.add_parser("account")
     accounting.add_argument("kind", choices=["claude", "codex"])
     accounting.add_argument("--home")
     accounting.add_argument("--validate", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "check" and (bool(args.id) == args.all):
+        parser.error("check requires IDs or --all")
     if args.command == "account":
         print(json.dumps(account(args.kind, home=args.home, validate=args.validate), sort_keys=True))
         return 0
@@ -538,11 +642,19 @@ def main(argv: list[str]) -> int:
             done = shelf.retire(args.id, args.reason)
         else:
             failed = 0
-            for name in args.id:
-                found = shelf.check(name)
+            names = ([login.id for login in shelf.logins().values()
+                      if login.kind in ("codex", "claude", "claude-box")] if args.all else args.id)
+            for name in names:
+                try:
+                    found = shelf.check(name)
+                except Refused:
+                    if not args.all:
+                        raise
+                    print(json.dumps({"id": name, "skipped": True}, sort_keys=True))
+                    continue
                 failed += "error" in found
                 print(json.dumps({"id": name, **found}, sort_keys=True))
-            return 1 if failed else 0
+            return 0 if args.all else (1 if failed else 0)
     except Refused as error:
         print(f"fab logins: {error}", file=sys.stderr)
         return 1
