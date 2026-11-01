@@ -29,6 +29,7 @@ class Step:
 
 MID_EVERY = 10  # task merges since the last check that call for a check along the way (13.12)
 MID_AFTER = 45  # minutes since the last check (or the first merge) that call for one, with a merge since
+CATCH_AFTER = 30  # minutes since the last catch-up (or first task merge) before catching up again
 MID_WITHOUT = ("fuzzy",)  # a check along the way runs the end check's steps but these
 
 
@@ -40,10 +41,11 @@ def trunk_tip(plan: Plan, events: Sequence[dict]) -> str | None:
 
 def _first_merge(plan: Plan, events: Sequence[dict]) -> int | None:
     """The position of the first merge of one of the plan's tasks into its trunk; the
-    cut's, answers' and repair sections' branches are not tasks."""
+    cut's, answers', repair sections' and main's branches are not tasks."""
     return next((position for position, event in enumerate(events)
                  if event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
-                 and str(event.get("task", "")).startswith(f"{plan.draft}/")), None)
+                 and str(event.get("task", "")).startswith(f"{plan.draft}/")
+                 and event.get("task") != f"{plan.draft}/integration"), None)
 
 
 def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
@@ -60,40 +62,79 @@ def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
             and event.get("kind") == "check" and event.get("task") == f"{plan.draft}/integration"]
 
 
+def _catch_up_refusals(plan: Plan, events: Sequence[dict]) -> dict[int, str | None]:
+    """Catch-up refusals in log order: their repair id, or None after a repair for that
+    main sha has merged into the trunk. Only a merge before the refusal counts."""
+    result = {}
+    repairs = {}
+    merged = set()
+    for position, event in enumerate(events):
+        if (event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
+                and event.get("task") in repairs):
+            merged.add(repairs[event["task"]])
+        if (event.get("ev") != "branch.rejected" or event.get("step") != CATCH_UP
+                or event.get("task") != f"{plan.draft}/integration"):
+            continue
+        main = event.get("main")
+        identifier = None if main and main in merged else f"{plan.draft}/catch-up-{len(repairs) + 1}"
+        result[position] = identifier
+        if identifier is not None:
+            repairs[identifier] = main
+    return result
+
+
 def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
                  plan_tasks: Mapping[str, Task] | None = None) -> dict[str, Task]:
-    """One integration repair per failed check, in log order, quoting at most 120 report lines.
+    """Check and catch-up repairs in log order, numbered separately, with no spec file.
 
-    Repairs have no spec file and may change any file. Their acceptance requires the
-    failed step green on the trunk with the change, running the narrowest checks first.
-    A repair of a check along the way (mid) lists, given plan_tasks, the tasks not merged when it
-    started and their files, to leave what they own. An answer to a repair's question (a question.answered with `answer`) has no spec to go
-    into, so it is folded into the body's Answers section, in log order.
+    Check reports quote at most 120 lines. Mid repairs list tasks not merged at the check,
+    given plan_tasks. Both kinds fold question.answered text into Answers in log order.
+    A refusal after its main sha's catch-up repair merged generates no further repair.
     """
     if plan.landing != "integration":
         return {}
     repairs = {}
-    for check in _checks(plan, events):
-        if check["outcome"] != "failed":
+    checks = {check["run"]: check for check in _checks(plan, events) if check["outcome"] == "failed"}
+    refusals = _catch_up_refusals(plan, events)
+    red = 0
+    for position, event in enumerate(events):
+        if position in refusals:
+            identifier = refusals[position]
+            if identifier is None:
+                continue
+            body = ("# Repair the catch-up with main\n\n"
+                    f"- Trunk tip: `{event['tip']}`\n- Main sha: `{event.get('main', '?')}`\n\n"
+                    f"## Findings\n\n{event.get('findings', '')}\n\n"
+                    "Merge that main sha into your branch, which starts at the trunk's tip. "
+                    "Resolve each conflict keeping both sides' intent: main's side is other drafts' "
+                    "landed work, the trunk's is this draft's. Fix what main's changes break in "
+                    "this draft's code, and push.\n\n## Acceptance\n\n"
+                    "The pushed branch contains the main sha and has no conflict markers. "
+                    "The crates the conflicts touched build and pass clippy and their tests; "
+                    "the trunk's next check runs the rest.\n")
+        elif event.get("ev") == "run.started" and event.get("run") in checks:
+            check = checks[event["run"]]
+            red += 1
+            identifier = f"{plan.draft}/repair-{red}"
+            report = "\n".join(reports.get(check["run"], "").splitlines()[:120])
+            body = (f"# Repair the integration check\n\n"
+                    f"- Tip: `{check['base']}`\n- Run: `{check['run']}`\n\n"
+                    f"{report}\n\n## Acceptance\n\n"
+                    "The failing step must be green on the trunk with this change. "
+                    "Run the narrowest checks first, then the failing step itself.\n")
+            if check.get("mid") and plan_tasks:
+                landed = {event.get("task") for event in events if event.get("ev") == "branch.landed"
+                          and event.get("ts", "") <= check.get("ts", "")}
+                pending = [task for name, task in plan_tasks.items()
+                           if name not in landed and task.kind not in ("repair", "red")]
+                if pending:
+                    body += ("\n## Not merged yet\n\nThis was a check along the way: these tasks had not "
+                             "merged. Leave a red that lies in what one of them owns, or that one of them "
+                             "will fix by its spec; repair the rest.\n\n"
+                             + "\n".join(f"- {task.id}: {', '.join(task.files) or '(no files named)'}"
+                                          for task in pending) + "\n")
+        else:
             continue
-        identifier = f"{plan.draft}/repair-{len(repairs) + 1}"
-        report = "\n".join(reports.get(check["run"], "").splitlines()[:120])
-        body = (f"# Repair the integration check\n\n"
-                f"- Tip: `{check['base']}`\n- Run: `{check['run']}`\n\n"
-                f"{report}\n\n## Acceptance\n\n"
-                "The failing step must be green on the trunk with this change. "
-                "Run the narrowest checks first, then the failing step itself.\n")
-        if check.get("mid") and plan_tasks:
-            landed = {event.get("task") for event in events if event.get("ev") == "branch.landed"
-                      and event.get("ts", "") <= check.get("ts", "")}
-            pending = [task for name, task in plan_tasks.items()
-                       if name not in landed and task.kind not in ("repair", "red")]
-            if pending:
-                body += ("\n## Not merged yet\n\nThis was a check along the way: these tasks had not "
-                         "merged. Leave a red that lies in what one of them owns, or that one of them "
-                         "will fix by its spec; repair the rest.\n\n"
-                         + "\n".join(f"- {task.id}: {', '.join(task.files) or '(no files named)'}"
-                                      for task in pending) + "\n")
         answers = [event["answer"] for event in events if event.get("ev") == "question.answered"
                    and event.get("task") == identifier and event.get("answer")]
         if answers:
@@ -108,7 +149,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
 
 
 def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> dict[str, Task]:
-    """tasks plus the log-derived repairs, reading the collected check reports locally; an
+    """tasks plus the log-derived check and catch-up repairs, reading check reports locally; an
     unreadable report is empty. Shared by the tick and the answer call's brief."""
     reports = {}
     for event in events:
@@ -121,11 +162,13 @@ def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) 
     return {**tasks, **repair_tasks(plan, events, reports, tasks)}
 
 
-def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> Step | None:
+def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
+              main: str | None = None) -> Step | None:
     """Check an entirely merged trunk, ready its green tip when requested (queue_step), or stop
     after three failed checks. Wait for unfinished tasks, absent merges and checks in flight.
-    The third red stops before its generated repair can start. A trunk whose catch-up with
-    main conflicted at its tip (branch.rejected, step catch-up) stops for judgement. Pure."""
+    The third end red stops before its generated repair can start. A catch-up refusal after
+    its main sha's repair merged stops for judgement. main is origin/main's sha when the
+    trunk lacks it, otherwise None; while tasks remain it may call for a catch-up. Pure."""
     if plan.landing != "integration":
         return None
     tasks = {identifier: task for identifier, task in tasks.items() if task.kind != "red"}
@@ -141,13 +184,11 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
         return None
     if sum(check["outcome"] == "failed" and not check.get("mid") for check in checks) >= 3:
         return Step("stop", tip, "red 3 times; needs judgement")
+    if any(identifier is None for identifier in _catch_up_refusals(plan, events).values()):
+        return Step("stop", tip, "main conflicts with the trunk again after its catch-up repair; needs judgement")
     views = state.fold(tasks, events)
     if any(view.status != "landed" for view in views.values()):
-        return _mid_step(plan, tasks, views, events, tip, checks)
-    if any(event.get("ev") == "branch.rejected" and event.get("step") == CATCH_UP
-           and event.get("task") == f"{plan.draft}/integration" and event.get("tip") == tip
-           for event in events):
-        return Step("stop", tip, "main conflicts with the trunk; needs judgement")
+        return _mid_step(plan, tasks, views, events, tip, checks, main=main)
     checked = next((check for check in reversed(checks) if check.get("base") == tip and not check.get("mid")), None)
     if checked is None:
         return Step("check", tip, tip)
@@ -157,23 +198,33 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
 
 
 def _mid_step(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
-              events: Sequence[dict], tip: str, checks: Sequence[dict]) -> Step | None:
-    """A check along the way (13.12) while tasks remain: once MID_EVERY task merges came since
+              events: Sequence[dict], tip: str, checks: Sequence[dict], *,
+              main: str | None = None) -> Step | None:
+    """Catch up first when main moved and CATCH_AFTER elapsed since the last catch-up (or
+    first merge). Otherwise check along the way (13.12) once MID_EVERY task merges came since
     the last check, or MID_AFTER minutes passed since it (or since the first merge) with one
     merge since; never while a repair is open or for a tip already checked. Its reds never count
     toward the three that stop a plan. Now is the last event's time. Pure."""
     if any(task.kind == "repair" and views[identifier].status != "landed"
            for identifier, task in tasks.items() if identifier in views):
         return None
+    now = max((event.get("ts", "") for event in events), default="")
+    if plan.ready and main:
+        catch = next((event for event in reversed(events)
+                      if event.get("task") == f"{plan.draft}/integration"
+                      and ((event.get("ev") == "branch.landed" and event.get("branch") == "main")
+                           or (event.get("ev") == "branch.rejected" and event.get("step") == CATCH_UP))), None)
+        since = (catch if catch is not None else events[_first_merge(plan, events)]).get("ts", "")
+        minutes = (_time(now) - _time(since)).total_seconds() / 60 if now and since else 0
+        if minutes >= CATCH_AFTER:
+            return Step("catch-up", tip, f"main {main}, {minutes:.0f} min since the last catch-up")
     if any(check.get("base") == tip for check in checks):
         return None
     last = checks[-1] if checks else None
-    since = last.get("ts", "") if last else next(
-        (event.get("ts", "") for event in events if event.get("ev") == "branch.landed"
-         and event.get("into") == plan.trunk and str(event.get("task", "")).startswith(f"{plan.draft}/")), "")
+    since = (last if last is not None else events[_first_merge(plan, events)]).get("ts", "")
     merges = sum(1 for event in events if event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
-                 and event.get("task") in tasks and (last is None or event.get("ts", "") > since))
-    now = max((event.get("ts", "") for event in events), default=since)
+                 and event.get("task") in tasks and event.get("task") != f"{plan.draft}/integration"
+                 and (last is None or event.get("ts", "") > since))
     minutes = (_time(now) - _time(since)).total_seconds() / 60 if now and since else 0
     if merges >= MID_EVERY or (merges and minutes >= MID_AFTER):
         return Step("mid-check", tip, f"{merges} merges, {minutes:.0f} min since the last check")
