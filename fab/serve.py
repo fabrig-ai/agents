@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import re
 from collections import Counter
 from collections.abc import Collection
@@ -64,6 +65,9 @@ border:1px solid var(--ring);border-radius:999px;padding:0 8px 0 6px;line-height
 .badge i{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
 .badge.good i{background:var(--good)}.badge.warning i{background:var(--warning)}
 .badge.critical i{background:var(--critical)}.badge.info i{background:var(--info)}
+.meter{display:inline-block;width:80px;height:8px;background:var(--grid);border-radius:4px;overflow:hidden}
+.meter i{display:block;height:100%;background:var(--info)}
+.meter.warning i{background:var(--warning)}.meter.critical i{background:var(--critical)}
 footer{margin-top:36px;color:var(--ink2);font-size:12.5px}"""
 
 
@@ -82,12 +86,83 @@ def _draft(event: dict) -> str:
     return task.split("/", 1)[0] if isinstance(task, str) and "/" in task else ""
 
 
+def _number(value: object) -> float | None:
+    """Only finite numeric figures may enter the public snapshot."""
+    return value if type(value) in (int, float) and math.isfinite(value) else None
+
+
+def _limits(event: dict) -> list[dict]:
+    """Rebuild the scalar lists, accepting only public window labels and finite figures."""
+    columns = [event.get(key, []) for key in ("limit_names", "limit_used", "limit_resets")]
+    if not all(isinstance(column, list) for column in columns) or len({len(c) for c in columns}) != 1:
+        return []
+    return [{"name": name, "used": _number(used), "resets": _number(resets)}
+            for name, used, resets in zip(*columns)
+            if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9 ()\[\]?]{1,46}", name)
+            and "fable" not in name.lower()]
+
+
+def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[dict]:
+    """Latest recent checks, with pace from the oldest usable sample in the same window."""
+    kinds, retired, checks = {}, set(), {}
+    for event, stamp in sorted(dated, key=lambda pair: pair[1]):
+        name = event.get("id")
+        if not isinstance(name, str) or not re.fullmatch(r"(?:claude|codex)-[0-9]+", name):
+            continue
+        ev = event.get("ev")
+        if ev == "login.added" and event.get("kind") in ("claude", "codex"):
+            kinds[name] = event["kind"]
+        elif ev == "login.retired":
+            retired.add(name)
+        elif ev == "login.checked":
+            checks.setdefault(name, []).append((event, stamp))
+    subscriptions = []
+    for name, samples in checks.items():
+        event, stamp = samples[-1]
+        if name not in kinds or name in retired or (now - stamp).total_seconds() > 86400:
+            continue
+        plan = event.get("plan")
+        failed = bool(event.get("error"))
+        limits = []
+        for limit in _limits(event):
+            label, used, resets = limit["name"], limit["used"], limit["resets"]
+            if label == "5 h" and (used is None or used <= 80):
+                continue
+            limit.update(rate_per_h=None, full_at=None, at_reset=None)
+            if not failed and used is not None and resets is not None and resets > now.timestamp():
+                for earlier, before in samples[:-1]:
+                    elapsed = (stamp - before).total_seconds()
+                    if elapsed < 1200 or earlier.get("error"):
+                        continue
+                    previous = next((sample for sample in _limits(earlier)
+                                     if sample["name"] == label and sample["resets"] == resets
+                                     and sample["used"] is not None), None)
+                    if previous is None or previous["used"] > used:
+                        continue
+                    rate = (used - previous["used"]) * 3600 / elapsed
+                    limit["rate_per_h"] = round(rate, 1)
+                    full = stamp.timestamp() + (100 - used) * 3600 / rate if rate > 0 else None
+                    if full is not None and full < resets:
+                        limit["full_at"] = full
+                    else:
+                        limit["at_reset"] = round(used + rate * (resets - stamp.timestamp()) / 3600, 1)
+                    break
+            limits.append(limit)
+        subscriptions.append({"login": name, "kind": kinds[name],
+                              "plan": plan if isinstance(plan, str) and re.fullmatch(r"[a-z0-9_]{1,40}", plan)
+                              else "",
+                              "checked_age_s": int((now - stamp).total_seconds()),
+                              "check_failed": failed, "limits": limits})
+    return sorted(subscriptions, key=lambda subscription: (subscription["kind"], subscription["login"]))
+
+
 def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     """Public counts and ages at now, in UTC, with only known hosts, call roles and safe
     draft names. Skip invalid timestamps and future events; pair ids across the log,
     fold the user's log asks through channel.asks, and bound runs to 24 h and calls to
-    calls.TIMEOUT. Separate main landings from trunk merges; only drafts named by run
-    starts appear. Today runs from UTC midnight through now. No event fields leave the fold."""
+    calls.TIMEOUT. Include recent subscription limits and pace, with public login ids.
+    Separate main landings from trunk merges; only drafts named by run starts appear.
+    Today runs from UTC midnight through now. Only public fields leave the fold."""
     now = now.astimezone(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
     recent = now - timedelta(hours=24)
@@ -179,6 +254,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
         "weight_today": {"codex_m": round(codex / accounting.MILLION, 1),
                          "claude_m": round(claude / accounting.MILLION, 1)},
         "drafts": dict(sorted(drafts.items())),
+        "subscriptions": _subscriptions(dated, now),
     }
 
 
@@ -192,8 +268,18 @@ def _age(seconds: int | None) -> str:
     return f"{seconds // 3600} h"
 
 
+def _duration(seconds: float) -> str:
+    """Two adjacent units for a subscription countdown, rounded down to minutes."""
+    minutes = max(0, int(seconds) // 60)
+    if minutes >= 1440:
+        return f"{minutes // 1440} d {minutes % 1440 // 60} h"
+    if minutes >= 60:
+        return f"{minutes // 60} h {minutes % 60} min"
+    return f"{minutes} min"
+
+
 def render(snapshot: dict) -> str:
-    """One escaped, self-refreshing HTML document of the public snapshot's counts,
+    """One escaped, self-refreshing HTML document of public counts and subscription limits,
     readable at phone width in light and dark; a fixed message when the log is unreadable."""
     def text(value: object) -> str:
         return html.escape(str(value))
@@ -227,6 +313,46 @@ def render(snapshot: dict) -> str:
     def card(title: str, body: str) -> str:
         return f'<div class="card"><h3>{text(title)}</h3>{body}</div>'
 
+    def subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
+        if not subscriptions:
+            return '<p class="empty">No login checked in the last 24 hours.</p>'
+        rows = []
+        for subscription in subscriptions:
+            label = " · ".join(filter(None, (subscription["kind"].title(), subscription["plan"],
+                                             subscription["login"])))
+            for index, limit in enumerate(subscription["limits"] or [{}]):
+                used = limit.get("used")
+                use = "–"
+                if subscription["check_failed"]:
+                    use = "check failed"
+                elif used is not None:
+                    state = " critical" if used >= 95 else " warning" if used >= 80 else ""
+                    use = (f'<span class="meter{state}"><i style="width:{max(0, min(100, used)):g}%"></i>'
+                           f'</span> {used:g}%')
+                reset = "–"
+                if limit.get("resets") is not None:
+                    try:
+                        when = datetime.fromtimestamp(limit["resets"], timezone.utc)
+                    except (ValueError, OverflowError, OSError):
+                        pass
+                    else:
+                        reset = (f'<time datetime="{when.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
+                                 f'title="{when.strftime("%Y-%m-%d %H:%M UTC")}">'
+                                 f'in {_duration(limit["resets"] - now.timestamp())}</time>')
+                rate = limit.get("rate_per_h")
+                pace = "–"
+                if limit.get("full_at") is not None:
+                    pace = "full in " + _duration(limit["full_at"] - now.timestamp())
+                elif limit.get("at_reset") is not None:
+                    pace = f'lasts, {limit["at_reset"]:g}% at reset'
+                cells = (text(label) if index == 0 else "", text(limit.get("name", "–")), use,
+                         reset, f"{rate:.1f}%/h" if rate is not None else "–", text(pace))
+                rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+        headings = ("Subscription", "Limit", "Used", "Resets", "Rate", "At this pace")
+        return ('<div class="scroll"><table><thead><tr>'
+                + "".join(f"<th>{heading}</th>" for heading in headings)
+                + '</tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>')
+
     updated = _stamp(snapshot["updated"])
     clock = updated.strftime("%H:%M UTC") if updated else snapshot["updated"]
     age = snapshot.get("last_event_age_s")
@@ -238,6 +364,9 @@ def render(snapshot: dict) -> str:
         runs, active_calls = snapshot["runs_in_flight"], snapshot["calls_in_flight"]
         waiting = snapshot["waiting_on_user"]
         weights = snapshot["weight_today"]
+        subscriptions = snapshot["subscriptions"]
+        weekly = [limit["used"] for subscription in subscriptions if not subscription["check_failed"]
+                  for limit in subscription["limits"] if limit["name"] == "week" and limit["used"] is not None]
         content = '<div class="tiles">' + "".join([
             tile("Runs in flight", runs["total"],
                  " · ".join(f"{host} {count}" for host, count in runs["by_host"].items())),
@@ -250,12 +379,15 @@ def render(snapshot: dict) -> str:
                  f'last hour {snapshot["merged"]["last_hour"]}'),
             tile("Weight today, Codex", f'{weights["codex_m"]:.1f}M'),
             tile("Weight today, Claude", f'{weights["claude_m"]:.1f}M'),
+            tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} logins"),
         ]) + '</div>'
         content += ('<h2>Waiting on the user</h2><div class="panel">'
                     + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
                                              ("Parked chains", waiting["by_kind"]["parked"])])
                     + f'<p class="facts">{text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
                     + f'<p><a href="{text(ISSUES)}">Open the questions</a></p></div>')
+        content += ('<h2>Subscriptions</h2><div class="panel">'
+                    + subscriptions_table(subscriptions, updated) + '</div>')
         drafts = []
         for name, counts in snapshot["drafts"].items():
             state = badge("running", "info") if counts["runs_in_flight"] else badge("idle", "neutral")
@@ -289,7 +421,7 @@ def render(snapshot: dict) -> str:
             card("Claude calls by role", table(("Role", "Calls"), active_calls["by_role"].items())
                  if active_calls["by_role"] else '<p class="empty">None.</p>'),
         ]) + '</div>'
-    footer = ("<footer>Counts only, from fab's event log on hel8; refreshes every 30 s. "
+    footer = ("<footer>From fab's event log on hel8; refreshes every 30 s. "
               'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>')
     return ("""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">

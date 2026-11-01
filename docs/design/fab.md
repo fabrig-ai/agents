@@ -100,6 +100,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `finding.triaged` | finding, call, decision, owner, reason, question, into | a triage call's decision: path, backlog, user, brief, drop, or again (a merge into a fixed finding) |
 | `finding.settled` | finding, run, verdict, reason, section | the tick acted on a finding's foreman: fix or none (a repair task follows) or left (the page) |
 | `rung.passed` | draft, rung, walk, edition, commit | a rung's brief rerun unchanged and passing, its lower rungs passed (13.15) |
+| `login.checked` | id, email, plan, used, resets, error, limit_names, limit_used, limit_resets | account check and limits (13.13); the three limit lists hold scalars of equal length in the same order, with null use or reset when unknown |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -1775,7 +1776,8 @@ login that still works reused across them before more are signed in.
   `<kind>-<n>`.
 - **Custody is the log:** `login.added` (id, kind, origin, sha),
   `login.lent` (id, holder, host, at, sha), `login.returned` (id, sha),
-  `login.checked` (id, email, plan, used, resets, error) and
+  `login.checked` (id, email, plan, used, resets, error, limit_names,
+  limit_used, limit_resets) and
   `login.retired` (id, reason). `fab.logins.fold` derives each login's
   holder; the dispatcher's machine is the only writer, under the shelf's
   flock.
@@ -1830,13 +1832,40 @@ login that still works reused across them before more are signed in.
   skein's `SKEIN_TEST_LIVE_*_MODEL` to the same.
 - **Checks by the products themselves:** `fab logins check ID` asks Codex's
   app-server (`account/read`, `account/rateLimits/read`: the account, the
-  plan, the weekly window's percent used) or `claude auth status`. A lent
+  plan and every limit) or `claude auth status` followed by local `/usage`. A lent
   machine login is checked in place, on its machine; a free one is lent to
   hel8 in a private directory and returned. Every check makes a real
   request (a Claude call of a few tokens; Codex refreshes its token), so an
   expired login says so and a swapped Claude login does not report the
   account its predecessor left cached (11-01: three swapped builders said
   gmail until their first call). The weekly percent is the signal for a swap.
+  `account()` returns `limits`, dictionaries of `name`, `used` (percent) and
+  `resets` (Unix seconds or null). Codex reads every bucket in
+  `rateLimitsByLimitId`, sorted by key, or `rateLimits` alone, and each
+  bucket's primary and secondary windows. Duration labels are `5 h` (300
+  minutes), `week` (10080), otherwise whole days, whole hours or minutes;
+  an unknown duration is `?`. A bucket whose `limitId` is not `codex`
+  prefixes `other `, never its backend display name. The shelf's existing
+  `used` and `resets` remain Codex's weekly window (the primary window for
+  older responses without a labelled week).
+  Claude runs `claude -p /usage --output-format json --no-session-persistence
+  --strict-mcp-config --tools "" --model claude-haiku-5-5 --settings
+  '{"disableAllHooks": true}'` with `TZ=UTC`. It accepts only a local
+  `usage` command with zero turns and zero cost. `Current` lines yield each
+  limit; `session` becomes `5 h`, `week (all models)` becomes `week`, other
+  names stay as written, and Fable lines are dropped. English resets with
+  an optional month/day and UTC suffix use the next matching date/time,
+  allowing the previous hour as the old renderer did. A failed or
+  model-answered `/usage` leaves limits empty and keeps the account.
+  `Shelf.check` records limits as three parallel scalar lists:
+  `limit_names`, `limit_used` and `limit_resets`, of equal length and order;
+  unknown use or reset is null. It never puts dictionaries in log fields.
+- **Check the shelf:** `fab logins check --all` checks each login whose kind
+  has a check, sequentially. Custody refusals (including a run's login and
+  retired logins) print `skipped`; account failures record `login.checked`
+  with `error` and do not stop the remaining checks. Bulk checking exits 0;
+  explicit ids retain their failure exit status. A 30-minute timer on hel8
+  is deployed by hand, outside this change.
 - **Left out:** the old tools' pending journals and backups, QA's waiting
   queue, reservations and admission caps (the dispatcher decides who gets a
   login, as it does places), and checks of `chatgpt` records, which only a
@@ -1844,13 +1873,13 @@ login that still works reused across them before more are signed in.
 
 ### 13.14 The status page
 
-- **Public counts from the log.** `fab serve [--port 8370] [--bind 127.0.0.1]`
+- **Public counts and subscriptions from the log.** `fab serve [--port 8370] [--bind 127.0.0.1]`
   serves one HTML page at `/`, its JSON snapshot at `/api/status` and `ok` at
   `/healthz`. GET only; other methods return 405, other paths 404, and query
   strings are ignored. It prints its bound address, including a port chosen
   by `--port 0`.
 - **Pure core, read-only shell.** `fab.serve.snapshot(events, now, hosts)`
-  computes counts; `render(snapshot)` returns escaped HTML. Each request
+  computes counts and subscriptions; `render(snapshot)` returns escaped HTML. Each request
   reads `FAB_HOME/log.jsonl` through `fab.log.read` and host names through
   `fab.hosts.load`. No lock, writes, cache, ssh or plan files. An unreadable
   log still returns 200, with `log: "unreadable"` and no figures; failures
@@ -1879,13 +1908,37 @@ login that still works reused across them before more are signed in.
   `fab.calls.ROLES` (others become `other`), and draft names matching
   `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A prefix ends at the
   first `/`; a task without `/` becomes `other`. Draft qualification uses
-  the prefix before this public classification. No task, run, call or login
-  ids, branches, shas, paths, question or answer text, notes, reports or
-  holders in HTML or JSON.
+  the prefix before this public classification. Subscription login ids
+  (`claude-7`, `codex-1`) are fab's public opaque names. No task, run or call
+  ids, branches, shas, paths, question or answer text, notes, reports,
+  emails or holders in HTML or JSON; subscriptions never expose hosts.
+- **Subscriptions:** the snapshot's `subscriptions` list has each nonretired
+  Claude or Codex login whose latest `login.checked` is within 24 hours,
+  sorted by kind then id. Each has `login`, `kind`, a `plan` matching
+  `[a-z0-9_]{1,40}` or empty, `checked_age_s`, `check_failed` (a boolean,
+  never the error text) and `limits`. The three scalar log lists are zipped
+  back to `name`, `used`, `resets`; old checks without them have no limits.
+  Fable is omitted; `5 h` appears only above 80% use. Each limit also has
+  `rate_per_h`, `full_at` and `at_reset`, null without a usable earlier
+  sample. Use the oldest successful sample of that login and limit with
+  the same reset, at least 20 minutes before the latest check; decreasing
+  use and expired or unknown resets give no pace. Rate is percent per hour
+  to one decimal; projections use the unrounded rate from the latest check
+  time. `full_at` is Unix seconds if full before reset; otherwise
+  `at_reset` is projected percent at reset to one decimal (zero rate lasts).
+  The panel after Waiting on the user has Subscription (kind, plan, id on
+  its first row), Limit, Used (meter and percent), Resets (countdown and a
+  UTC `time` element/title), Rate (`3.6%/h`) and At this pace (`full in
+  1 d 13 h`, `lasts, 19% at reset`, or `–`). Meters warn at 80% and turn
+  critical at 95%. A failed check says `check failed` in Used, even with no
+  limits; a successful check with no limits shows `–`. With no recent
+  checks: `No login checked in the last 24 hours.` A Subscriptions tile
+  after the weights shows the highest `week` percent among successful
+  checks (`–` when absent), with the number of recent logins below.
 - The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
   refresh every 30 seconds, phone width and light and dark colours. Header,
-  tiles, Waiting on the user, Drafts, Today, In flight, then footer; ages in
+  tiles, Waiting on the user, Subscriptions, Drafts, Today, In flight, then footer; ages in
   seconds, minutes or hours. Waiting is the first section below the tiles.
   Its tile, kind labels (Call questions and Parked chains) and "Open the
   questions" below the oldest age link to the forge's open `waiting-on-user`

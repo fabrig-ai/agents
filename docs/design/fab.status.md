@@ -40,6 +40,17 @@
   pushing session told, reds standing from before `reds`, Fix mode's
   public-item gate) is in section 14.
 
+- **Subscriptions on the status page** (11-01, 3, 13.13–13.14): account
+  checks return every Codex window and Claude's zero-turn local `/usage`
+  limits, dropping Fable. `login.checked` stores three parallel scalar
+  lists. `fab logins check --all` skips custody refusals and continues
+  after account failures. The public snapshot includes recent nonretired
+  logins, same-window rate and pace, with `5 h` only above 80%; the page
+  has the Subscriptions panel, meters and weekly-use tile. Account and
+  custody details stay private. Pure folds and parsers, fake commands and
+  fixture log tests cover it. Deployment remains by hand: update the
+  serving checkout and install a 30-minute check timer on hel8.
+
 - **The user's questions on the forge** (11-01, 13.16): `fab issues sync`
   opens one labelled issue per subject, reads user comments through medium
   reply calls, records decisions through `channel.answer`, and closes
