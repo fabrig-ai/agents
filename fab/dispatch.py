@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, fix, fixes, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
+from fab import after_landing, atomic, buffer, call_review, calls, channel, designer, drafts, findings, fix, fixes, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -699,7 +699,10 @@ def _import_after_landing(events: list[dict], hosts: Mapping[str, Host], *, sh: 
 
 def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None = None,
                   sh: Runner, log_path: Path | None) -> bool:
-    """Merge a branch into the plan's trunk once; log conflicts and retry refused pushes."""
+    """Merge once into the trunk, restoring a cut's options there before pushing.
+
+    Log conflicts and retry refused pushes; never restore on the cut's branch.
+    """
     events = log.read(log_path)
     landed = [event for event in events if event.get("ev") == "branch.landed"
               and event.get("branch") == branch and event.get("into") == plan.trunk]
@@ -728,6 +731,7 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
             log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
                        tip=tip, step="merge", findings=findings)
         return False
+    _restore_trunk_options(branch, plan, checkout, events, sh=sh)
     sha = integration.catch_up_main(plan, events, task or branch)
     contained = _contains(sha, "HEAD", checkout, sh=sh) if sha else False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
@@ -743,6 +747,35 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
                        tip=main, main=sha, step=integration.CATCH_UP,
                        findings=f"Catch-up repair {task or branch} merged without main sha {sha}.")
     return True
+
+
+def _cut_options(branch: str, events: Sequence[dict]) -> dict[str, object]:
+    """Read explicit options from the branch's root cut, never from its amendments."""
+    cut = next((event for event in events if event.get("ev") == "call.started"
+                and event.get("role") == "cut" and event.get("branch") == branch
+                and not event.get("amends")), {})
+    return specs.parse_options(cut.get("options", ()))
+
+
+def _restore_trunk_options(branch: str, plan: Plan, checkout: Path, events: Sequence[dict], *,
+                           sh: Runner) -> None:
+    """Restore a merged cut's explicit options in its tracked plan file on the trunk."""
+    options = _cut_options(branch, events)
+    if not options:
+        return
+    paths = sh(["git", "ls-files", "--", f"docs/plan/{plan.draft}/plan.toml",
+                f"*/docs/plan/{plan.draft}/plan.toml"], cwd=str(checkout), check=True).out.splitlines()
+    paths = [path for path in paths if not path.startswith("old/")]
+    if len(paths) > 1:
+        raise ValueError(f"multiple plan.toml paths for {plan.draft}")
+    for relative in paths:
+        path = checkout / relative
+        text = path.read_text(encoding="utf-8")
+        restored = designer.restore_options(text, options)
+        if restored != text:
+            atomic.write(path, restored)
+            sh([*FAB_GIT, "commit", "-m", f"{plan.draft}: plan options restored", "--", relative],
+               cwd=str(checkout), check=True)
 
 
 def _settle_merge(merged: Result, checkout: Path, *, sh: Runner) -> str | None:
@@ -822,26 +855,38 @@ def _retire_plan(text: str) -> str:
 
 def _pre_deliver(action: Action, plan: Plan, plan_dir: Path, checkout: Path, *,
                  sh: Runner, log_path: Path | None) -> None:
-    """Commit a done retire chain's plan flag before delivery, unless already retired,
-    landed or absent from origin. Failures leave the finish open for a later tick.
+    """Commit retire's flag or a queue cut's options before delivering an ended chain.
+
+    Skip landed or absent branches. Restore only explicit root-cut options; a missing
+    cut plan does nothing. Failures leave the finish open for a later tick.
     """
-    if action.run_kind != "retire":
+    events = log.read(log_path)
+    options = _cut_options(action.branch, events) if action.run_kind == "cut" else {}
+    if action.run_kind != "retire" and not (plan.landing == "queue" and options):
         return
     if any(event.get("ev") == "branch.landed" and event.get("branch") == action.branch
-           for event in log.read(log_path)):
+           for event in events):
         return
     sh(["git", "fetch", "origin"], cwd=str(checkout), check=True)
     if not sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{action.branch}^{{commit}}"],
               cwd=str(checkout), check=False).ok:
         return
     path = (plan_dir.resolve().relative_to(checkout.resolve()) / "plan.toml").as_posix()
-    text = sh(["git", "show", f"origin/{action.branch}:{path}"],
-              cwd=str(checkout), check=True).out
-    if tomllib.loads(text).get("retired") is True:
-        return
-    spec_edit.commit_path(path, checkout, _retire_plan, branch=action.branch,
-                          trunk=action.branch, worktree=log.home() / "retire" / action.task,
-                          message=f"{plan.draft}: retired", sh=sh)
+    result = sh(["git", "show", f"origin/{action.branch}:{path}"],
+                cwd=str(checkout), check=action.run_kind == "retire")
+    if action.run_kind == "cut":
+        if not result.ok or designer.restore_options(result.out, options) == result.out:
+            return
+        edit = lambda text: designer.restore_options(text, options)
+        directory, message = "options", "plan options restored"
+    else:
+        if tomllib.loads(result.out).get("retired") is True:
+            return
+        edit = _retire_plan
+        directory, message = "retire", "retired"
+    spec_edit.commit_path(path, checkout, edit, branch=action.branch,
+                          trunk=action.branch, worktree=log.home() / directory / action.task,
+                          message=f"{plan.draft}: {message}", sh=sh)
 
 
 def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,

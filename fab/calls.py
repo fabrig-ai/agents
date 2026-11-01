@@ -491,24 +491,21 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: 
 def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
           log_path: Path | None = None, branch: str | None = None,
           amends: str | None = None, base: str = "main",
-          fields: Mapping[str, object] | None = None, report_only: bool = False) -> dict:
-    """Run a fresh call, keeping its own id, directory, brief, report and result artifacts.
-
-    Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/<base>, fetching first
-    when base is not main (also for fabrig), or fetch origin and
-    reset the supplied branch from origin/<branch> with worktree add -B. With report_only,
-    fetch origin and detach at origin/<base>, log no branch and push nothing; return
-    branch "" (docs/design/qa.md, 2). A supplied branch is a ValueError in this mode.
-    Rebind Call facts and insert the subject's user answers after them, before the next
-    # section or at the end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
-    brief before facts and answers are bound. Log call.started (including amends when
-    supplied, trunk when base is not main, and fields), run Claude without
-    nested-session environment markers, keep its stdout as
-    stream.jsonl and its stderr as stderr.log, then
-    log call.ended with the report's outcome, claude_usage(stdout).log_fields() and the
-    elapsed minutes, then wake the tick with `call <id>` beside log_path. Nothing ends a call
-    but TIMEOUT; a call cut short there is measured from what its stream holds. Remove the worktree even on failure; return {call, branch,
-    outcome, report}."""
+          fields: Mapping[str, object] | None = None, report_only: bool = False,
+          seed: Mapping[str, str] = {}) -> dict:
+    """Run a fresh call with its own id, brief, report and result artifacts.
+    Create FAB_HOME/calls/<id>/wt on calls/<id> from origin/<base>. Fetch first
+    for fabrig, non-main bases or a supplied branch; reset a supplied branch from
+    origin/<branch> with worktree add -B. report_only detaches at origin/<base>,
+    logs no branch, pushes nothing and rejects a supplied branch with ValueError.
+    Write seed's repository paths atomically after worktree add, add and commit
+    them as fab with `<subject's first segment>: plan options`; empty seed does nothing.
+    Bind Call facts and the subject's user answers before saving brief.md. Log
+    call.started with amends, non-main trunk and fields; run Claude up to TIMEOUT,
+    without nested session markers, keeping stream.jsonl and stderr.log. Log call.ended with the
+    report's outcome, usage and elapsed minutes; wake the tick beside log_path.
+    Remove the worktree even on failure; return {call, branch, outcome, report}.
+    """
     if role not in ROLES:
         raise ValueError(f"unknown call role {role!r}")
     if report_only and branch is not None:
@@ -534,6 +531,7 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
             f"origin/{branch}" if existing else f"origin/{base}"], cwd=str(repo), check=True)
     began = time.monotonic()
     try:
+        _seed_call(worktree, seed, subject, sh=sh)
         atomic.write(brief_path, brief)
         fields = dict(fields or {})
         if report_only:
@@ -546,22 +544,45 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
             fields["trunk"] = base
         log.append("call.started", path=log_path, call=call_id, role=role, subject=subject,
                    **fields)
-        environment = {key: value for key, value in os.environ.items()
-                       if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
-        result = sh(claude_argv(brief_path, worktree, effort=role_effort(role)), cwd=str(worktree),
-                    timeout=TIMEOUT,
-                    env=environment)
-        atomic.write(directory / "stream.jsonl", result.out)
-        atomic.write(directory / "stderr.log", result.err)
-        status = _call_result(report_path)
-        if fabrig and not report_only:
-            sh(["git", "push", "origin", branch], cwd=str(repo), check=True)
-        log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
-                   outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
-        wake.want(f"call {call_id}", path=wake.want_path(log_path))
-        return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
+        return _call_output(role, subject, call_id, directory, repo, branch, began,
+                            fabrig=fabrig, report_only=report_only, sh=sh, log_path=log_path)
     finally:
         sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
+
+
+def _seed_call(worktree: Path, seed: Mapping[str, str], subject: str, *, sh: Runner) -> None:
+    """Write and commit supplied repository paths before the call starts."""
+    if not seed:
+        return
+    for path, text in seed.items():
+        relative = Path(path)
+        if relative.is_absolute() or not (worktree / relative).resolve().is_relative_to(worktree.resolve()):
+            raise ValueError(f"seed path must be relative to the worktree: {path}")
+        atomic.write(worktree / relative, text)
+    sh(["git", "add", "--", *seed], cwd=str(worktree), check=True)
+    sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost", "commit", "-m",
+        f"{subject.split('/')[0]}: plan options"], cwd=str(worktree), check=True)
+
+
+def _call_output(role, subject, call_id, directory, repo, branch, began, *,
+                 fabrig, report_only, sh, log_path):
+    """Run the call and record its output, outcome and wake request."""
+    worktree = directory / "wt"
+    brief_path, report_path = directory / "brief.md", directory / "report.md"
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("CLAUDECODE", "CLAUDE_CODE_"))}
+    result = sh(claude_argv(brief_path, worktree, effort=role_effort(role)), cwd=str(worktree),
+                timeout=TIMEOUT,
+                env=environment)
+    atomic.write(directory / "stream.jsonl", result.out)
+    atomic.write(directory / "stderr.log", result.err)
+    status = _call_result(report_path)
+    if fabrig and not report_only:
+        sh(["git", "push", "origin", branch], cwd=str(repo), check=True)
+    log.append("call.ended", path=log_path, call=call_id, role=role, subject=subject,
+               outcome=status, **claude_usage(result.out).log_fields(), minutes=(time.monotonic() - began) / 60)
+    wake.want(f"call {call_id}", path=wake.want_path(log_path))
+    return {"call": call_id, "branch": branch, "outcome": status, "report": str(report_path)}
 
 
 def _bind_brief(text: str, call_id: str, branch: str, report: str, answers: str) -> str:

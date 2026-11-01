@@ -6,6 +6,7 @@ import json
 import os
 import shlex
 import threading
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
@@ -4936,6 +4937,60 @@ class IntegrationMergeTest(unittest.TestCase):
         self.assertEqual(len([entry for entry in records if entry["ev"] == "branch.landed"]), 3)
         self.assertEqual(units(self.runner), [])
 
+    def test_cut_restores_missing_and_changed_options_on_trunk_for_each_push(self):
+        relative = "skein/docs/plan/draft/plan.toml"
+        first = self.branch("calls/cut", relative, 'draft = "draft"\n[[part]]\nid = "core"\n')
+        log.append(path=self.path, **call_started("cut", "cut", "draft/cut",
+                   options=["ready=false", "landing='integration'"]))
+        tips = [first]
+        for ended in (False, True):
+            if ended:
+                git(self.checkout, "switch", "-q", "calls/cut")
+                git(self.checkout, "merge", "-q", "--ff-only", self.plan.trunk)
+                write(self.checkout / relative, 'draft = "draft"\nready = true\nlanding = "queue"\n'
+                      '[[part]]\nid = "core"\n')
+                git(self.checkout, "commit", "-q", "-a", "-m", "Extend cut")
+                tips.append(git(self.checkout, "rev-parse", "HEAD"))
+                git(self.checkout, "push", "-q", "origin", "calls/cut")
+                git(self.checkout, "switch", "-q", self.plan.trunk)
+                log.append(path=self.path, **call_ended("cut"))
+            self.assertTrue(dispatch._merge_branch("calls/cut", self.plan, self.checkout,
+                            sh=self.runner, log_path=self.path))
+            trunk = git(self.origin, "rev-parse", self.plan.trunk)
+            self.assertEqual(git(self.origin, "log", "-1", "--format=%s", trunk),
+                             "draft: plan options restored")
+            self.assertEqual(git(self.origin, "log", "-1", "--format=%an", trunk), "fab")
+            parsed = tomllib.loads(git(self.origin, "show", f"{trunk}:{relative}"))
+            self.assertEqual((parsed["ready"], parsed["landing"]), (False, "integration"))
+            self.assertEqual(git(self.origin, "rev-parse", "calls/cut"), tips[-1])
+        commits = [call for call in self.runner.calls if "plan options restored" in " ".join(call.argv)]
+        self.assertEqual(len(commits), 2)
+        for commit in commits:
+            self.assertEqual(commit.argv[:5], list(dispatch.FAB_GIT))
+            self.assertEqual(commit.cwd, str(self.checkout))
+            self.assertEqual(self.runner.calls[self.runner.calls.index(commit) + 1].argv[:3],
+                             ["git", "push", "origin"])
+        self.assertEqual(git(self.origin, "rev-parse", "main"), self.base)
+
+    def test_cut_equivalent_option_spelling_needs_no_restore_commit(self):
+        relative = "docs/plan/draft/plan.toml"
+        text = "draft='draft'\nlanding='integration' # alternate spelling\nready=false\n"
+        tip = self.branch("calls/cut", relative, text)
+        log.append(path=self.path, **call_started("cut", "cut", "draft/cut",
+                   options=['landing="integration"', 'ready=false']))
+        self.assertTrue(dispatch._merge_branch("calls/cut", self.plan, self.checkout,
+                        sh=self.runner, log_path=self.path))
+        self.assertEqual((self.checkout / relative).read_text(), text)
+        self.assertEqual(git(self.origin, "rev-parse", "calls/cut"), tip)
+        self.assertFalse(any("commit" in argv for argv in self.runner.argvs()))
+
+    def test_cut_missing_plan_merges_without_restore(self):
+        self.branch("calls/cut")
+        log.append(path=self.path, **call_started("cut", "cut", "draft/cut", options=['ready=false']))
+        self.assertTrue(dispatch._merge_branch("calls/cut", self.plan, self.checkout,
+                        sh=self.runner, log_path=self.path))
+        self.assertFalse(any("commit" in argv for argv in self.runner.argvs()))
+
     def test_running_cut_conflict_is_noted_and_resolved_push_retries(self):
         tip = self.branch("calls/cut", "README.md", "cut edits\n")
         write(self.checkout / "README.md", "trunk edits\n")
@@ -5236,6 +5291,120 @@ class RetireFinishTest(unittest.TestCase):
         self.assertEqual(self.fake.argvs()[-1], ["merge", "retired-tip"])
         self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
         self.land.assert_not_called()
+
+
+class CutOptionsFinishTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.checkout = self.home / "checkout"
+        self.directory = write_plan(self.checkout / "skein/docs/plan/draft", "draft")
+        self.plan, self.tasks = plan.load(self.directory)
+        self.path = self.home / "events.jsonl"
+        self.relative = "skein/docs/plan/draft/plan.toml"
+        self.worktree = log.home() / "options/root"
+        self.action = Action("finish", task="root", run="root", run_kind="cut", branch="calls/root")
+        self.branch_text = 'draft = "draft"\nlanding = "integration"\nready = true\n[[part]]\nid = "core"\n'
+        self.options = ['landing="queue"', 'ready=false']
+        self.fake = (FakeRunner()
+                     .on(["git", "rev-parse", "--verify"], Result(0, "branch-tip"))
+                     .on(["git", "show"], lambda call: Result(0, self.branch_text))
+                     .on(["git", "worktree", "add"], self.populate)
+                     .on(["git", "push", "-q", "--force"], self.pushed))
+        self.deliver = self.enterContext(patch.object(dispatch, "_deliver", side_effect=lambda *a, **kw:
+                                                     self.fake(["deliver", a[0]], check=True).ok))
+        self.enterContext(redirect_stdout(io.StringIO()))
+        history = chain_history("approved", role="cut", subject="draft/cut")
+        history[0]["options"] = self.options
+        for entry in history:
+            log.append(path=self.path, **entry)
+
+    def populate(self, call):
+        write(self.worktree / self.relative, self.branch_text)
+        return Result(0)
+
+    def pushed(self, call):
+        self.branch_text = (self.worktree / self.relative).read_text()
+        return Result(0)
+
+    def take(self):
+        dispatch._take(self.action, self.tasks, {}, self.directory, plan=self.plan,
+                       checkout=self.checkout, sh=self.fake, log_path=self.path)
+
+    def test_queue_cut_restores_root_options_on_branch_before_delivery(self):
+        original = (self.directory / "plan.toml").read_text()
+        log.append(path=self.path, **call_started("amend", "amend", "draft/cut",
+                   branch="calls/root", amends="root", options=['ready=true']))
+        log.append(path=self.path, **call_ended("amend"))
+        self.take()
+        restored = tomllib.loads(self.branch_text)
+        self.assertEqual((restored["landing"], restored["ready"]), ("queue", False))
+        self.assertEqual((self.directory / "plan.toml").read_text(), original)
+        commit = [*dispatch.FAB_GIT, "commit", "-q", "-m", "draft: plan options restored", "--", self.relative]
+        push = ["git", "push", "-q", "--force", "origin", "HEAD:refs/heads/calls/root"]
+        commands = self.fake.argvs()
+        self.assertIn(["git", "worktree", "add", "-B", "calls/root", str(self.worktree),
+                       "origin/calls/root"], commands)
+        self.assertLess(commands.index(commit), commands.index(push))
+        self.assertLess(commands.index(push), commands.index(["deliver", "calls/root"]))
+        self.assertEqual(next(call.cwd for call in self.fake.calls if call.argv == commit),
+                         str(self.worktree))
+        self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+
+    def test_queue_cut_equal_values_and_missing_plan_still_deliver(self):
+        for scenario in ("equal", "missing", "missing-in-worktree"):
+            with self.subTest(scenario=scenario):
+                self.fake.calls.clear()
+                self.branch_text = "landing='queue' # same\nready=false\n"
+                if scenario == "missing":
+                    self.fake.rules.insert(0, (["git", "show"], Result(128, err="path absent")))
+                elif scenario == "missing-in-worktree":
+                    self.branch_text = 'draft = "draft"\n'
+                    self.fake.rules.insert(0, (["git", "worktree", "add"], Result(0)))
+                self.take()
+                if scenario != "equal":
+                    self.fake.rules.pop(0)
+                self.assertEqual(self.fake.argvs()[-1], ["deliver", "calls/root"])
+                self.assertFalse(any("commit" in argv for argv in self.fake.argvs()))
+                self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+
+    def test_queue_cut_guards_skip_restore(self):
+        for guard in ("landed", "gone", "no-options", "integration", "other-role"):
+            with self.subTest(guard=guard):
+                self.path = self.home / f"{guard}.jsonl"
+                history = chain_history("approved", role="cut", subject="draft/cut")
+                if guard != "no-options":
+                    history[0]["options"] = self.options
+                for entry in history:
+                    log.append(path=self.path, **entry)
+                if guard == "landed":
+                    log.append("branch.landed", path=self.path, branch="calls/root")
+                self.plan = replace(self.plan, landing="integration" if guard == "integration" else "queue")
+                self.action = replace(self.action, run_kind="answer" if guard == "other-role" else "cut")
+                self.fake.calls.clear()
+                if guard == "gone":
+                    self.fake.rules.insert(0, (["git", "rev-parse", "--verify"], Result(128)))
+                self.take()
+                if guard == "gone":
+                    self.fake.rules.pop(0)
+                self.assertFalse(any("worktree" in argv or "commit" in argv for argv in self.fake.argvs()))
+                self.assertEqual(self.fake.argvs()[-1], ["deliver", "calls/root"])
+                if guard != "gone":
+                    self.assertEqual(self.fake.argvs(), [["deliver", "calls/root"]])
+
+    def test_queue_cut_restore_failures_leave_finish_open_and_retry(self):
+        for failure in ([*dispatch.FAB_GIT, "commit"], ["git", "push", "-q", "--force"]):
+            with self.subTest(failure=failure):
+                self.fake.rules.insert(0, (failure, Result(1, err="refused")))
+                self.take()
+                self.deliver.assert_not_called()
+                records = log.read(self.path)
+                self.assertIn("finish root failed:", records[-1]["text"])
+                self.assertFalse(any(entry["ev"] == "call.finished" for entry in records))
+                self.assertEqual(call_review.chains(records)["root"].state, "approved")
+                self.fake.rules.pop(0)
+        self.take()
+        self.deliver.assert_called_once()
+        self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
 
 
 class IntegrationDeliveryTest(unittest.TestCase):

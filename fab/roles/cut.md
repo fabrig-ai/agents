@@ -13,8 +13,7 @@ Prefer task boundaries and an order that keep this draft's early work off files 
 (`docs/design/tick.md`, 2), and task specs for direct parts as below. Write
 nothing else unless a design must say where the draft's work goes:
 
-- **`draft`, `repo`, `sources`** (the draft's paths, as given) and
-  `[buffer]` `low = 1.0`, `high = 2.0`.
+- **`[buffer]`** `low = 1.0`, `high = 2.0`.
 - **The parts:** each `[[part]]` one concept small enough for one skeleton
   call, about 2-6 tasks (or direct as below), with `id`, `title`, `mode`
   (feature, migration, fix, probe or direct), `needs` and `design` (the

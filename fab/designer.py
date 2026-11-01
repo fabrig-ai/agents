@@ -13,6 +13,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import tomllib
 from collections.abc import Mapping, Sequence
 from contextlib import redirect_stdout
 from dataclasses import replace
@@ -26,6 +27,7 @@ from fab.sh import Failed, Runner, run
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
 DESIGNS = "docs/design"  # a repository's designs; its draft/ holds the user's drafts
 PLANS = "docs/plan"  # plans live under this suffix, with any repository-relative prefix
+OPTION_COMMENT = "# Plan options, written by fab call cut --set; keep them"
 BESIDE_LINES = 200  # lines of other drafts in a cut brief, before the omitted count (integration.md 4)
 
 
@@ -54,6 +56,73 @@ def uncut(draft: str, repo: str, sources: Sequence[str] = (),
     being cut runs on it (fab.dispatch.tick). It inherits Plan's integration and ready defaults, without reviews and
     with every part direct (integration.md 3); parsed options replace them."""
     return replace(Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ()), **(options or {}))
+
+
+def plan_seed(plan: Plan, options: Mapping[str, object] = {}) -> str:
+    """Render draft, repo and sources for every cut, then only its explicit options.
+
+    Options follow OPTION_COMMENT, one JSON-rendered assignment per key, in order.
+    Pure; options are already parsed by parse_options (integration.md 3, The cut's inputs).
+    """
+    facts = {"draft": plan.draft, "repo": plan.repo, "sources": list(plan.sources)}
+    lines = [f"{key} = {json.dumps(value)}" for key, value in facts.items()]
+    if options:
+        lines.extend([OPTION_COMMENT, _option_lines(options)])
+    return "\n".join(lines) + "\n"
+
+
+def _option_lines(options: Mapping[str, object]) -> str:
+    """Render parsed plan options as top-level TOML assignments, in entry order."""
+    return "\n".join(f"{key} = {json.dumps(value)}" for key, value in options.items())
+
+
+def restore_options(text: str, options: Mapping[str, object]) -> str:
+    """Restore explicit options in plan.toml, comparing parsed values before editing.
+
+    Empty text or options, or equal values, returns text unchanged. Otherwise remove
+    every top-level assignment of those keys and write them under OPTION_COMMENT,
+    preserving other statements and tables. Insert a missing comment before the
+    first table. Invalid TOML raises ValueError. Pure (integration.md 3, The cut's inputs).
+    """
+    if not text or not options:
+        return text
+    parsed = tomllib.loads(text)
+    if all(type(parsed.get(key)) is type(value) and parsed[key] == value
+           for key, value in options.items()):
+        return text
+    statements, tables = _plan_header(text)
+    kept, written = [], False
+    for statement in statements:
+        if options.keys() & tomllib.loads(statement).keys():
+            continue
+        if statement.strip() == OPTION_COMMENT:
+            if not written:
+                kept.append(OPTION_COMMENT + "\n" + _option_lines(options) + "\n")
+                written = True
+        else:
+            kept.append(statement)
+    header = "".join(kept)
+    if not written:
+        header += "\n" if header and not header.endswith("\n") else ""
+        header += OPTION_COMMENT + "\n" + _option_lines(options) + "\n"
+    return header + tables
+
+
+def _plan_header(text: str) -> tuple[list[str], str]:
+    """Split complete top-level TOML statements from the tables, keeping multiline values."""
+    lines = text.splitlines(keepends=True)
+    statements, pending = [], ""
+    for index, line in enumerate(lines):
+        if not pending and line.lstrip().startswith("["):
+            return statements, "".join(lines[index:])
+        pending += line
+        try:
+            tomllib.loads(pending)
+        except tomllib.TOMLDecodeError:
+            continue
+        statements.append(pending)
+        pending = ""
+    return statements, ""
 
 
 def repository(checkout: Path, *, sh: Runner = run) -> str:
@@ -250,7 +319,7 @@ def drafts_beside(plan: Plan, plans: Sequence[tuple[Plan, Mapping[str, Task]]],
 
 def _cut_role_options(plan: Plan, parsed: Mapping[str, object],
                       plan_path: str) -> tuple[bool, str, list[tuple[str, str]]]:
-    """Return the effective cut role and option sections (docs/design/calls.md, 3)."""
+    """Return the cut role and options fab wrote atop plan.toml, which the cut keeps."""
     direct = parsed.get("direct", plan.direct)
     run_role = direct and parsed.get("landing", plan.landing) == "integration"
     if run_role:
@@ -262,8 +331,8 @@ def _cut_role_options(plan: Plan, parsed: Mapping[str, object],
     option_sections = []
     text = ""
     if parsed:
-        lines = "\n".join(f"{key} = {json.dumps(value)}" for key, value in parsed.items())
-        text = ("Write these keys at the top of plan.toml, before the first table, verbatim:\n\n"
+        lines = _option_lines(parsed)
+        text = ("Fab wrote these keys at the top of plan.toml; keep them as they are:\n\n"
                 f"```toml\n{lines}\n```")
     if direct and not run_role:
         role_text += "\n\n" + calls.ROLES["cut"].with_name("cut-direct.md").read_text(encoding="utf-8")
@@ -287,8 +356,8 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     1. `Role`: cut-run.md alone for a direct integration plan; otherwise
        fab.calls.ROLES["cut"]'s text and the repository and direct-mode notes that apply.
     2. `Call facts`.
-    3. `The draft`: `- Draft: <draft>`, `- Repository: <repo>`, `- Plan: write
-       \\`<PLANS>/<draft>/plan.toml\\``, `- Sources: \\`<source>\\`, ...` (comma-separated).
+    3. `The draft`: `- Draft: <draft>`, `- Repository: <repo>`, `- Plan: \\`<PLANS>/<draft>/plan.toml\\` exists on your branch with draft, repo,
+       sources and fab's plan options; add buffer and tables below, keeping those lines`, `- Sources: \\`<source>\\`, ...` (comma-separated).
     4. `The user's drafts`: fab.calls.drafts_text(plan, root).
     5. `Drafts beside this one`: beside, or `(none)` when empty; omitted for None (integration.md 4).
     6. `Designs`: design_index(root).
@@ -301,7 +370,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     are left out (cut-run.md holds the formats).
 
     When options are given, insert `Plan options` after `The draft`, with parsed
-    KEY = VALUE lines to write verbatim at the top of plan.toml. With direct=true
+    KEY = VALUE lines fab wrote at the top of plan.toml, to keep as they are. With direct=true
     (the plan's default unless overridden), except when cut-run.md supplies the role,
     include that section's instructions for direct parts, task specs written by the cut,
     shared notes under the plan's notes/ cited by repository path, and needs naming tasks
@@ -317,7 +386,9 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
         ("Role", role_text),
         ("Call facts", calls._facts(call_id, branch, report)),
         ("The draft", f"- Draft: {plan.draft}\n- Repository: {plan.repo}\n"
-         f"- Plan: write `{plan_path}/plan.toml`\n"
+         f"- Plan: `{plan_path}/plan.toml` exists on your branch with `draft`, `repo`, "
+         "`sources` (and fab's plan options); add `[buffer]` and the tables below those lines, "
+         "never repeating or changing them\n"
          f"- Sources: {', '.join(f'`{source}`' for source in plan.sources)}"),
         *option_sections,
         # A run's cut gets its sources under their own name, and reads what each implementer is
@@ -477,7 +548,7 @@ def main(argv: list[str]) -> int:
       before preparing the checkout. Ready cuts load the listed plans without fetching
       for `Drafts beside this one` (integration.md 4); loader messages go to stderr. An integration
       cut requires root's upstream to be origin/<draft>/integration. Without --brief-only,
-      enlist(PLAN_DIR) before the call;
+      enlist(PLAN_DIR) and seed plan.toml with plan_seed before the call;
       raw option entries are logged in call.started's options.
     - `fab call contract PART --plan PLAN_DIR`: fab.calls.skeleton_brief with role
       contract; ValueError for an unknown part or one the plan does not mark contract.
@@ -508,7 +579,8 @@ def main(argv: list[str]) -> int:
         fields = {"options": args.set} if args.role == "cut" and args.set else None
         base = "main" if args.role == "retire" and integration.trunk_landed(plan, events) else plan.trunk
         result = calls.start(args.role, subject(plan.draft, args.role, getattr(args, "part", None)),
-                             repo, text, sh=run, base=base, fields=fields)
+                             repo, text, sh=run, base=base, fields=fields,
+                             seed={f"{plan_path}/plan.toml": plan_seed(plan, options)} if args.role == "cut" else {})
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
     except calls.BriefError as error:

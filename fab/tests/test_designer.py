@@ -1,6 +1,7 @@
 """Designer calls compile contracts from plans and history (docs/design/calls.md, 3)."""
 
 import io
+import tomllib
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
@@ -105,6 +106,54 @@ class SubjectTest(unittest.TestCase):
         plan = designer.uncut("draft", "agents", [SOURCE], options)
         self.assertEqual(plan, replace(designer.uncut("draft", "agents", [SOURCE]), **options))
         self.assertEqual(plan.trunk, "main")
+
+
+class PlanOptionsTest(unittest.TestCase):
+    def test_seed_contains_facts_and_only_explicit_options(self):
+        plan = designer.uncut("demo", "fabrig", ['skein/draft/"idea".md', "other.md"])
+        for options in ({}, parse_options(["ready=false", "landing='integration'", "ready=true"])):
+            with self.subTest(options=options):
+                text = designer.plan_seed(plan, options)
+                self.assertEqual(tomllib.loads(text), dict(draft=plan.draft, repo=plan.repo,
+                                                          sources=list(plan.sources), **options))
+                self.assertEqual(designer.OPTION_COMMENT in text, bool(options))
+                if options:
+                    self.assertTrue(text.endswith('ready = true\nlanding = "integration"\n'))
+
+    def test_restore_reuses_comment_and_preserves_other_keys_and_tables(self):
+        text = ('draft = "demo"\nsources = [\n "draft.md",\n]\n'
+                '# Plan options, written by fab call cut --set; keep them\n'
+                'ready = true # cut changed it\nreviews = true\n'
+                '  "landing" = """\nqueue"""\n'
+                '[buffer]\nlow = 1.0\n[[part]]\nid = "one"\nready = true\n')
+        options = parse_options(["ready=false", 'landing="integration"'])
+        restored = designer.restore_options(text, options)
+        self.assertEqual(restored, ('draft = "demo"\nsources = [\n "draft.md",\n]\n'
+                         '# Plan options, written by fab call cut --set; keep them\n'
+                         'ready = false\nlanding = "integration"\nreviews = true\n'
+                         '[buffer]\nlow = 1.0\n[[part]]\nid = "one"\nready = true\n'))
+        self.assertEqual(designer.restore_options(restored, options), restored)
+
+    def test_restore_inserts_comment_before_tables_and_handles_no_final_newline(self):
+        for text in ('draft = "demo"\n  [[part]]\nid = "core"\n', 'draft = "demo"'):
+            with self.subTest(text=text):
+                restored = designer.restore_options(text, {"ready": False, "early": False})
+                self.assertEqual(tomllib.loads(restored)["ready"], False)
+                self.assertEqual(tomllib.loads(restored)["early"], False)
+                self.assertIn('\n# Plan options, written by fab call cut --set; keep them\n'
+                              'ready = false\nearly = false\n', restored)
+                if "[[part]]" in text:
+                    self.assertTrue(restored.endswith('  [[part]]\nid = "core"\n'))
+
+    def test_restore_compares_values_and_leaves_absent_plan_or_options_alone(self):
+        for text, options in (("", {"ready": False}), ("not TOML", {}),
+                               ("landing = 'integration' # same\nready=false\n",
+                                {"landing": "integration", "ready": False})):
+            with self.subTest(text=text):
+                self.assertEqual(designer.restore_options(text, options), text)
+        self.assertIn("ready = true", designer.restore_options("ready = 1\n", {"ready": True}))
+        with self.assertRaises(ValueError):
+            designer.restore_options("not TOML", {"ready": True})
 
 
 class FilesTest(unittest.TestCase):
@@ -571,7 +620,9 @@ class BriefTest(unittest.TestCase):
         text = self.cut()
         self.sections(text, ["Role", "Call facts", "The draft", "The user's drafts", "Designs", "Plans", "Inventory"])
         for fragment in (calls.ROLES["cut"].read_text(), "- Draft: new", "- Repository: agents",
-                         "- Plan: write `docs/plan/new/plan.toml`", f"- Sources: `{SOURCE}`",
+                         "- Plan: `docs/plan/new/plan.toml` exists on your branch with `draft`, `repo`, "
+                         "`sources` (and fab's plan options); add `[buffer]` and the tables below those lines, "
+                         "never repeating or changing them", f"- Sources: `{SOURCE}`",
                          "The user's draft, whole.", f"- `{DESIGN}` — Core design (4 lines;",
                          "- `docs/plan/demo/plan.toml`", "Existing primitive."):
             self.assertIn(fragment, text)
@@ -613,7 +664,7 @@ class BriefTest(unittest.TestCase):
         plan = designer.uncut("new", "agents", [SOURCE])
         text = designer.cut_brief(plan, self.root, **FACTS,
                                   options=["reviews=true", "landing='integration'", "reviews=false"])
-        self.assertIn("Write these keys at the top of plan.toml, before the first table, verbatim:", text)
+        self.assertIn("Fab wrote these keys at the top of plan.toml; keep them as they are:", text)
         self.assertIn('```toml\nreviews = false\nlanding = "integration"\n```', text)
         self.assertLess(text.index("# The draft\n"), text.index("# Plan options\n"))
         self.assertLess(text.index("# Plan options\n"), text.index("# Sources\n"))
@@ -722,7 +773,7 @@ class BriefTest(unittest.TestCase):
         text = designer.cut_brief(plan, self.root, **FACTS)
         variant = calls.ROLES["cut"].with_name("cut-fabrig.md").read_text()
         self.assertIn(variant, text)
-        for fragment in ("Rust", "heavy cargo check -p <crate>", "tasks/", "globs", 'repo = "fabrig"'):
+        for fragment in ("Rust", "heavy cargo check -p <crate>", "tasks/", "globs", "- Repository: fabrig"):
             self.assertIn(fragment, text)
 
     def test_empty_cut_sections_and_sources_in_order(self):
@@ -882,12 +933,13 @@ class MainTest(unittest.TestCase):
                 result, text, errors = self.invoke("cut", "--source", SOURCE,
                                                    directory=self.root / relative)
                 self.assertEqual((result, errors), (0, ""))
-                self.assertIn(f"- Plan: write `{relative}/plan.toml`", text)
+                self.assertIn(f"- Plan: `{relative}/plan.toml`", text)
                 self.assertIn(f"- Sources: `{SOURCE}`", text)
                 self.assertIn("The user's draft, whole.", text)
-                self.assertNotIn("- Plan: write `docs/plan/component-kit/plan.toml`", text)
+                self.assertNotIn("- Plan: `docs/plan/component-kit/plan.toml`", text)
                 start.assert_not_called()
                 self.assertFalse((log.home() / "plans").exists())
+                self.assertFalse((self.root / relative / "plan.toml").exists())
 
     def test_nested_decision_and_retire_use_plan_directory(self):
         relative = "skein/docs/plan/demo"
@@ -954,7 +1006,8 @@ class MainTest(unittest.TestCase):
             self.assertEqual((log.home() / "plans").read_text(), f"{directory}\n")
             self.assertEqual((role, subject, root), ("cut", "new/cut", self.root))
             self.assertIn("The user's draft, whole.", brief)
-            self.assertEqual(options, dict(sh=self.fake, base="new/integration", fields=None))
+            self.assertEqual(options, dict(sh=self.fake, base="new/integration", fields=None,
+                             seed={"docs/plan/new/plan.toml": f'draft = "new"\nrepo = "agents"\nsources = ["{SOURCE}"]\n'}))
             return dict(outcome="done", branch="calls/cut-id")
         with patch.object(calls, "start", side_effect=start) as launch:
             result, text, errors = self.invoke("cut", "--source", SOURCE, directory=directory, brief_only=False)
@@ -969,7 +1022,11 @@ class MainTest(unittest.TestCase):
         def claude(call):
             worktree = Path(call.cwd)
             text = (worktree.parent / "brief.md").read_text()
-            self.assertIn('# Plan options\n\nWrite these keys at the top of plan.toml, before the first table, verbatim:', text)
+            self.assertIn('# Plan options\n\nFab wrote these keys at the top of plan.toml; keep them as they are:', text)
+            self.assertEqual((worktree / 'skein/docs/plan/new/plan.toml').read_text(),
+                             f'draft = "new"\nrepo = "agents"\nsources = ["{SOURCE}"]\n'
+                             '# Plan options, written by fab call cut --set; keep them\n'
+                             'landing = "integration"\nready = false\nreviews = false\ndirect = true\n')
             self.assertIn('```toml\nlanding = "integration"\nready = false\nreviews = false\ndirect = true\n```', text)
             self.assertIn(calls.ROLES["cut"].with_name("cut-run.md").read_text(), text)
             self.assertNotIn("`skein/docs/plan/new/notes/<name>.md`", text)

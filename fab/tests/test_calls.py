@@ -625,6 +625,45 @@ class ClaudeUsageTest(unittest.TestCase):
 
 
 class StartTest(unittest.TestCase):
+    def test_seed_is_written_and_committed_before_call_started(self):
+        with tmp_home() as root:
+            seed = {"docs/plan/demo/plan.toml": 'draft = "demo"\n', "notes/input.md": "Input\n"}
+            fake = FakeRunner()
+
+            def commit(call):
+                self.assertEqual(log.read(), [])
+                self.assertEqual(fake.argvs()[0][:3], ["git", "worktree", "add"])
+                worktree = Path(call.cwd)
+                for path, text in seed.items():
+                    self.assertEqual((worktree / path).read_text(), text)
+                self.assertEqual(fake.argvs()[-2], ["git", "add", "--", *seed])
+                return Result(0)
+
+            fake.on(["git", "-c"], commit)
+            result = calls.start("cut", "demo/cut", root, "Brief.", seed=seed, sh=fake)
+            worktree = Path(result["report"]).parent / "wt"
+            self.assertEqual(fake.argvs()[2], ["git", "-c", "user.name=fab", "-c",
+                             "user.email=fab@localhost", "commit", "-m", "demo: plan options"])
+            self.assertEqual(fake.calls[1].cwd, str(worktree))
+            self.assertEqual([entry["ev"] for entry in log.read()], ["call.started", "call.ended"])
+
+    def test_empty_seed_runs_no_add_or_commit(self):
+        with tmp_home() as root:
+            fake = FakeRunner()
+            calls.start("cut", "demo/cut", root, "Brief.", seed={}, sh=fake)
+            self.assertEqual(len(fake.argvs()), 3)
+            self.assertFalse(any("commit" in argv or "add" in argv[1:2] for argv in fake.argvs()))
+
+    def test_seed_commit_failure_cleans_worktree_without_starting_call(self):
+        with tmp_home() as root:
+            fake = FakeRunner().on(["git", "-c"], Result(1, err="commit refused"))
+            with self.assertRaises(Failed):
+                calls.start("cut", "demo/cut", root, "Brief.", sh=fake,
+                            seed={"docs/plan/demo/plan.toml": 'draft = "demo"\n'})
+            self.assertEqual(log.read(), [])
+            self.assertEqual(fake.argvs()[-1][:4], ["git", "worktree", "remove", "--force"])
+            self.assertFalse(any(argv[0] == "claude" for argv in fake.argvs()))
+
     def test_reply_report_only_call_uses_medium_effort_and_records_usage(self):
         with tmp_home() as root:
             def claude(call):

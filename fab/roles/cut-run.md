@@ -84,13 +84,10 @@ push), `## Report`.
 
 ## What you write
 
-- `plan.toml`, with the plan options this brief gives at its top:
+- `plan.toml` exists on your branch with `draft`, `repo`, `sources` and
+  fab's plan options; add below them:
 
   ```toml
-  draft = "<draft>"
-  repo = "fabrig"
-  sources = ["<path>", ...]
-  # the plan options, verbatim
   [[part]]
   id = "<part>"
   title = "<one line>"

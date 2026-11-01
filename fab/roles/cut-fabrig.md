@@ -3,7 +3,7 @@
 For this fabrig call, these rules replace the Python-specific instructions
 above. Read fabrig's `AGENTS.md` and each affected tree's `AGENTS.md`.
 The plan belongs beside its sources in its tree, at the plan path in this
-brief, such as `skein/docs/plan/<draft>/plan.toml`; set `repo = "fabrig"`.
+brief, such as `skein/docs/plan/<draft>/plan.toml`.
 Specs for direct parts belong in that plan's `tasks/`.
 
 - Cut along the workspace's crate and module layout:
