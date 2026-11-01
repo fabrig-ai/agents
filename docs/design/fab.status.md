@@ -26,9 +26,9 @@
 - **Logins:** `fab logins` (13.13): the shelf, capture, lend, return, swap,
   retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
   machine's logins, the user's new sign-ins and QA's six (moved 11-01).
-  `fab after-landing --live` borrows them for `live-temper` and
-  `live-smith`; the after-landing unit runs without it. `live-skein` waits for
-  its tests to read a login's file.
+  `fab after-landing --live` borrows them for `live-temper`, `live-smith`
+  and `live-skein` (whose tests read logins' files once fabrig's
+  `ready/logins/skein-live` lands); the after-landing unit runs without it.
 
 ## Gaps and departures
 

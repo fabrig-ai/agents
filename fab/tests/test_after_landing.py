@@ -503,7 +503,8 @@ class AfterLandingTest(unittest.TestCase):
     def live_runner(self, shelf):
         """A --live runner on builder b1 whose `fab logins` calls to hel8 answer from shelf:
         borrow KIND -> the next id of shelf[KIND] (none left: refused), return -> ok unless
-        the id is in shelf["stuck"]."""
+        the id is in shelf["stuck"]; the local refresh `fab logins account` answers
+        shelf["refresh"] (default an account)."""
         machines = {"hel8": Host("hel8", "free@hel8", ("dispatcher",)), "b1": Host("b1", "free@b1", ("builder",))}
         self.enterContext(patch.dict(os.environ, {"FAB_HOST": "b1"}))
         self.configured.update({profile: tiers.Pair(profile, *profile.rsplit("-", 1), ("pkg",), ())
@@ -523,19 +524,33 @@ class AfterLandingTest(unittest.TestCase):
             return Result(1, "", "fab logins: changed\n") if argv[1] in shelf.get("stuck", ()) else Result(0)
 
         self.sh.on(["ssh"], shelf_call)
+        self.refreshes = []
+
+        def refresh(call):
+            self.refreshes.append(call.argv[3:])
+            return shelf.get("refresh", Result(0, '{"email": "a@example.invalid"}\n'))
+
+        self.sh.on(["fab", "logins", "account"], refresh)
         return AfterLanding(1, sh=self.sh, tier_set=self.profiles, live=True, known=machines)
 
     def test_live_pairs_borrow_their_logins_from_the_dispatcher_and_return_them(self):
-        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": ["claude-box-1", "claude-box-2"]})
-        self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-smith"))
+        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": ["claude-box-1", "claude-box-2"],
+                                   "codex": ["codex-7"], "claude": ["claude-9"]})
+        self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-smith", "live-skein"))
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "green")
         directory = Path(record["log"])
-        temper, smith = self.envs[2], self.envs[3]
+        temper, smith, skein = self.envs[2], self.envs[3], self.envs[4]
         self.assertEqual(self.envs[:2], [{}, {}])
         self.assertEqual(temper, {"TEMPER_LIVE_ACCOUNT": str(directory / "logins/TEMPER_LIVE_ACCOUNT/login"),
                                   "TEMPER_LIVE_CLAUDE": str(directory / "logins/TEMPER_LIVE_CLAUDE")})
         self.assertEqual(smith, {"SMITH_LIVE_CLAUDE": str(directory / "logins/SMITH_LIVE_CLAUDE")})
+        openai, anthropic = directory / "logins/SKEIN_TEST_LIVE_OPENAI_AUTH", \
+            directory / "logins/SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS"
+        self.assertEqual(skein, {"SKEIN_TEST_LIVE_OPENAI_AUTH": str(openai / "auth.json"),
+                                 "SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS": str(anthropic / ".credentials.json")})
+        self.assertEqual(self.refreshes, [["codex", "--home", str(openai), "--validate"],
+                                          ["claude", "--home", str(anthropic), "--validate"]])
         holder = f"after-landing/{self.tip[:12]}/live-temper"
         self.assertEqual(self.calls, [
             ["borrow", "chatgpt", "b1", "--path", temper["TEMPER_LIVE_ACCOUNT"], "--holder", holder],
@@ -543,14 +558,29 @@ class AfterLandingTest(unittest.TestCase):
             ["return", "chatgpt-1"], ["return", "claude-box-1"],
             ["borrow", "claude-box", "b1", "--path", smith["SMITH_LIVE_CLAUDE"], "--holder",
              f"after-landing/{self.tip[:12]}/live-smith"],
-            ["return", "claude-box-2"]])
+            ["return", "claude-box-2"],
+            ["borrow", "codex", "b1", "--path", skein["SKEIN_TEST_LIVE_OPENAI_AUTH"], "--holder",
+             f"after-landing/{self.tip[:12]}/live-skein"],
+            ["borrow", "claude", "b1", "--path", skein["SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS"], "--holder",
+             f"after-landing/{self.tip[:12]}/live-skein"],
+            ["return", "codex-7"], ["return", "claude-9"]])
+
+    def test_a_live_login_that_does_not_refresh_faults_its_pair_and_is_returned(self):
+        runner = self.live_runner({"chatgpt": [], "claude-box": [], "codex": ["codex-7"], "claude": ["claude-9"],
+                                   "refresh": Result(0, '{"error": "not logged in"}\n')})
+        record = runner.check(self.tip)
+        self.assertIn("live-skein: logins: codex-7 did not refresh: not logged in", record["faults"])
+        self.assertEqual(self.calls[-1], ["return", "codex-7"])
+        self.assertNotIn("live-skein", [profile for profile, _, _ in self.invocations])
 
     def test_a_live_pair_without_its_logins_faults_and_returns_what_it_borrowed(self):
-        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": [], "stuck": ["chatgpt-1"]})
+        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": [], "codex": [], "claude": [],
+                                   "stuck": ["chatgpt-1"]})
         record = runner.check(self.tip)
         self.assertEqual(record["verdict"], "partial")
         self.assertEqual(record["faults"], ["live-temper: logins: fab logins: no free claude-box login",
-                                            "live-smith: logins: fab logins: no free claude-box login"])
+                                            "live-smith: logins: fab logins: no free claude-box login",
+                                            "live-skein: logins: fab logins: no free codex login"])
         self.assertEqual([profile for profile, _, _ in self.invocations], ["qa-skein", "qa-jig"])
         self.assertIn(["return", "chatgpt-1"], self.calls)
         self.assertEqual(self.records("error")[0]["error"], "login chatgpt-1 not returned: fab logins: changed")

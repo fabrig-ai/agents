@@ -1205,9 +1205,13 @@ login that still works reused across them before more are signed in.
   under its run directory for holder `after-landing/<tip>/<pair>`, runs
   with the variables naming them, and returns them when it ends; a pair
   short of a login faults, and a login that cannot be returned stays lent
-  to its run with an `error` record. `live-skein` joins once its tests
-  read a login's file or directory (the user, 11-01) instead of tokens in
-  their environment.
+  to its run with an `error` record. `live-skein` borrows a `codex` and a
+  `claude` login (`SKEIN_TEST_LIVE_OPENAI_AUTH`,
+  `SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS`: its tests read a login's file
+  instead of tokens in their environment, the user, 11-01, fabrig
+  `logins/skein-live`). They read the access token and never refresh it,
+  so fab refreshes each first where it was lent (`fab logins account KIND
+  --home DIR --validate`); one that does not refresh faults the pair.
 - **Checks by the products themselves:** `fab logins check ID` asks Codex's
   app-server (`account/read`, `account/rateLimits/read`: the account, the
   plan, the weekly window's percent used) or `claude auth status`. A lent
@@ -1245,9 +1249,7 @@ login that still works reused across them before more are signed in.
   branches are suspects, CPU accounting against the tiers' budgets, and the
   landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
-- Logins (13.13), next: `live-skein` in `LIVE` once its tests read files,
-  with a Codex login's token refreshed before the pair (`fab logins
-  account codex --home DIR --validate`); after-landing `--live` run on the
+- Logins (13.13), next: after-landing `--live` run on the
   queue's machine as well as builders (the user, 10-31); `tools/qa/logins`
   retired (QA's six logins are on the shelf since 11-01, held there by
   `fab/migrate`). Then a new builder lent its logins when it joins and

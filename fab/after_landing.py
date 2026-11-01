@@ -29,11 +29,14 @@ TIER_SET = ("exhaustive-skein", "qa-skein", "qa-smith", "qa-jig", "process-jig",
             "browser-skein", "browser-jig", "browser-temper", "qa-temper")
 # The live pairs `--live` adds: each variable its tests read, and the kind of login fab lends
 # for it, borrowed from the shelf on the dispatcher for the pair and returned after it
-# (docs/design/fab.md, 13.13). live-skein joins once its tests read a login's file.
+# (docs/design/fab.md, 13.13).
 LIVE = {
     "live-temper": (("TEMPER_LIVE_ACCOUNT", "chatgpt"), ("TEMPER_LIVE_CLAUDE", "claude-box")),
     "live-smith": (("SMITH_LIVE_CLAUDE", "claude-box"),),
+    "live-skein": (("SKEIN_TEST_LIVE_OPENAI_AUTH", "codex"), ("SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS", "claude")),
 }
+# Kinds whose tests read the access token and never refresh it: fab refreshes it first.
+REFRESHED = ("codex", "claude")
 RUN = "after-landing"  # the claim's run and task: `fab slot claim N after-landing after-landing`
 RECORD = "after-landing.jsonl"  # under FAB_HOME
 STATE = "after-landing"  # FAB_HOME/after-landing/: state.json and one directory per run
@@ -237,7 +240,10 @@ class AfterLanding:
         """Borrow a login for each of LIVE[profile]'s variables, lent to this machine at
         directory/logins/<variable> (a directory login there, a file login inside it under its
         kind's name) for holder after-landing/<tip[:12]>/<profile>; append each id to borrowed
-        as it is lent; return the variables. Refused when one cannot be borrowed."""
+        as it is lent; return the variables. A REFRESHED kind's token is refreshed where it was
+        lent first, by `fab logins account KIND --home <its directory> --validate` (skein's
+        tests read the access token and never refresh it; Claude's lasts hours). Refused when
+        one cannot be borrowed or refreshed."""
         machines = hosts.load() if self.known is None else self.known
         here = hosts.this(machines)
         if here is None:
@@ -248,6 +254,14 @@ class AfterLanding:
             path = place if logins.KINDS[kind].directory else place / logins.KINDS[kind].item
             borrowed.append(self._shelf(["borrow", kind, here.name, "--path", str(path),
                                          "--holder", f"{RUN}/{tip[:12]}/{profile}"]))
+            if kind in REFRESHED:
+                done = self.sh(["fab", "logins", "account", kind, "--home", str(place), "--validate"], timeout=300)
+                try:
+                    found = json.loads(done.out.strip().splitlines()[-1])
+                except (IndexError, json.JSONDecodeError):
+                    found = {"error": (done.err.strip().splitlines() or [f"exit {done.code}"])[-1]}
+                if "error" in found:
+                    raise logins.Refused(f"{borrowed[-1]} did not refresh: {found['error']}")
             env[variable] = str(path)
         return env
 
