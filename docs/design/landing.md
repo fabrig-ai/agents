@@ -25,15 +25,15 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `answers/<run>` and `repairs/<run>`, whose run ids hold slashes, and
   `ladder/<draft>/backlog-<n>`; fixed 11-01, found by dogfood/design: only
   two-segment names were taken, so those branches never landed), a batch
-  merged on main, the selected checks through `heavy --gate`, bisection of
-  a red batch, a push that expects main's parent, ready and task branches deleted. Its record is
-  `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
-  `collateral`), which the dispatcher reads; the tips it has tried and
-  their collateral reds (3) are its only other state. A `rejected` at
-  a test step carries `tests`: the failed tests of the step's derived
+  merged on main, the selected checks through `heavy --gate`, bisection of a
+  red batch, a push that expects main's parent, ready and task branches
+  deleted. Its record is `FAB_HOME/queue.jsonl` there (`batch`, `landed`,
+  `rejected`, `collateral`), which the dispatcher reads; the tips it has
+  tried and their collateral reds (3) are its only other state. A `rejected`
+  at a test step carries `tests`: the failed tests of the step's derived
   `gate-junit.xml`, `<binary> <test>`, at most 20 ([] at any other step), so
-  whoever hears it (a foreman, the user's page, 3) reads them without
-  the log.
+  whoever hears it (a foreman, the user's page, 3) reads them without the
+  log.
 - **Queue CPU, report only:** `fab/queue_cpu.py` runs the queue's `default`
   and `fuzzy` steps through the shared `fab/cpu.py` collector (after-landing.md 2),
   keeping `check_steps`' package selection and `heavy --gate` lane. A static

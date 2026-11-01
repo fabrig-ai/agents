@@ -361,20 +361,19 @@ only as tweaks once a replay matches its run.
     report's `Answered:` line, with `Answer <draft>/integration: <text>`
     giving the answer, is logged as that question's `question.answered`
     (`_finish`), as a repair's is, and lifts the stop; an answer call that
-    cannot settle it ends `Question:`, which reaches the page as any
-    call's (channel.md 2). After a lift the stop's counts start afresh (end reds,
-    catch-up refusals since a clean catch-up, queue rejections; a main
-    sha's catch-up repair counts as merged only when it merged after the
-    answer), so the next red, refusal or rejection is a first; repair ids
-    keep their numbering (`repair-<n>`, `catch-up-<n>` count on from before
-    the answer). The answer is folded under Answers into every repair not
-    merged when it was logged (the stopping red's own repair among them)
-    and every later one, as a repair's own answers are. A clean catch-up
-    after a `catch-up` stop lifts it too: the tick then logs the stop's
+    cannot settle it ends `Question:`, which reaches the page as any call's
+    (channel.md 2). After a lift the stop's counts start afresh (end reds,
+    catch-up refusals since a clean catch-up, queue rejections; a main sha's
+    catch-up repair counts as merged only when it merged after the answer),
+    so the next red, refusal or rejection is a first; repair ids keep their
+    numbering (`repair-<n>`, `catch-up-<n>` count on from before the
+    answer). The answer is folded under Answers into every repair not merged
+    when it was logged (the stopping red's own repair among them) and every
+    later one, as a repair's own answers are. A clean catch-up after a
+    `catch-up` stop lifts it too: the tick then logs the stop's
     `question.answered` (answer `lifted by a clean catch-up`, `by` `tick`),
-    so it leaves the answerer's queue; the tick's own lift is folded into
-    no repair. A later stop logs a new
-    `plan.stopped` and question.
+    so it leaves the answerer's queue; the tick's own lift is folded into no
+    repair. A later stop logs a new `plan.stopped` and question.
   - A check run counts as the draft's run in flight and takes a place.
   - A repair has no spec file, so its question skips the foreman (no
     options to settle by) and queues, and an answer logged with `answer`
