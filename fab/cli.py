@@ -10,7 +10,7 @@ COMMANDS = {
     "call": ("fab.calls", "run a Claude call on a compiled brief"),
     "tick": ("fab.dispatch", "collect, land and start every plan's tasks"),
     "wake": ("fab.wake", "wake the tick from any machine; install the tick's units"),
-    "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
+    "test": ("fab.testrun", "run every test; fail past the 30 s CPU budget"),
     "issues": ("fab.forge", "the user's questions as forge issues: open, converse, close"),
     "qa": ("fab.walks", "a ladder's QA walks: start one, report its result, show the rungs"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),

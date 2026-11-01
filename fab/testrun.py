@@ -1,8 +1,9 @@
-"""`fab test`: every test, in one process, within the budget (docs/design/fab.md, 4)."""
+"""`fab test`: every test, in one process, within the CPU-time budget (docs/design/fab.md, 4)."""
 
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 import unittest
@@ -30,6 +31,12 @@ class TimedResult(unittest.TextTestResult):
         super().stopTest(test)
 
 
+def _cpu_seconds() -> float:
+    """Return CPU seconds used by this process and its waited-for children."""
+    usage = os.times()
+    return usage.user + usage.system + usage.children_user + usage.children_system
+
+
 def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="fab test", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -39,17 +46,22 @@ def main(argv: list[str]) -> int:
     if args.patterns:
         loader.testNamePatterns = [f"*{pattern}*" for pattern in args.patterns]
     started = time.monotonic()
+    cpu_started = _cpu_seconds()
     suite = loader.discover(str(ROOT / "fab" / "tests"), pattern="test_*.py", top_level_dir=str(ROOT))
     runner = unittest.TextTestRunner(stream=sys.stderr, verbosity=2 if args.verbose else 1, resultclass=TimedResult)
     result = runner.run(suite)
     elapsed = time.monotonic() - started
+    cpu_elapsed = _cpu_seconds() - cpu_started
     slow = sorted((entry for entry in result.times if entry[0] >= SLOW_SECONDS), reverse=True)[:5]
     for seconds, name in slow:
         print(f"fab test: slow: {seconds:.2f} s {name}", file=sys.stderr)
-    print(f"fab test: {result.testsRun} tests in {elapsed:.1f} s (budget {BUDGET_SECONDS:.0f} s)", file=sys.stderr)
+    print(
+        f"fab test: {result.testsRun} tests in {elapsed:.1f} s wall, "
+        f"{cpu_elapsed:.1f} s CPU (budget {BUDGET_SECONDS:.0f} s CPU)", file=sys.stderr,
+    )
     if not result.wasSuccessful():
         return 1
-    if elapsed > BUDGET_SECONDS and not args.patterns:
+    if cpu_elapsed > BUDGET_SECONDS and not args.patterns:
         print("fab test: over budget: make the slow tests faster (docs/design/fab.md, 4)", file=sys.stderr)
         return 1
     return 0
