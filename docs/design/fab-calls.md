@@ -315,6 +315,11 @@ before it lands (2).
   `call.parked` with no call, lifted by an answer, seen by the tick's
   parked set, triage and amend starts) waits until another call kind meets
   it.
+- Retire's changed designs taken from the plan, not from main's window:
+  the designs its parts cite (`design`) and those its own branches changed,
+  rather than every design main changed since the cut, so a plan designed
+  before its cut sees its designs and not another plan's (fab-calls.status
+  11-01, paper-cuts' retire).
 - (The self-critique is 2's, part `critique`, not later.)
 - The foreman for plans whose specs live in another repository: its answers
   and repair sections landing through that repository's landing, not `fab land`.

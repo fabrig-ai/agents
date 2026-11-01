@@ -7,6 +7,7 @@ landing = "queue"
 # tasks/, the shared notes in notes/, the cut's decisions and its critical
 # path in notes/decisions.md.
 draft = "paper-cuts"
+retired = true
 repo = "agents"
 sources = [
   "docs/plan/paper-cuts/inputs/request.md",

@@ -81,9 +81,12 @@ def tmp_home() -> Iterator[Path]:
 
 
 def git(cwd: Path | str, *args: str) -> str:
-    """Real git with a fixed identity and no user configuration; returns stdout."""
+    """Real git with a fixed identity and no user configuration; returns stdout.
+
+    stdin is empty, so `--stdin` commands never wait on the test runner's stdin.
+    """
     done = subprocess.run(["git", *args], cwd=cwd, env={**os.environ, **GIT_ENV},
-                          capture_output=True, text=True)
+                          stdin=subprocess.DEVNULL, capture_output=True, text=True)
     if done.returncode:
         raise RuntimeError(f"git {' '.join(args)}: {done.stderr.strip()}")
     return done.stdout.strip()

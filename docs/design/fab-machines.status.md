@@ -9,6 +9,12 @@
   fab is installed on hetzner6 and hetzner8 (`~/src/fabrig/fab/install`,
   `fab` on PATH). hetzner6's slots 5 and 7 carry fab claims mirroring the
   paused ladder work's old claims.
+- **Builder installs follow the dispatcher** (2, 11-01; 7b9fbb0, f703675):
+  `fab.run`'s start moves a builder's `FAB_HOME/install` forward to the
+  running dispatcher's commit under `install.lock`, skips a pinned install
+  (`install.pinned`) and dispatcher hosts, and only notes stderr on
+  failure (docs/design/fab-tick.status.md). Tested with fake runners; the
+  queue and after-landing services still move only with `bin/install.sh`.
 - **Logins:** `fab logins` (3): the shelf, capture, lend, return, swap,
   retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
   machine's logins, the user's new sign-ins and QA's six (moved 11-01).
