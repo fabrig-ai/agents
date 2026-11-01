@@ -132,7 +132,9 @@ class AfterLandingTest(unittest.TestCase):
         self.load = self.enterContext(patch.object(tiers, "load", return_value=self.configured))
         self.enterContext(patch.object(cpu, "run_pair", side_effect=self.run_pair))
         self.enterContext(patch.object(cpu, "build_wrapper", return_value=self.home / "wrapper"))
-        self.wake = self.enterContext(patch.object(after_landing.events, "wake", return_value=True))
+        self.wake_patch = patch.object(after_landing.events, "wake", return_value=True)
+        self.wake = self.wake_patch.start()
+        self.addCleanup(self.wake_patch.stop)
         self.runner = self.make_runner()
 
     def make_runner(self, **kwargs):
@@ -363,6 +365,23 @@ class AfterLandingTest(unittest.TestCase):
             sh=self.sh, hosts=self.runner.known)
         self.assertEqual(self.history("new_test")["result"], "red")
         self.assertIsNone(self.history("unknown"))
+
+    def test_new_red_wakes_dispatcher_over_ssh(self):
+        self.wake_patch.stop()
+        known = {"builder": Host("builder", "fake@builder", ("builder", "after-landing")),
+                 "dispatcher": Host("dispatcher", "fake@dispatcher", ("dispatcher",))}
+        self.runner = self.make_runner(known=known)
+        self.runner.check(self.tip)
+        self.response([("works", "fail")])
+        self.response([("works", "fail")], alone="works")
+        tip = self.advance("draft/bad")
+        with patch.dict(os.environ, {"FAB_HOST": "builder"}):
+            self.runner.check(tip)
+        commands = [call.argv for call in self.sh.calls if call.argv[0] == "ssh"]
+        reason = f"after-landing {tip[:12]} new 1 unattributed 0 recovered 0"
+        self.assertEqual(commands, [["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15",
+                                     "fake@dispatcher",
+                                     "bash -lc " + shlex.quote(shlex.join(["fab", "wake", reason]))]])
 
     def test_mixed_run_wakes_once_after_records_and_history_are_saved(self):
         cases = [("new_red", "fail"), ("unknown_red", "fail"), ("fixed", "pass")]
@@ -761,6 +780,7 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual((record["verdict"], record["starved"], record["cpu_s"], record["wall_s"]),
                          ("green", 2, .02, 10))
         self.assertEqual(self.history(), dict(result="red", commit="old"))
+        self.assertEqual(record["reds"], [])
         self.assertEqual(len(record["possible_hangs"]), 2)
         tests = [row for row in log.read(self.runner.log_path) if row["ev"] == "test"]
         self.assertTrue(all(row["state"] == "starved" and row["cpu_s"] == .01 for row in tests))
@@ -800,6 +820,8 @@ class AfterLandingTest(unittest.TestCase):
             record = self.runner.check(self.tip)
         self.assertEqual(invoke.call_count, 1)
         self.assertEqual((record["verdict"], record["unattributed"]), ("red", 1))
+        key = nextest.Case("qa-skein", self.binary, "works", "", "").key
+        self.assertIn(key, record["reds"])
 
     def test_starved_confirmation_cannot_clear_an_observed_failure(self):
         with self.cpu_response(result="fail", rerun_result="starved"):
@@ -889,10 +911,10 @@ class ImportedTest(unittest.TestCase):
     def test_runs_keep_reds_and_leave_pair_details_on_the_machine(self):
         key = nextest.Case("qa-jig", "b", "t1", "", "").key
         run = {"ts": "t", "ev": "run", "tip": "x", "verdict": "red", "new": 0,
-               "standing": 1, "reds": [key], "pairs": ["p"], "freed": 3}
+               "standing": 1, "reds": [key], "commits": 2, "pairs": ["p"], "freed": 3}
         self.assertEqual(after_landing.imported(run), {"ev": "tiers.run", "tip": "x",
                                                        "verdict": "red", "new": 0,
-                                                       "standing": 1, "reds": [key]})
+                                                       "standing": 1, "reds": [key], "commits": 2})
 
     def test_new_and_unattributed_reds_keep_their_evidence(self):
         key = nextest.Case("qa-jig", "b", "t1", "", "").key

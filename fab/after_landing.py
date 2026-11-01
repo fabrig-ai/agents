@@ -456,14 +456,14 @@ class AfterLanding:
 
 def imported(entry: dict) -> dict | None:
     """The log record the dispatcher keeps for one of RECORD's entries, its ev included, or
-    None: a `run` becomes tiers.run (tip, verdict, the counts, branches, reds, faults,
+    None: a `run` becomes tiers.run (tip, verdict, the counts, branches, commits, reds, faults,
     log), a new or unattributed `test` becomes tiers.red (tip, key, state, profile,
     binary, test, error, branches, log, rerun), a recovered `test` becomes
     tiers.recovered (tip, key, profile, binary, test). Omit absent fields for older
     records; anything else is left on the machine. Pure."""
     if entry.get("ev") == "run":
         fields = ("tip", "verdict", *CONFIRMED, "flake", "recovered", "starved", "unobserved", "cpu_s", "wall_s",
-                  "wall_starved", "possible_hangs", "budget", "over_budget", "branches", "reds", "faults", "log")
+                  "wall_starved", "possible_hangs", "budget", "over_budget", "branches", "commits", "reds", "faults", "log")
         return {"ev": "tiers.run", **{key: entry[key] for key in fields if key in entry}}
     if entry.get("ev") == "test":
         if entry.get("state") in ("new", "unattributed"):
