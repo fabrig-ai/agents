@@ -96,7 +96,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       - **`fetch` or `push`:** no amend call, and these refusals do not
         count toward the amend. The tick tries the finish again, each try
         `LAND_AFTER` (10) minutes after the chain's last refusal at that
-        step, up to `LAND_TRIES` (3) refusals at that step counted per
+        step since its reset (so an answer retries at once), up to `LAND_TRIES` (3) refusals at that step counted per
         chain: `fab land` refusals (no `queue_ts`) at that step for the
         chain's branch since the later of its latest call's `call.ended`
         and its last reset (a `call.answered` for its subject or a
@@ -110,9 +110,12 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
         compiles the brief, when the chain's last refusal is a `fab land`
         `test` refusal, rebases `origin/calls/<root>` onto `origin/main` in
         a detached worktree of its own (the same rebase `fab land` made,
-        which went through) and pushes it with
+        which went through; author fab, `git -c user.name=fab -c
+        user.email=fab@localhost rebase`) and pushes it with
         `--force-with-lease=refs/heads/calls/<root>:<the tip it fetched>`,
-        once per amend start; it passes the outcome to `amend_brief`
+        once per amend start, never with `--brief-only` (which rebases and
+        pushes nothing; its brief says the branch would be rebased first);
+        it passes the outcome to `amend_brief`
         (rebased, or not after an aborted conflict when main moved), whose
         refusal section says which. The amender then only reproduces and
         fixes what the log names.
@@ -393,7 +396,8 @@ before it lands (2).
   worktree=FAB_HOME/retire/<root>)`, path the plan directory's
   plan.toml relative to the checkout (as `_check_call` finds it), author
   fab, message `<draft>: retired`; the edit replaces a `retired = false`
-  line or inserts `retired = true` before the first table line. It is
+  line or inserts `retired = true` before the first table line, and an
+  edit finding no plan.toml raises. It is
   made only when the plan.toml does not already say it (`tomllib`'s
   `retired` is True), no `branch.landed` names the branch and
   `origin/<branch>` exists; otherwise the delivery takes its path as
@@ -402,9 +406,9 @@ before it lands (2).
   `call.finished` is recorded for a failure before the delivery runs, and
   the next tick tries again. The commit comes before the delivery in the
   same finish, so a queue plan's `_queue_branch` readies the committed
-  tip; a branch readied before this landed, without `retired`, is
-  re-readied when origin's tip differs from its last `branch.ready`'s
-  `tip`. The consistency pass does not check `retired`: code sets it at
+  tip; `_queue_branch` re-readies whenever origin's tip differs from the
+  last `branch.ready`'s `tip` (which covers a branch readied before this
+  landed). The consistency pass does not check `retired`: code sets it at
   the finish.
   The Codex consistency pass is its chain's review run, with its own role
   text (`fab/roles/consistency.md`) and the list of changed designs; a

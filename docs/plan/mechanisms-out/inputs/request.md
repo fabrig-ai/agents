@@ -6,7 +6,9 @@ now say how, each marked "the user, 11-01". Build them as designed, with the rol
 
 There are three tasks, ordered by needs (1, 2, 3). Tasks 1 and 2 share one pre-delivery helper in
 `_take` "finish" (`fab/dispatch.py`). These test pins change: `fab/tests/test_dispatch.py` ~2575
-(fetch/push → amend) and `fab/tests/test_designer.py` ~612 and ~965 (the `Plan options` text).
+(fetch/push → amend; now ~2599, `test_finish_land_refusal_steps_and_terminal_exceptions`) and
+`fab/tests/test_designer.py` ~574, ~612, ~885, ~888 and ~965 (the plan fact line and the `Plan
+options` text).
 
 1. **`retired = true` is code's** (`docs/design/calls.md` 3, "retire").
    - Today the retire call writes it (`fab/roles/retire.md`, "What you write").
@@ -28,16 +30,19 @@ There are three tasks, ordered by needs (1, 2, 3). Tasks 1 and 2 share one pre-d
    - Build:
      - `fab.calls.start` gains `seed: Mapping[str, str] = {}` (repository path → text), written
        and committed after `worktree add` and before `call.started`.
-     - `fab call cut` (`fab/designer.py` `main`) seeds plan.toml with `draft`, `repo`, `sources`
-       and the options under the design's comment.
-     - The `Plan options` brief text, `fab/roles/cut.md` and `fab/roles/cut-run.md`: "plan.toml
-       already exists on your branch with fab's plan options at its top, under `# Plan options,
-       written by fab call cut --set; keep them`. Write the tables below those lines, and never
-       repeat or change them." Drop the template's `# the plan options, verbatim` line.
+     - `fab call cut` (`fab/designer.py` `main`) seeds every cut's plan.toml with `draft`,
+       `repo`, `sources`, and the options under the design's comment when there are any.
+     - The brief's `The draft` fact line (`fab/designer.py` ~320, "- Plan: write ...") becomes
+       the design's "- Plan: `<path>/plan.toml` exists on your branch ..." line; the `Plan
+       options` text says the same of the options. `fab/roles/cut.md` drops its `draft`, `repo`,
+       `sources` bullet (keeping `[buffer]`), `fab/roles/cut-fabrig.md` drops "set `repo =
+       \"fabrig\"`", and `fab/roles/cut-run.md`'s template drops its `draft`/`repo`/`sources`
+       lines and `# the plan options, verbatim`.
      - The restore:
        - for an integration plan, in the trunk after each clean merge of the cut's branch in
          `_merge_branch`, never on the cut's branch;
-       - for a queue plan, on the cut's branch before `_deliver`, once the call has ended;
+       - for a queue plan, on the cut's branch before `_deliver`, once the call has ended, with
+         retire's guards and open finish (worktree `FAB_HOME/options/<root>`);
        - comparing by parsed value, against the root cut's `call.started` `options`.
 3. **`fab land` refusals: code first** (`docs/design/calls.md` 2, "A `fab land` refusal counts as
    a refusal of the chain").
@@ -49,11 +54,13 @@ There are three tasks, ordered by needs (1, 2, 3). Tasks 1 and 2 share one pre-d
      - the third parks the chain (`call.parked` with subject, the root as call, the reason and
        the refusal's log as report);
      - these refusals do not count toward the amend. Code: `fab/call_review.py` `_fold_review`
-       and `land_refusal`, `fab/dispatch.py` `_finish_outcome` and the amend start.
+       and `land_refusal` (`Chain` carries no reset position today: add `reset` to it or a helper
+       in `call_review`), `fab/dispatch.py` `call_actions` (which has `now`) and `_chain_actions`
+       where finishes are chosen, and `_finish_outcome`.
    - `test`:
      - `fab call amend` (`fab/calls.py` `_chain_call`), before compiling the brief, rebases
        `origin/calls/<root>` onto `origin/main` in a detached worktree of its own, once per amend
-       start;
+       start, not with `--brief-only`, as fab (`-c user.name=fab -c user.email=fab@localhost`);
      - it pushes with `--force-with-lease=refs/heads/calls/<root>:<fetched tip>`;
      - it passes the outcome to `amend_brief` (`fab/call_review.py`).
    - `fab/roles/amender.md`:
@@ -68,4 +75,4 @@ README.
 The user's rule: dogfood. Built by fab's loop (landed through `bin/fab land`); the plan's landing
 is `queue` (the cut is started with `--set 'landing="queue"'`). Each task brings its tests in
 `fab/tests/` (fakes and fixture logs, as the touched modules' tests are). Run after
-`docs/plan/dogfood-faults` has landed its tasks.
+`docs/plan/dogfood-faults` and `docs/plan/answer-findings` have landed their tasks.
