@@ -28,6 +28,20 @@ task names, and nothing unrelated.
 - Run the narrowest tests while you work (`bin/fab test -k NAME`), the whole
   suite once at the end.
 
+## The gates
+
+Code checks every branch before it lands (`docs/design/fab-gates.md`, 2), and
+refuses it for any finding, costing a foreman and a repair run:
+
+- **size:** a function you add or grow is at most 60 lines, docstring
+  included; split a longer one into private helpers.
+- **shape:** a public function's signature changes, or a public item goes,
+  only in an `interface` or `migration` task; in any other kind it is a
+  question.
+- **docs:** every public item you add has a docstring.
+- **names:** no word of the taste file's banned list in a new module or
+  item name; **clones:** no block repeated from elsewhere in the tree.
+
 ## Ending
 
 - Push the branch (`git push origin HEAD`). Never push main, never force-push
