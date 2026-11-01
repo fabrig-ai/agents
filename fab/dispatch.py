@@ -20,7 +20,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, wake
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, flow, foreman, gates, hosts as machines, integration, land, log, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, wake
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -91,7 +91,11 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(question.since) for question in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
-        if plan.landing == "integration" or len(questions) >= ANSWER_AT or old_enough or blocking(
+        red_park = any(event.get("ev") == "question.asked" and event.get("park")
+                       and any(question.task == event.get("task") and question.run == event.get("run")
+                               and tasks[question.task].kind == tier_reds.KIND for question in questions)
+                       for event in events)
+        if red_park or plan.landing == "integration" or len(questions) >= ANSWER_AT or old_enough or blocking(
                 tasks, events, [{"task": question.task} for question in questions],
                 calls_in_flight=bool(roles), design=design, draft=plan.draft):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
@@ -201,6 +205,66 @@ def repair_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action
     return actions
 
 
+def red_actions(plan: Plan, folded: Sequence[tier_reds.Red]) -> list[Action]:
+    """Start or settle this plan's reds in opening order; closed reds take no action."""
+    return [Action("examine-red", task=red.task, detail=red.id) if red.state == "foreman"
+            else Action("remedy-red", task=red.task, run=red.foreman, detail=red.id)
+            for red in folded if red.draft == plan.draft and red.state in ("foreman", "decided")]
+
+
+def retire_ready(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict],
+                 folded: Sequence[tier_reds.Red], *, after_landing: bool) -> bool:
+    """A fabrig plan waits for its last main landing's verdict and its active reds."""
+    if plan.repo != "fabrig":
+        return True
+    if any(red.draft == plan.draft and red.state in
+           ("foreman", "deciding", "decided", "repairing", "landed") for red in folded):
+        return False
+    if not after_landing:
+        return True
+    landed = [event for event in events
+              if event.get("ev") == "branch.landed" and event.get("into", "main") == "main"
+              and (event.get("task") in tasks or event.get("task") == f"{plan.draft}/integration")]
+    if not landed:
+        return False
+    last = landed[-1]
+    return any(event.get("ev") == "tiers.run" and any(
+        land.task_of(branch) == land.task_of(last.get("branch", last.get("task", "")))
+        for branch in event.get("branches", ())) for event in events)
+
+
+def _red_steps(plan: Plan, tasks: Mapping[str, Task], folded: Sequence[tier_reds.Red],
+               hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> list[Action]:
+    """Launch and settle reds against the same snapshot, logging failures for a later tick."""
+    actions = red_actions(plan, folded)
+    by_id = {red.id: red for red in folded}
+    for action in actions:
+        red = by_id[action.detail]
+        detail = action.detail
+        try:
+            if action.kind == "examine-red":
+                host = _builder(hosts, log.read(log_path))
+                tier_reds.start(red, host, log.read(log_path), plan_tasks=tasks, sh=sh, log_path=log_path)
+                detail += " " + host.name
+            else:
+                detail = _remedy_red(red, tasks, log_path=log_path)
+        except (OSError, ValueError, Failed) as error:
+            detail = "failed: " + " ".join(str(error).splitlines())
+            log.append("note", path=log_path, text=f"{action.kind} {action.task} {detail}")
+        print(f"{action.kind} {action.task} {detail}")
+    return actions
+
+
+def _remedy_red(red: tier_reds.Red, tasks: Mapping[str, Task], *, log_path: Path | None) -> str:
+    """Settle a red's collected foreman report; unreadable reports give the repair the red alone."""
+    try:
+        report = Path(red.report).read_text()
+    except (OSError, UnicodeError):
+        report = ""
+    record = tier_reds.settle(red, report, plan_tasks=tasks, log_path=log_path)
+    return f"{record['verdict']} {record['reason']}"
+
+
 def in_flight(events: Iterable[dict]) -> list[dict]:
     """run.started records without a run.ended for the same run, in log order."""
     events = list(events)
@@ -278,9 +342,13 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
                 if refusal.task not in rebases}
     step = integration.next_step(plan, tasks, events)
-    if step is None or step.kind != "stop":
+    if step is not None and step.kind == "stop":
+        candidates = [identifier for identifier in candidates if tasks[identifier].kind == tier_reds.KIND]
+    if candidates:
         actions.extend(replace(action, early=early.get(action.task, ())) if action.kind == "start" else action
-                       for action in _starts(candidates, views, events, free, limit - occupied, refusals))
+                       for action in _run_starts(candidates, views, events, free, limit - occupied, refusals,
+                                                 {identifier: tier_reds.RED_RUNS for identifier, task in tasks.items()
+                                                  if task.kind == tier_reds.KIND}))
 
     if len(candidates) < plan.low * limit:
         design = _design_action(plan, tasks, views, hosts, len(candidates))
@@ -341,6 +409,13 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
 
     Settled fixes carry their section in the rejection; none and fallback keep it alone.
     """
+    return _run_starts(candidates, views, events, free, budget, refusals, {})
+
+
+def _run_starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
+                free: dict[str, int], budget: int, refusals: Mapping[str, repairs.Refusal],
+                limits: Mapping[str, int]) -> list[Action]:
+    """Reserve starts with each task's allowance; refusal foremen must finish first."""
     actions = []
     for identifier in candidates:
         refusal = refusals.get(identifier)
@@ -352,11 +427,12 @@ def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], even
         kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
         kind, rejection = _start_kind(view, events)
         counted = _since_park(identifier, view.runs, events)
+        allowance = limits.get(identifier, MAX_RUNS)
         if not (rejection or {}).get("skeleton") and sum(
-                kinds.get(run_id) != "rebase" for run_id in counted) >= MAX_RUNS:
+                kinds.get(run_id) != "rebase" for run_id in counted) >= allowance:
             actions.append(Action("park", task=identifier,
                                   run=view.runs[-1],
-                                  detail=f"{MAX_RUNS} runs without landing; needs judgement"))
+                                  detail=f"{allowance} runs without landing; needs judgement"))
             continue
         if budget <= 0:
             continue
@@ -826,17 +902,39 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         print("plans - none")
     loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
     hosts = machines.load() if hosts is None else hosts
-    tasks = {key: task for _, plan_tasks, _, _ in loaded for key, task in plan_tasks.items()}
-    _import_queue(tasks, log.read(log_path), hosts, sh=sh, log_path=log_path,
+    events = log.read(log_path)
+    folded = tier_reds.reds(events)
+    tasks = {key: task for plan, plan_tasks, _, _ in loaded
+             for key, task in {**plan_tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
+    before_imports = log.read(log_path)
+    imported_from = len(before_imports)
+    _import_queue(tasks, before_imports, hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
     if not loaded:
         if not only:
             _page(plan_dirs, log_path)
         return actions
     _import_after_landing(log.read(log_path), hosts, sh=sh, log_path=log_path)
+    events = log.read(log_path)
+    # Queue imports and after-landing runs can advance repairs before their verdicts arrive.
+    if any(event.get("ev") in ("branch.landed", "tiers.run") for event in events[imported_from:]):
+        folded = tier_reds.reds(events)
+    closed = tier_reds.close_reds(events, folded=folded, log_path=log_path)
+    if closed:
+        events += closed
+        folded = tier_reds.reds(events)
+    owner_map = tier_reds.owners(((plan, tasks) for plan, tasks, _, _ in loaded), events, folded=folded)
+    after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
+    if after_host is not None:
+        opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
+        events += opened
+        folded = [*folded, *tier_reds.reds(opened)] if opened else folded
+    plan_tasks = {key: task for plan, tasks, _, _ in loaded
+                  for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
     calm = flow.measure(hosts, log.now(), sh=sh)
     for plan, tasks, directory, checkout in loaded:
-        taken = _tick_plan(plan, tasks, directory, checkout, hosts, calm, sh=sh, log_path=log_path)
+        taken = _tick_loaded(plan, tasks, directory, checkout, hosts, calm, folded, plan_tasks,
+                             sh=sh, log_path=log_path)
         actions.extend(taken)
         calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
     events = log.read(log_path)
@@ -904,20 +1002,40 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
                log_path: Path | None) -> list[Action]:
     """Take decisions, then question and refusal actions from one fresh snapshot in that
     order, then calls decided from the resulting log."""
+    events = log.read(log_path)
+    return _tick_loaded(plan, tasks, directory, checkout, hosts, calm, tier_reds.reds(events), tasks,
+                        sh=sh, log_path=log_path)
+
+
+def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
+                 hosts: Mapping[str, Host], calm: Mapping[str, bool], folded: Sequence[tier_reds.Red],
+                 plan_tasks: Mapping[str, Task], *, sh: Runner, log_path: Path | None) -> list[Action]:
+    """Tick a loaded plan using the round's red snapshot and all loaded suspect specs."""
     released = _merge_cut(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     if released:
         plan, tasks = _load_plan(directory, log.read(log_path), checkout=checkout, sh=sh)
-    tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, log.read(log_path)), log.read(log_path))
+    events = log.read(log_path)
+    tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
+    tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind != tier_reds.KIND},
+             **tier_reds.tasks(plan, events, folded=folded)}
     actions = decide(plan, tasks, log.read(log_path), hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     events = log.read(log_path)
+    # Collection can finish a red foreman; reuse the snapshot unless that happened.
+    deciding = {red.foreman for red in folded if red.state == "deciding"}
+    if any(event.get("ev") == "run.ended" and event.get("run") in deciding for event in events):
+        folded = tier_reds.reds(events)
     settlements = foreman_actions(tasks, events) + repair_actions(tasks, events)
     for action in settlements:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     actions.extend(settlements)
+    actions.extend(_red_steps(plan, {**plan_tasks, **tasks}, folded, hosts, sh=sh, log_path=log_path))
     design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
     followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
+    followups = [action for action in followups if action.run_kind != "retire"
+                 or retire_ready(plan, tasks, log.read(log_path), folded,
+                                 after_landing=any("after-landing" in host.roles for host in hosts.values()))]
     actions.extend(followups)
     for action in followups:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
@@ -1028,7 +1146,8 @@ def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host],
         try:
             runs.start(tasks[action.task], hosts[name], kind=action.run_kind,
                        events=events, sh=sh, log_path=log_path, rejection=action.rejection,
-                       trunk=plan.trunk, checkout=checkout, early=action.early)
+                       trunk="main" if tasks[action.task].kind == tier_reds.KIND else plan.trunk,
+                       checkout=checkout, early=action.early)
             return
         except ValueError as error:
             if str(error).startswith("early:"):
@@ -1151,7 +1270,8 @@ def _examine(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host
     refusal = _refusal(action, tasks, events, "foreman")
     host = _builder(hosts, events)
     repairs.start(refusal, tasks[action.task], host, log.read(log_path),
-                  sh=sh, log_path=log_path, trunk=plan.trunk)
+                  sh=sh, log_path=log_path,
+                  trunk="main" if tasks[action.task].kind == tier_reds.KIND else plan.trunk)
     return f"{refusal.step} {host.name}"
 
 
@@ -1172,6 +1292,10 @@ def _remedy(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
     branch, section = None, ""
     if verdict == "fix":
         section = repairs.section(refusal, day=log.now()[:10], run_id=action.run, body=body)
+        if not tasks[action.task].path:
+            log.append("refusal.settled", path=log_path, task=refusal.task, run=action.run,
+                       verdict=verdict, reason=reason, branch="", section=section)
+            return f"{verdict} {reason}"
         queued = plan.repo == "fabrig" and plan.landing == "queue"
         pending = f"repairs/{action.run}"
         ready = next((event for event in events if queued and event.get("ev") == "branch.ready"
@@ -1424,7 +1548,7 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
                 rebases.append(identifier)
                 events = [*events, {"ev": "branch.rejected", "task": identifier, **amendment}]
                 continue
-            kind = "merge" if plan.landing == "integration" else (
+            kind = "merge" if plan.landing == "integration" and tasks[identifier].kind != tier_reds.KIND else (
                 "land" if tasks[identifier].repo == "agents" else "ready")
             actions.append(Action(kind, task=identifier, branch=view.branch, detail=view.branch or ""))
 

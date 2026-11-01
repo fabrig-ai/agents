@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, wake
+from fab import call_review, channel, cli, designer, dispatch, drafts, flow, foreman, gates, integration, log, plan, repairs, run as runs, rust_gates, state, tier_reds, wake
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Result, run, ssh
@@ -4452,3 +4452,321 @@ class EarlyStartTest(unittest.TestCase):
                             log_path=None)
             refused, = log.read()
         self.assertEqual((refused["ev"], refused["task"], refused["needs"]), ("early.refused", "draft/b", ["draft/a"]))
+
+
+class RedDispatchTest(unittest.TestCase):
+    def test_red_dispatch_foreman_collected_this_round_settles_once(self):
+        self.open()
+        report_path = log.home() / "runs/draft/red-1/foreman-1/report.md"
+        write(report_path, "Done: fix: fix the check\n")
+        def collect(run_id, events, hosts, **kwargs):
+            self.append(dict(ev="run.ended", task="draft/red-1/foreman", run=run_id,
+                             outcome="done", report=str(report_path)))
+        with patch.object(runs, "collect", side_effect=collect):
+            actions = self.tick()
+        self.assertEqual(sum(a.kind == "remedy-red" for a in actions), 1)
+        self.tick()
+        self.assertEqual(sum(e["ev"] == "red.settled" for e in log.read(self.path)), 1)
+
+    def test_red_dispatch_queue_rejections_reach_red_tasks_in_both_modes(self):
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing):
+                self.plan = replace(self.plan, landing=landing)
+                write(self.path, "")
+                self.open()
+                self.finish_foreman()
+                self.tick()
+                self.queue_records = [dict(ev="rejected", ts="queue-1", branch="draft/red-1-r2", tip="repair",
+                                           step="default", log="/queue.log")]
+                self.tick()
+                rejected, = [e for e in log.read(self.path) if e["ev"] == "branch.rejected"]
+                self.assertEqual((rejected["task"], rejected["branch"]), ("draft/red-1", "draft/red-1-r2"))
+                self.queue_records = []
+
+    def test_red_dispatch_answer_report_folds_into_the_next_brief(self):
+        self.open()
+        self.finish_foreman()
+        self.tick()
+        self.append(dict(ev="run.ended", task="draft/red-1", run="draft/red-1-1", outcome="question"),
+                    dict(ev="question.asked", task="draft/red-1", run="draft/red-1-1", text="Which fix?"),
+                    dict(ev="call.started", call="answer-red", role="answer", subject="draft", branch="calls/answer-red"),
+                    dict(ev="call.ended", call="answer-red", outcome="done"))
+        write(log.home() / "calls/answer-red/report.md",
+              "Done: answered\nAnswered: red-1\nAnswer red-1: Reproduce in the unit tier.\n")
+        dispatch._finish(Action("finish", task="answer-red"), log_path=self.path)
+        answered = log.read(self.path)[-1]
+        self.assertEqual((answered["ev"], answered["task"], answered["answer"]),
+                         ("question.answered", "draft/red-1", "Reproduce in the unit tier."))
+        self.tick()
+        self.assertIn("## Answers\n\n- Reproduce in the unit tier.",
+                      (log.home() / "runs/draft/red-1-2/brief.md").read_text())
+
+    def test_red_dispatch_decisions_are_pure_and_closed_reds_take_no_action(self):
+        from fab.tests.test_tier_reds import opened
+        red = tier_reds.reds([opened(draft="draft")])[0]
+        decided = replace(red, state="decided", foreman="draft/red-1/foreman-1")
+        closed = replace(red, id="red-2", state="closed")
+        foreign = replace(red, id="red-3", draft="other")
+        folded = [red, decided, closed, foreign]
+        before = deepcopy(folded)
+        self.assertEqual(dispatch.red_actions(self.plan, folded),
+                         [Action("examine-red", task="draft/red-1", detail="red-1"),
+                          Action("remedy-red", task="draft/red-1", run="draft/red-1/foreman-1", detail="red-1")])
+        self.assertEqual(folded, before)
+
+    def test_red_dispatch_retire_uses_main_verdict_even_if_queue_import_lags(self):
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing):
+                the_plan = replace(self.plan, landing=landing)
+                subject = "draft/integration" if landing == "integration" else "draft/a"
+                landed = dict(ev="branch.landed", task=subject, branch=subject + "-r2", main="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+                verdict = dict(ev="tiers.run", branches=[subject + "-r2"], reds=[])
+                self.assertFalse(dispatch.retire_ready(the_plan, self.tasks, [landed], [], after_landing=True))
+                self.assertTrue(dispatch.retire_ready(the_plan, self.tasks, [verdict, landed], [], after_landing=True))
+                self.assertTrue(dispatch.retire_ready(the_plan, self.tasks, [landed], [], after_landing=False))
+                from fab.tests.test_tier_reds import opened
+                red = tier_reds.reds([opened(draft="draft")])[0]
+                for status in ("foreman", "deciding", "decided", "repairing", "landed"):
+                    self.assertFalse(dispatch.retire_ready(the_plan, self.tasks, [verdict, landed],
+                                                          [replace(red, state=status)], after_landing=True))
+                for status in ("signal", "closed"):
+                    self.assertTrue(dispatch.retire_ready(the_plan, self.tasks, [verdict, landed],
+                                                         [replace(red, state=status)], after_landing=True))
+
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.directory = write_plan(self.home / "plan", "draft", tasks=("a",), repo="fabrig")
+        self.plan, self.tasks = plan.load(self.directory)
+        self.plan = replace(self.plan, direct=True, reviews=False, low=0)
+        self.path = self.home / "events.jsonl"
+        self.hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2),
+                      "other": Host("other", "fake@other", ("builder",), places=1),
+                      "tiers": Host("tiers", "fake@tiers", ("after-landing",)),
+                      "gate": Host("gate", "fake@gate", ("gate",))}
+        self.queue_records, self.tier_records = [], []
+        self.fake = FakeRunner().on(["ssh"], self.remote)
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"))
+        self.enterContext(patch.object(flow, "measure", return_value={}))
+        self.enterContext(patch.object(dispatch, "_check_calls"))
+        self.enterContext(patch.object(dispatch, "_integration"))
+        self.enterContext(patch.object(runs, "collect", return_value=None))
+        self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
+        self.enterContext(redirect_stdout(io.StringIO()))
+        self.append(dict(ev="branch.landed", task="draft/a", branch="draft/a", tip="a-tip", main="tip"))
+
+    def append(self, *events):
+        for record in events:
+            log.append(path=self.path, **record)
+
+    def remote(self, call):
+        argv = shlex.split(shlex.split(call.argv[-1])[2])
+        if argv[:3] == ["fab", "queue", "log"]:
+            return Result(0, "\n".join(json.dumps(record) for record in self.queue_records))
+        if argv[:3] == ["fab", "after-landing", "log"]:
+            return Result(0, "\n".join(json.dumps(record) for record in self.tier_records))
+        if argv[:1] == ["git"] and "rev-parse" in argv and "-q" in argv:
+            return Result(1)
+        if argv[:1] == ["cat"] and argv[-1].endswith("/precheck/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.json"):
+            return Result(0, json.dumps(dict(tip="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", main="bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", outcome="green",
+                                            selection="full", steps=["default:0:1"])) + "\n")
+        if argv == ["fab", "slot", "list"]:
+            return Result(0, json.dumps(dict(slot=1, claim=None, idle=0)) + "\n")
+        if argv[:3] == ["fab", "codex", "start"]:
+            return Result(0, "codex-red /state/red\n")
+        return Result(0)
+
+    def tick(self):
+        loaded = [(self.plan, self.tasks, self.directory, self.home)]
+        with patch.object(dispatch, "_load_plans", return_value=(loaded, [])):
+            return dispatch._round([self.directory], sh=self.fake, hosts=self.hosts,
+                                   log_path=self.path, only=True)
+
+    def red_records(self, count=1, *, tip="tip"):
+        records = [dict(ev="tiers.red", key=f"key-{n}", tip=tip, branches=["draft/a"])
+                   for n in range(count)]
+        return [*records, dict(ev="tiers.run", tip=tip, branches=["draft/a"],
+                               reds=[record["key"] for record in records], starved=0, unobserved=0)]
+
+    def open(self, count=1):
+        self.append(*self.red_records(count))
+        return self.tick()
+
+    def finish_foreman(self, outcome="done", report="Done: fix: fix the red\nwhere to fix\n"):
+        run_id = "draft/red-1/foreman-1"
+        report_path = log.home() / "runs" / run_id / "report.md"
+        write(report_path, report)
+        self.append(dict(ev="run.ended", task="draft/red-1/foreman", run=run_id,
+                         outcome=outcome, report=str(report_path)))
+        return self.tick()
+
+    def commands(self):
+        return [shlex.split(shlex.split(call.argv[-1])[2])
+                for call in self.fake.calls if call.argv[:1] == ["ssh"]]
+
+    def test_red_dispatch_twelve_reds_start_one_foreman_even_at_zero_places(self):
+        self.hosts["builder"] = replace(self.hosts["builder"], places=0)
+        self.hosts["other"] = replace(self.hosts["other"], places=0)
+        actions = self.open(12)
+        self.assertEqual([(a.kind, a.task) for a in actions if a.kind == "examine-red"],
+                         [("examine-red", "draft/red-1")])
+        records = log.read(self.path)
+        opened, = [e for e in records if e["ev"] == "red.opened"]
+        self.assertEqual(len(opened["keys"]), 12)
+        started, = [e for e in records if e["ev"] == "run.started"]
+        self.assertEqual((started["kind"], started["host"], started["base"]), ("foreman", "builder", "tip"))
+        self.assertIn("Your checkout is fabrig at tip, read-only.",
+                      (log.home() / "runs/draft/red-1/foreman-1/brief.md").read_text())
+        self.assertFalse(any(a.kind == "examine-red" for a in self.tick()))
+
+    def test_red_dispatch_fix_runs_from_main_and_readies_in_both_landing_modes(self):
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing):
+                self.plan = replace(self.plan, landing=landing)
+                write(self.path, "")
+                self.append(dict(ev="branch.landed", task="draft/a", branch="draft/a", tip="a-tip", main="tip",
+                                 **({"into": self.plan.trunk} if landing == "integration" else {})))
+                self.open()
+                self.finish_foreman()
+                actions = self.tick()
+                start, = [a for a in actions if a.kind == "start"]
+                self.assertEqual((start.task, start.run_kind), ("draft/red-1", "implement"))
+                started = [e for e in log.read(self.path) if e["ev"] == "run.started"][-1]
+                self.assertEqual((started["base"], started["branch"], started["slot"]),
+                                 ("origin/main", "draft/red-1", 1))
+                brief = (log.home() / "runs/draft/red-1-1/brief.md").read_text()
+                self.assertIn("fix the red", brief)
+                self.assertIn("precheck --onto origin/main", brief)
+                self.assertNotIn("- Trunk:", brief)
+                self.assertTrue(any(argv[-4:] == ["--discard-changes", "-C", "draft/red-1", "origin/main"]
+                                    for argv in self.commands()))
+                self.append(dict(ev="run.ended", task=start.task, run=started["run"], outcome="done"))
+                actions = self.tick()
+                self.assertEqual([(a.kind, a.task) for a in actions if a.kind in ("ready", "merge")],
+                                 [("ready", "draft/red-1")])
+                ready = [e for e in log.read(self.path) if e["ev"] == "branch.ready"][-1]
+                self.assertEqual((ready["task"], ready["branch"], ready["tip"]),
+                                 ("draft/red-1", "draft/red-1", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
+                push = ["git", "push", "origin", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:refs/heads/ready/draft/red-1"]
+                accept = ssh("fake@gate", ["fab", "queue", "receipt", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"])
+                self.assertIn(push, self.fake.argvs())
+                self.assertLess(self.fake.argvs().index(accept), self.fake.argvs().index(push))
+                receipt = json.loads(next(call.input for call in self.fake.calls if call.argv == accept))
+                self.assertEqual(receipt["main"], "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
+
+    def test_red_dispatch_left_starts_no_repair_and_failed_foreman_falls_back(self):
+        self.open()
+        self.finish_foreman(report="Done: retry: environment fault\n")
+        self.assertFalse(any(a.kind == "start" for a in self.tick()))
+        self.assertEqual(tier_reds.reds(log.read(self.path))[0].state, "signal")
+        write(self.path, "")
+        self.append(dict(ev="branch.landed", task="draft/a", tip="a", main="tip"))
+        self.open()
+        actions = self.finish_foreman(outcome="infra")
+        self.assertFalse(any(e["ev"] == "red.settled" for e in log.read(self.path)))
+        self.assertTrue(any(a.kind == "start" and a.task == "draft/red-1" for a in actions))
+        self.assertNotIn("## Repair (", (log.home() / "runs/draft/red-1-1/brief.md").read_text())
+
+    def test_red_dispatch_closed_unstarted_task_drops_and_new_tip_can_open_same_key(self):
+        self.open()
+        self.finish_foreman()
+        self.append(dict(ev="tiers.recovered", key="key-0", tip="green"), *self.red_records(tip="next"))
+        actions = self.tick()
+        self.assertFalse(any(a.kind == "start" and a.task == "draft/red-1" for a in actions))
+        self.assertTrue(any(a.kind == "examine-red" and a.task == "draft/red-2" for a in actions))
+        self.assertEqual([red.state for red in tier_reds.reds(log.read(self.path))], ["closed", "deciding"])
+
+    def test_red_dispatch_no_after_landing_host_opens_nothing(self):
+        del self.hosts["tiers"]
+        self.open()
+        self.assertFalse(any(e["ev"] == "red.opened" for e in log.read(self.path)))
+
+    def test_red_dispatch_queue_import_knows_red_tasks_in_both_modes(self):
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing):
+                self.plan = replace(self.plan, landing=landing)
+                write(self.path, "")
+                self.open()
+                self.finish_foreman()
+                self.tick()
+                self.queue_records = [dict(ev="landed", ts="queue-1", branch="draft/red-1-r2", tip="repair", main="fixed")]
+                self.tick()
+                landed, = [e for e in log.read(self.path) if e["ev"] == "branch.landed"
+                           and e.get("task") == "draft/red-1"]
+                self.assertEqual((landed["branch"], landed["main"]), ("draft/red-1-r2", "fixed"))
+                self.assertFalse(any(e["ev"] == "queue.landed" for e in log.read(self.path)))
+                self.queue_records = []
+
+    def test_red_dispatch_two_runs_park_and_answer_at_once_while_other_work_moves(self):
+        self.open()
+        self.finish_foreman()
+        self.tick()
+        self.append(dict(ev="run.ended", task="draft/red-1", run="draft/red-1-1", outcome="infra"))
+        self.tick()
+        self.append(dict(ev="run.ended", task="draft/red-1", run="draft/red-1-2", outcome="infra"),
+                    dict(ev="run.started", task="draft/other", run="draft/other-1", kind="implement", host="other"))
+        actions = self.tick()
+        park, = [a for a in actions if a.kind == "park"]
+        self.assertEqual((park.task, park.detail), ("draft/red-1", "2 runs without landing; needs judgement"))
+        self.assertTrue(any(a.run_kind == "answer" for a in actions))
+        self.assertFalse(any(a.kind == "foreman" for a in actions))
+        self.append(dict(ev="run.ended", task="draft/other", run="draft/other-1", outcome="done"),
+                    dict(ev="question.answered", task="draft/red-1", answer="Try a unit test."))
+        self.assertTrue(any(a.kind == "start" and a.task == "draft/red-1" for a in self.tick()))
+        self.assertIn("Try a unit test.", (log.home() / "runs/draft/red-1-3/brief.md").read_text())
+
+    def test_red_dispatch_question_skips_foreman(self):
+        self.open()
+        self.finish_foreman()
+        self.tick()
+        self.append(dict(ev="run.ended", task="draft/red-1", run="draft/red-1-1", outcome="question"),
+                    dict(ev="question.asked", task="draft/red-1", run="draft/red-1-1", text="Which fix?"))
+        tasks = tier_reds.tasks(self.plan, log.read(self.path))
+        self.assertEqual([q.state for q in foreman.questions(tasks, log.read(self.path))], ["queued"])
+        self.assertFalse(any(a.kind == "foreman" for a in self.tick()))
+
+    def test_red_dispatch_specless_refusal_quotes_body_and_fix_lands_nothing(self):
+        self.open()
+        self.finish_foreman()
+        self.tick()
+        self.append(dict(ev="run.ended", task="draft/red-1", run="draft/red-1-1", outcome="done"))
+        self.tick()
+        self.append(dict(ev="branch.rejected", task="draft/red-1", branch="draft/red-1", tip="aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                         step="test", findings="assertion failed"))
+        self.tick()
+        run_id = "draft/red-1/foreman-2"
+        brief = (log.home() / "runs" / run_id / "brief.md").read_text()
+        self.assertIn("# The task\n\n# Repair a red after landing", brief)
+        self.assertNotIn("# The task spec", brief)
+        report_path = log.home() / "runs" / run_id / "report.md"
+        write(report_path, "Done: fix: correct the reproduction\nadd a regression test\n")
+        self.append(dict(ev="run.ended", task="draft/red-1/foreman", run=run_id, outcome="done", report=str(report_path)))
+        self.fake.calls.clear()
+        self.tick()
+        settled, = [e for e in log.read(self.path) if e["ev"] == "refusal.settled"]
+        self.assertEqual((settled["branch"], settled["verdict"]), ("", "fix"))
+        self.assertFalse(any(call.argv[:1] == ["git"] for call in self.fake.calls))
+        self.tick()
+        body = (log.home() / "runs/draft/red-1-2/brief.md").read_text()
+        self.assertIn("correct the reproduction", body)
+        self.assertIn("add a regression test", body)
+
+    def test_red_dispatch_retire_waits_for_verdict_and_open_reds(self):
+        actions = self.tick()
+        self.assertFalse(any(a.run_kind == "retire" for a in actions))
+        self.append(dict(ev="tiers.run", tip="tip", branches=["draft/a"], reds=[]))
+        self.assertTrue(any(a.run_kind == "retire" for a in self.tick()))
+        self.open()
+        self.assertFalse(any(a.run_kind == "retire" for a in self.tick()))
+        self.finish_foreman(report="Done: retry: environment fault\n")
+        self.assertTrue(any(a.run_kind == "retire" for a in self.tick()))
+
+    def test_red_dispatch_imported_new_red_and_recovery_note_lost_event(self):
+        self.tier_records = [dict(ev="run", ts="1", tip="tip", branches=["draft/a"], reds=["default::b::t"]),
+                             dict(ev="test", state="new", key="default::b::t", ts="2", tip="tip", branches=["draft/a"], profile="default",
+                                  binary="b", test="t", error="failed", log="/log", rerun="/rerun")]
+        self.tick()
+        records = log.read(self.path)
+        imported = [e for e in records if "al_ts" in e]
+        self.assertEqual([e["ev"] for e in imported], ["tiers.run", "tiers.red"])
+        wake.settle("backstop", None, imported, log_path=self.path)
+        self.assertIn("lost event: tiers.red default::b::t", log.read(self.path)[-1]["text"])
