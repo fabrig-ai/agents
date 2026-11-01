@@ -1,0 +1,32 @@
+landing = "queue"
+
+# The thin cut of call-rebase: docs/design/calls.md 2's bullet "A `fab land`
+# refusal counts as a refusal of the chain", as designed. One direct part of
+# two tasks: the chain's side in fab/call_review.py and fab/calls.py (the
+# hold reason, the amend and settle briefs, the amender's role text), then
+# the tick's side in fab/dispatch.py (the finish path, the settle verdict).
+# Specs in tasks/, shared rules in notes/common.md, decisions and the
+# critical path in notes/decisions.md, overlaps in plan.md.
+draft = "call-rebase"
+repo = "agents"
+sources = [
+  "docs/plan/call-rebase/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "land-refusal"
+title = "A fab land refusal counts as a refusal of the chain: amended once, then held for an amend-or-user settle"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[slice]]
+id = 1
+story = "A call whose branch fab land refuses at any step logs no call.finished: the chain is amended once with fab land's log under its own heading (a rebase rebased and force-pushed, a retire told the designs main changed since its branch), lands on the next finish, and a second refusal holds it with reason `refused by fab land after its amendment` for a settle that may not land it"
+parts = ["land-refusal"]
+walk = false
