@@ -344,59 +344,106 @@ def _overlaps_panel(pairs: list[dict]) -> str:
     return '<h2>Overlaps</h2><div class="panel">' + body + '</div>'
 
 
+def _tile(label: str, value: object, sub: str = "") -> str:
+    """Render an escaped count tile, linking waiting asks to their issues."""
+    tag = "a" if label == "Waiting on the user" else "div"
+    href = f' href="{_text(ISSUES)}"' if tag == "a" else ""
+    return (f'<{tag} class="tile"{href}><div class="label">{_text(label)}</div>'
+            f'<div class="value">{_text(value)}</div>'
+            + (f'<div class="sub">{_text(sub)}</div>' if sub else "") + f"</{tag}>")
+
+
+def _card(title: str, body: str) -> str:
+    """Render a card with an escaped heading and an HTML body."""
+    return f'<div class="card"><h3>{_text(title)}</h3>{body}</div>'
+
+
+def _subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
+    """Render escaped subscription labels, limits and reset projections (docs/design/fab.md, 13.14)."""
+    if not subscriptions:
+        return '<p class="empty">No login checked in the last 24 hours.</p>'
+    rows = []
+    for subscription in subscriptions:
+        sign_ins = subscription["logins"]
+        label = " · ".join(filter(None, (subscription["kind"].title(), subscription["plan"],
+                                         subscription["subscription"],
+                                         f"{sign_ins} sign-in" + ("s" if sign_ins != 1 else ""))))
+        for index, limit in enumerate(subscription["limits"] or [{}]):
+            used = limit.get("used")
+            use = "–"
+            if used is not None:
+                state = " critical" if used >= 95 else " warning" if used >= 80 else ""
+                use = (f'<span class="meter{state}"><i style="width:{max(0, min(100, used)):g}%"></i>'
+                       f'</span> {used:g}%')
+            reset = "–"
+            if limit.get("resets") is not None:
+                try:
+                    when = datetime.fromtimestamp(limit["resets"], timezone.utc)
+                except (ValueError, OverflowError, OSError):
+                    pass
+                else:
+                    reset = (f'<time datetime="{when.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
+                             f'title="{when.strftime("%Y-%m-%d %H:%M UTC")}">'
+                             f'in {_duration(limit["resets"] - now.timestamp())}</time>')
+            rate = limit.get("rate_per_h")
+            pace = "–"
+            if limit.get("full_at") is not None:
+                pace = "full in " + _duration(limit["full_at"] - now.timestamp())
+            elif limit.get("at_reset") is not None:
+                pace = f'lasts, {limit["at_reset"]:g}% at reset'
+            cells = (_text(label) if index == 0 else "", _text(limit.get("name", "–")), use,
+                     reset, f"{rate:.1f}%/h" if rate is not None else "–", _text(pace))
+            rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
+    headings = ("Subscription", "Limit", "Used", "Resets", "Rate", "At this pace")
+    return ('<div class="scroll"><table><thead><tr>'
+            + "".join(f"<th>{heading}</th>" for heading in headings)
+            + '</tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>')
+
+
+def _tiles(snapshot: dict) -> str:
+    """Render the overview tiles in status-page order (docs/design/fab.md, 13.14)."""
+    runs, active_calls = snapshot["runs_in_flight"], snapshot["calls_in_flight"]
+    waiting, weights = snapshot["waiting_on_user"], snapshot["weight_today"]
+    subscriptions = snapshot["subscriptions"]
+    weekly = [limit["used"] for subscription in subscriptions
+              for limit in subscription["limits"] if limit["name"] == "week" and limit["used"] is not None]
+    return '<div class="tiles">' + "".join([
+        _tile("Runs in flight", runs["total"],
+              " · ".join(f"{host} {count}" for host, count in runs["by_host"].items())),
+        _tile("Calls in flight", active_calls["total"],
+              " · ".join(f"{role} {count}" for role, count in active_calls["by_role"].items())),
+        _tile("Waiting on the user", waiting["asks"], f'oldest {_age(waiting["oldest_age_s"])}'),
+        _tile("Landed on main today", snapshot["landed"]["today"],
+              f'last hour {snapshot["landed"]["last_hour"]}'),
+        _tile("Merged into a trunk today", snapshot["merged"]["today"],
+              f'last hour {snapshot["merged"]["last_hour"]}'),
+        _tile("Weight today · Codex/Claude",
+              f'{weights["ratio"]:.1f}×' if weights["ratio"] is not None else "–",
+              f'Codex {weights["codex_m"]:.1f}M · Claude {weights["claude_m"]:.1f}M'),
+        _tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} subscriptions"),
+    ]) + '</div>'
+
+
+def _drafts_panel(draft_counts: dict) -> str:
+    """Render draft activity and its empty state (docs/design/fab.md, 13.14)."""
+    drafts = []
+    for name, counts in draft_counts.items():
+        state = _badge("running", "info") if counts["runs_in_flight"] else _badge("idle", "neutral")
+        drafts.append(f'<tr><td>{_text(name)}</td><td>{state}</td>'
+                      f'<td class="num">{_text(counts["runs_in_flight"])}</td>'
+                      f'<td class="num">{_text(counts["merged_today"])}</td>'
+                      f'<td class="num">{_text(counts["landed_today"])}</td></tr>')
+    draft_table = ('<div class="scroll"><table><thead><tr><th>Draft</th><th>State</th>'
+                   '<th class="num">Runs in flight</th><th class="num">Merged today</th>'
+                   '<th class="num">Landed today</th></tr></thead><tbody>'
+                   + "".join(drafts) + '</tbody></table></div>')
+    return ('<h2>Drafts</h2><div class="panel">'
+            + (draft_table if drafts else '<p class="empty">No draft active today.</p>') + '</div>')
+
+
 def render(snapshot: dict) -> str:
     """One escaped, self-refreshing HTML document of public counts and subscription limits,
     readable at phone width in light and dark; a fixed message when the log is unreadable."""
-    def tile(label: str, value: object, sub: str = "") -> str:
-        tag = "a" if label == "Waiting on the user" else "div"
-        href = f' href="{_text(ISSUES)}"' if tag == "a" else ""
-        return (f'<{tag} class="tile"{href}><div class="label">{_text(label)}</div>'
-                f'<div class="value">{_text(value)}</div>'
-                + (f'<div class="sub">{_text(sub)}</div>' if sub else "") + f"</{tag}>")
-
-    def card(title: str, body: str) -> str:
-        return f'<div class="card"><h3>{_text(title)}</h3>{body}</div>'
-
-    def subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
-        if not subscriptions:
-            return '<p class="empty">No login checked in the last 24 hours.</p>'
-        rows = []
-        for subscription in subscriptions:
-            sign_ins = subscription["logins"]
-            label = " · ".join(filter(None, (subscription["kind"].title(), subscription["plan"],
-                                             subscription["subscription"],
-                                             f"{sign_ins} sign-in" + ("s" if sign_ins != 1 else ""))))
-            for index, limit in enumerate(subscription["limits"] or [{}]):
-                used = limit.get("used")
-                use = "–"
-                if used is not None:
-                    state = " critical" if used >= 95 else " warning" if used >= 80 else ""
-                    use = (f'<span class="meter{state}"><i style="width:{max(0, min(100, used)):g}%"></i>'
-                           f'</span> {used:g}%')
-                reset = "–"
-                if limit.get("resets") is not None:
-                    try:
-                        when = datetime.fromtimestamp(limit["resets"], timezone.utc)
-                    except (ValueError, OverflowError, OSError):
-                        pass
-                    else:
-                        reset = (f'<time datetime="{when.strftime("%Y-%m-%dT%H:%M:%SZ")}" '
-                                 f'title="{when.strftime("%Y-%m-%d %H:%M UTC")}">'
-                                 f'in {_duration(limit["resets"] - now.timestamp())}</time>')
-                rate = limit.get("rate_per_h")
-                pace = "–"
-                if limit.get("full_at") is not None:
-                    pace = "full in " + _duration(limit["full_at"] - now.timestamp())
-                elif limit.get("at_reset") is not None:
-                    pace = f'lasts, {limit["at_reset"]:g}% at reset'
-                cells = (_text(label) if index == 0 else "", _text(limit.get("name", "–")), use,
-                         reset, f"{rate:.1f}%/h" if rate is not None else "–", _text(pace))
-                rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
-        headings = ("Subscription", "Limit", "Used", "Resets", "Rate", "At this pace")
-        return ('<div class="scroll"><table><thead><tr>'
-                + "".join(f"<th>{heading}</th>" for heading in headings)
-                + '</tr></thead><tbody>' + "".join(rows) + '</tbody></table></div>')
-
     updated = _stamp(snapshot["updated"])
     clock = updated.strftime("%H:%M UTC") if updated else snapshot["updated"]
     age = snapshot.get("last_event_age_s")
@@ -409,23 +456,7 @@ def render(snapshot: dict) -> str:
         waiting = snapshot["waiting_on_user"]
         weights = snapshot["weight_today"]
         subscriptions = snapshot["subscriptions"]
-        weekly = [limit["used"] for subscription in subscriptions
-                  for limit in subscription["limits"] if limit["name"] == "week" and limit["used"] is not None]
-        content = '<div class="tiles">' + "".join([
-            tile("Runs in flight", runs["total"],
-                 " · ".join(f"{host} {count}" for host, count in runs["by_host"].items())),
-            tile("Calls in flight", active_calls["total"],
-                 " · ".join(f"{role} {count}" for role, count in active_calls["by_role"].items())),
-            tile("Waiting on the user", waiting["asks"], f'oldest {_age(waiting["oldest_age_s"])}'),
-            tile("Landed on main today", snapshot["landed"]["today"],
-                 f'last hour {snapshot["landed"]["last_hour"]}'),
-            tile("Merged into a trunk today", snapshot["merged"]["today"],
-                 f'last hour {snapshot["merged"]["last_hour"]}'),
-            tile("Weight today · Codex/Claude",
-                 f'{weights["ratio"]:.1f}×' if weights["ratio"] is not None else "–",
-                 f'Codex {weights["codex_m"]:.1f}M · Claude {weights["claude_m"]:.1f}M'),
-            tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} subscriptions"),
-        ]) + '</div>'
+        content = _tiles(snapshot)
         content += ('<h2>Waiting on the user</h2><div class="panel">'
                     + _table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
                                               ("Parked chains", waiting["by_kind"]["parked"]),
@@ -433,40 +464,28 @@ def render(snapshot: dict) -> str:
                     + f'<p class="facts">{_text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
                     + f'<p><a href="{_text(ISSUES)}">Open the questions</a></p></div>')
         content += ('<h2>Subscriptions</h2><div class="panel">'
-                    + subscriptions_table(subscriptions, updated) + '</div>')
-        drafts = []
-        for name, counts in snapshot["drafts"].items():
-            state = _badge("running", "info") if counts["runs_in_flight"] else _badge("idle", "neutral")
-            drafts.append(f'<tr><td>{_text(name)}</td><td>{state}</td>'
-                          f'<td class="num">{_text(counts["runs_in_flight"])}</td>'
-                          f'<td class="num">{_text(counts["merged_today"])}</td>'
-                          f'<td class="num">{_text(counts["landed_today"])}</td></tr>')
-        draft_table = ('<div class="scroll"><table><thead><tr><th>Draft</th><th>State</th>'
-                       '<th class="num">Runs in flight</th><th class="num">Merged today</th>'
-                       '<th class="num">Landed today</th></tr></thead><tbody>'
-                       + "".join(drafts) + '</tbody></table></div>')
-        content += ('<h2>Drafts</h2><div class="panel">'
-                    + (draft_table if drafts else '<p class="empty">No draft active today.</p>') + '</div>')
+                    + _subscriptions_table(subscriptions, updated) + '</div>')
+        content += _drafts_panel(snapshot["drafts"])
         content += _overlaps_panel(snapshot["overlaps"])
         ended = [(outcome, snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES]
         content += '<h2>Today</h2><div class="cards">' + "".join([
-            card("Runs ended", _table(("Outcome", "Runs"), ended,
-                                     badges={"done": "good", "question": "warning", "infra": "neutral",
-                                             "failed": "critical", "other": "neutral"})),
-            card("Landings", _table(("", "Last hour", "Today"), [
+            _card("Runs ended", _table(("Outcome", "Runs"), ended,
+                                      badges={"done": "good", "question": "warning", "infra": "neutral",
+                                              "failed": "critical", "other": "neutral"})),
+            _card("Landings", _table(("", "Last hour", "Today"), [
                 ("Landed on main", snapshot["landed"]["last_hour"], snapshot["landed"]["today"]),
                 ("Merged into a trunk", snapshot["merged"]["last_hour"], snapshot["merged"]["today"]),
                 ("Rejected", "–", snapshot["rejected_today"]),
             ])),
-            card("Weight", _table(("", "Millions"), [
+            _card("Weight", _table(("", "Millions"), [
                 ("Codex", f'{weights["codex_m"]:.1f}'), ("Claude", f'{weights["claude_m"]:.1f}'),
             ])),
         ]) + '</div>'
         content += '<h2>In flight</h2><div class="cards">' + "".join([
-            card("Codex runs by host", _table(("Host", "Runs"), runs["by_host"].items())
-                 if runs["by_host"] else '<p class="empty">None.</p>'),
-            card("Claude calls by role", _table(("Role", "Calls"), active_calls["by_role"].items())
-                 if active_calls["by_role"] else '<p class="empty">None.</p>'),
+            _card("Codex runs by host", _table(("Host", "Runs"), runs["by_host"].items())
+                  if runs["by_host"] else '<p class="empty">None.</p>'),
+            _card("Claude calls by role", _table(("Role", "Calls"), active_calls["by_role"].items())
+                  if active_calls["by_role"] else '<p class="empty">None.</p>'),
         ]) + '</div>'
     footer = ("<footer>From fab's event log on hel8; refreshes every 30 s. "
               'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>')
