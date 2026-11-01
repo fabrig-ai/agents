@@ -83,3 +83,20 @@ merge-tree: a plan without a probed pair runs none).
 
 Where the call sits in `_round`, the cache's format, and how many
 merge-trees a tick with nothing moved runs (none).
+
+## Repair (2026-11-01, step gate:size, foreman trunk-overlaps/overlaps-tick/foreman-1)
+
+extract private helpers from `_round` and `probe` to meet the 60-line size cap.
+The branch fails `gate:size`:
+- `fab/dispatch.py:891`: `_round` is 75 lines (cap 60).
+- `fab/overlaps.py:137`: `probe` is 85 lines (cap 60).
+
+In `fab/dispatch.py`, extract the queue/after-landing import and red-reconciliation block into a private helper returning the events, folded reds and openings-deferred flag.
+Keep the overlap call after all `_tick_loaded` calls, guarded by `not only`, with its existing exception handling and load-action completeness check.
+
+In `fab/overlaps.py`, extract the catch-up tree loop and pair-result loop into private helpers.
+Keep `probe` as the single entry point the tick calls, as required by `docs/design/fab.md`, 13.17, “The overlap probe”.
+Preserve shared cache and record updates, failure-note deduplication, tree eviction after pair failures, and skipped pairs remaining current for gone detection.
+
+Keep every extracted helper within the size cap. Preserve behavior and stay within the task’s four allowed files; no design change is needed.
+Run the size gate and `bin/fab test` with Python cache generation disabled; retain the existing acceptance assertions.
