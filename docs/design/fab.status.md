@@ -155,17 +155,20 @@
     `qa.lock`, `walk.ended` last; `fab/walks.py`); the findings' and rungs'
     fold, rung states and `rung.passed` (`fab/findings.py`); the triage
     call, report-only, its due rule and recorded decisions, and the
-    backlog rendered from the log and readied as `ladder/<draft>/backlog-<n>`
-    (`fab/triage.py`, `fab.calls.start`'s `report_only`,
-    `fab.spec_edit.commit_path`, the tick's triage steps); the page's
-    `finding` asks, `finding-<n>` signal and `## The ladder`
+    backlog rendered from the log and readied as `ladder/<draft>/backlog-<n>`,
+    its queue records imported as `branch.*` and its `backlog:<draft>`
+    signal (`fab/triage.py`, `fab.calls.start`'s `report_only`,
+    `fab.spec_edit.commit_path`, `_import_queue`'s owners, the tick's
+    triage steps, rebased on red-routing's `_tick_plan` wiring if that
+    lands first); the page's `finding` asks, `finding-<n>` and
+    `backlog:<draft>` signals and `## The ladder`
     (`fab/channel.py`); the landing report's QA figures. Built alone, an
     on-path finding stops at its foreman and holds its rung.
   - **Runs after it:** the repair path: `fab/fix.py` factored out of
-    `fab/tier_reds.py` (launch, verdict, settle, answers, task,
-    `FIX_KINDS`, `RUNS`), section 11's actions renamed `examine-fix` and
-    `remedy-fix` (red-routing builds them as `examine-red` and
-    `remedy-red`), `fab/fixes.py`, `fab/roles/foreman-finding.md` and
+    `fab/tier_reds.py` (launch, parse, section, settle, answers, task,
+    `FIX_KINDS`, `RUNS`; red's behaviour and tests unchanged), section 11's
+    `examine-red` and `remedy-red` renamed `examine-fix` and `remedy-fix`
+    with it, `fab/fixes.py`, `fab/roles/foreman-finding.md` and
     `finding_actions`.
   - **Last, separable:** walks run by fab (the `walk` role, the `build`
     run, `boxes`, logins per walk, `fab.calls.TIMEOUTS`).
