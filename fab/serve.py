@@ -272,7 +272,8 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
         "rejected_today": rejected,
         "runs_ended_today": outcomes,
         "weight_today": {"codex_m": round(codex / accounting.MILLION, 1),
-                         "claude_m": round(claude / accounting.MILLION, 1)},
+                         "claude_m": round(claude / accounting.MILLION, 1),
+                         "ratio": round(codex / claude, 1) if claude else None},
         "drafts": dict(sorted(drafts.items())),
         "subscriptions": _subscriptions(dated, now),
     }
@@ -397,8 +398,9 @@ def render(snapshot: dict) -> str:
                  f'last hour {snapshot["landed"]["last_hour"]}'),
             tile("Merged into a trunk today", snapshot["merged"]["today"],
                  f'last hour {snapshot["merged"]["last_hour"]}'),
-            tile("Weight today, Codex", f'{weights["codex_m"]:.1f}M'),
-            tile("Weight today, Claude", f'{weights["claude_m"]:.1f}M'),
+            tile("Weight today · Codex/Claude",
+                 f'{weights["ratio"]:.1f}×' if weights["ratio"] is not None else "–",
+                 f'Codex {weights["codex_m"]:.1f}M · Claude {weights["claude_m"]:.1f}M'),
             tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} subscriptions"),
         ]) + '</div>'
         content += ('<h2>Waiting on the user</h2><div class="panel">'

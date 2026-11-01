@@ -155,11 +155,32 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(current["runs_ended_today"], {
             "done": 1, "question": 1, "infra": 1, "failed": 1, "other": 2,
         })
-        self.assertEqual(current["weight_today"], {"codex_m": 1.9, "claude_m": 2.1})
+        self.assertEqual(current["weight_today"], {"codex_m": 1.9, "claude_m": 2.1, "ratio": 0.9})
         self.assertEqual(current["merged"], {"last_hour": 0, "today": 0})
         self.assertEqual(current["drafts"], {
             "today": {"runs_in_flight": 0, "landed_today": 2, "merged_today": 0},
         })
+
+    def test_serve_weight_ratio_uses_unrounded_totals_and_zero_denominator(self):
+        for events, expected in (
+            ([], {"codex_m": 0.0, "claude_m": 0.0, "ratio": None}),
+            ([event("run.ended", tokens="1240000/0/0")],
+             {"codex_m": 1.2, "claude_m": 0.0, "ratio": None}),
+            ([event("run.ended", tokens="1240000/0/0"),
+              event("call.ended", tokens="0/0/0")],
+             {"codex_m": 1.2, "claude_m": 0.0, "ratio": None}),
+            ([event("run.ended", tokens="1240000/0/0"),
+              event("call.ended", tokens="140000/0/0")],
+             {"codex_m": 1.2, "claude_m": 0.1, "ratio": 8.9}),
+            ([event("run.ended", tokens="1240000/0/0"),
+              event("call.ended", tokens="14000/0/0")],
+             {"codex_m": 1.2, "claude_m": 0.0, "ratio": 88.6}),
+            ([event("call.ended", tokens="140000/0/0")],
+             {"codex_m": 0.0, "claude_m": 0.1, "ratio": 0.0}),
+        ):
+            with self.subTest(expected=expected):
+                current = serve.snapshot(events, NOW, [])
+                self.assertEqual(current["weight_today"], expected)
 
     def test_serve_merges_belong_to_trunks_and_only_run_drafts_appear(self):
         events = [
@@ -556,7 +577,7 @@ class RenderTest(unittest.TestCase):
             "merged": {"last_hour": 3, "today": 9},
             "rejected_today": 4,
             "runs_ended_today": {"done": 11, "question": 2, "infra": 3, "failed": 4, "other": 5},
-            "weight_today": {"codex_m": 12.3, "claude_m": 4.0},
+            "weight_today": {"codex_m": 12.3, "claude_m": 4.0, "ratio": 3.1},
             "drafts": {
                 "active": {"runs_in_flight": 5, "merged_today": 6, "landed_today": 3},
                 "idle": {"runs_in_flight": 0, "merged_today": 3, "landed_today": 4},
@@ -588,8 +609,8 @@ class RenderTest(unittest.TestCase):
             '<div class="sub">last hour 2',
             '<div class="label">Merged into a trunk today</div><div class="value">9</div>'
             '<div class="sub">last hour 3',
-            '<div class="label">Weight today, Codex</div><div class="value">12.3M',
-            '<div class="label">Weight today, Claude</div><div class="value">4.0M',
+            '<div class="label">Weight today · Codex/Claude</div><div class="value">3.1×</div>'
+            '<div class="sub">Codex 12.3M · Claude 4.0M',
             '<div class="label">Subscriptions</div><div class="value">–</div><div class="sub">0 subscriptions',
         ])
         self.assertIn('main{max-width:1280px;', page)
@@ -597,6 +618,19 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(page.endswith('</footer></main></body></html>'))
         self.assertIn("<footer>From fab's event log on hel8; refreshes every 30 s. "
                       'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>', page)
+
+    def test_serve_render_weight_ratio_zero_cases(self):
+        for codex, claude, ratio, value in ((12.3, 0.0, None, "–"),
+                                         (0.0, 0.0, None, "–"),
+                                         (0.0, 4.0, 0.0, "0.0×")):
+            with self.subTest(codex=codex, claude=claude):
+                self.current["weight_today"] = {"codex_m": codex, "claude_m": claude, "ratio": ratio}
+                page = serve.render(self.current)
+                self.assertIn('<div class="label">Weight today · Codex/Claude</div>'
+                              f'<div class="value">{value}</div>'
+                              f'<div class="sub">Codex {codex:.1f}M · Claude {claude:.1f}M</div>', page)
+                self.assertNotIn("Weight today, Codex", page)
+                self.assertNotIn("Weight today, Claude", page)
 
     def test_serve_render_waiting_links_to_open_questions(self):
         issues = "https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&amp;labels=1"

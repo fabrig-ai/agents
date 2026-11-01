@@ -1901,6 +1901,13 @@ login that still works reused across them before more are signed in.
   `fab.accounting.run_weight` and `call_weight` sum today's measured endings
   in millions, to one decimal; missing weights are skipped. Invalid timestamps
   and future events are skipped; today ends at the snapshot's time.
+  The snapshot's `weight_today` keeps `codex_m` and `claude_m` and adds
+  `ratio`: Codex divided by Claude using the unrounded totals, rounded
+  to one decimal, or null when Claude's weight is zero. One tile replaces
+  the separate Codex and Claude weight tiles: `Weight today · Codex/Claude`,
+  value `4.9×` (one decimal) or `–` when the ratio is null, and sub
+  `Codex 165.0M · Claude 33.2M` using the existing one-decimal figures.
+  The Today card `Weight` stays unchanged.
 - **Drafts come from run starts.** Only prefixes of `run.started` tasks in
   the log qualify. Those with a run in flight, a main landing or a trunk
   merge today show `runs_in_flight`, `landed_today` and `merged_today`.
@@ -1950,7 +1957,7 @@ login that still works reused across them before more are signed in.
   or `–`). Meters warn at 80% and turn critical at 95%. A check with no
   limits shows `–`. With no eligible subscriptions:
   `No login checked in the last 24 hours.` A Subscriptions tile after the
-  weights shows the highest `week` percent (`–` when absent), with
+  weight ratio shows the highest `week` percent (`–` when absent), with
   `<n> subscriptions` below.
 - The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
