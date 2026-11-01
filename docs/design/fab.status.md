@@ -126,6 +126,10 @@
 
 ## Gaps and departures
 
+- **A failed task run parks for the answerer** (11-01, findings-loop): `fab.run.collect`
+  logs a failed implement, repair or rebase run's report as a `question.asked` with `park`
+  (13.1), so it queues at once; it parked unheard before.
+
 - **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; the
   tick (`fab-tick.timer`, every 2 minutes) on hel8, a transient user unit a
   reboot loses. It becomes a unit installed by `fab wake --install`.

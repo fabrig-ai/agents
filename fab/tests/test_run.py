@@ -756,6 +756,22 @@ class RunCollectTest(unittest.TestCase):
                              {"ev": "question.asked", "run": "draft/task-1", "task": TASK.id,
                               "text": "\n".join(report.splitlines()[:15])})
 
+    def test_collect_failed_task_run_parks_for_judgement(self):
+        for kind, early, parks in (("implement", None, True), ("repair", None, True),
+                                   ("implement", ["draft/need"], False), ("foreman", None, False),
+                                   ("check", None, False)):
+            with self.subTest(kind=kind, early=early), tmp_home():
+                record = started(kind=kind, **({"early": early} if early else {}))
+                fake = FakeRunner().on(["ssh"], Result(0, "ended\n\nFailed: no report\nwhy\n"))
+                self.assertEqual(run.collect("draft/task-1", [record], {HOST.name: HOST}, sh=fake), "failed")
+                questions = [event for event in log.read() if event["ev"] == "question.asked"]
+                if parks:
+                    self.assertEqual({k: v for k, v in questions[0].items() if k != "ts"},
+                                     {"ev": "question.asked", "run": "draft/task-1", "task": TASK.id,
+                                      "text": "Failed: no report\nwhy", "park": True})
+                else:
+                    self.assertEqual(questions, [])
+
     def test_collect_while_running_does_not_write(self):
         with tmp_home() as home:
             fake = FakeRunner().on(["ssh"], Result(0, "running\n"))

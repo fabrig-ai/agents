@@ -467,7 +467,8 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     """Collect an ended run once: copy its report to FAB_HOME/runs/<run>/report.md here, log
     run.ended (run, task, outcome, report, minutes since run.started, and tokens when status
     gives them, 13.5) and, for a question,
-    question.asked with the report's first 15 lines as text. Returns the outcome; None while the
+    question.asked with the report's first 15 lines as text; for a failed implement, repair or
+    rebase run that did not start early, the same with park = true (13.1). Returns the outcome; None while the
     run is still going or when it was already collected.
 
     Then free what the run held on the builder: a slot run's `fab slot release N RUN` (its
@@ -508,6 +509,12 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
     if current["outcome"] == "question":
         log.append("question.asked", path=log_path, task=started["task"], run=run_id,
                    text="\n".join(current["report"].splitlines()[:15]))
+    elif (current["outcome"] == "failed" and started.get("kind") in ("implement", "repair", "rebase")
+          and not started.get("early")):
+        # A failed task run parks for judgement as a park does, so the answerer takes it at once
+        # (findings-loop, 11-01: ladder-plan's failed repair sat parked and unheard).
+        log.append("question.asked", path=log_path, task=started["task"], run=run_id,
+                   text="\n".join(current["report"].splitlines()[:15]), park=True)
     return current["outcome"]
 
 

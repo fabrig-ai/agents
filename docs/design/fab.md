@@ -974,8 +974,13 @@ it, and the flow grows from a small start rather than to a fixed cap.
   hours).
   - `fab/foreman.py` folds where each open question stands: at the
     foreman, deciding, settled or queued. Questions of implement, repair and
-    rebase runs go to the foreman; the rest (a park at the run limit, one
-    logged by hand) queue at once. A park's `question.asked` carries
+    rebase runs go to the foreman; the rest (a park at the run limit, a
+    failed implement, repair or rebase run that did not start early, one
+    logged by hand) queue at once. A failed run parks as a park does
+    (`fab.run.collect` logs its report's first lines as a `question.asked`
+    with `park`): before (findings-loop, 11-01), a failed run's task parked
+    with no question, which no foreman, answerer or page heard, and its
+    dependents waited. A park's `question.asked` carries
     `park = true`, since it names the task's last run, which may itself have
     ended with a question; and an answer to a park grants the task a fresh
     run limit, counted from the answer. Without both, the playground replay
