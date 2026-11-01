@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, findings, log, plan, tier_reds, triage, wake, walks
+from fab import atomic, findings, fixes, log, plan, tier_reds, triage, wake, walks
 from fab.plan import Plan
 from fab.report import LANDING
 from fab.sh import Failed
@@ -124,11 +124,13 @@ def signals(events: Iterable[dict], *, folded: Sequence[tier_reds.Red] | None = 
     again. Reds in state signal open red-<n>, until red.closed or a hand clear.
     Faults open fault:<profile> for consecutive tiers.run records faulting that pair;
     only a run without that fault closes it. Pending red closures are hidden.
+    Left QA findings open finding-<n> until their rung passes again or a hand clear.
     folded may be tier_reds.reds(events), reused for this same snapshot. Pure: no files are read.
     """
     events = list(events)
     folded = tier_reds.reds(events) if folded is None else folded
-    return sorted([*_queue_signals(events), *_red_signals(events, folded=folded), *_fault_signals(events)],
+    return sorted([*_queue_signals(events), *_red_signals(events, folded=folded),
+                   *_fault_signals(events), *_finding_signals(events)],
                   key=lambda signal: signal.since)
 
 
@@ -192,6 +194,39 @@ def _red_signals(events: Sequence[dict], *, folded: Sequence[tier_reds.Red]) -> 
             read += "`, `" + str(red.report)
         found.append(Signal(red.id, "after-landing red", red.signal_ts, facts, read, True))
     return found
+
+
+def _finding_signals(events: Sequence[dict]) -> list[Signal]:
+    """Show left findings until their rung passes after settlement; pure (docs/design/fab-channel.md, 2)."""
+    surveys = fixes.foremen(events)
+    settled, passed = {}, {}
+    for index, event in enumerate(events):
+        if (event.get("ev") == "finding.settled" and event.get("verdict") == "left"
+                and all(isinstance(event.get(key), str)
+                        for key in ("finding", "run", "ts", "reason", "section"))):
+            survey = surveys.get(event["finding"])
+            if survey is None or event["run"] == survey.run:
+                settled.setdefault(event["finding"], (index, event["ts"]))
+        elif (event.get("ev") == "rung.passed"
+              and all(isinstance(event.get(key), str)
+                      for key in ("draft", "rung", "walk", "edition", "commit", "ts"))):
+            passed[event["draft"], event["rung"]] = index
+    opened = []
+    for finding in findings.findings(events).values():
+        settlement = settled.get(finding.id)
+        if finding.state != "left" or settlement is None:
+            continue
+        index, since = settlement
+        if passed.get((finding.draft, finding.rung), -1) > index:
+            continue
+        facts = (f"- Rung: {finding.rung} ({finding.backend})",
+                 f"- Why: not the code's: {finding.reason}", f"- Title: {finding.title}")
+        read = str(log.home() / "walks" / finding.walk / "report.md")
+        survey = surveys.get(finding.id)
+        if survey is not None and survey.report:
+            read += "`, `" + survey.report
+        opened.append(Signal(finding.id, "QA finding left", since, facts, read, True))
+    return opened
 
 
 def _fault_signals(events: Iterable[dict]) -> list[Signal]:

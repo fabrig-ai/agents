@@ -55,6 +55,19 @@ def finding_events(decision="user", question="Which account?", **fields):
             qa.finding_triaged("finding-1", decision, question=question, ts=ts(2))]
 
 
+def settled_finding_events(verdict="left", **fields):
+    """A routed finding through its collected foreman and settlement."""
+    task = "ladder/finding-1/foreman"
+    run_id = task + "-1"
+    return [*finding_events("path", question="", **fields),
+            event(3, "run.started", finding="finding-1", tip="main", kind="foreman",
+                  task=task, run=run_id),
+            event(4, "run.ended", task=task, run=run_id, outcome="done",
+                  report="/runs/finding-foreman/report.md"),
+            event(5, "finding.settled", finding="finding-1", run=run_id, verdict=verdict,
+                  reason="the walk needs a login", section="")]
+
+
 def plan(draft="demo", questions=()):
     return Plan(draft, "agents", (), 1.0, 2.0, {}, (), questions=questions)
 
@@ -340,6 +353,84 @@ class ChannelTest(unittest.TestCase):
                 channel.clear(identifier, text, events)
         self.assertEqual(log.read(), [])
         self.assertFalse((self.fab_home / "tick.want").exists())
+
+    def test_left_finding_signal_has_facts_reports_and_settlement_time_on_page(self):
+        events = settled_finding_events()
+        signal, = channel.signals(iter(events))
+        read = f"{self.fab_home / 'walks/walk-1/report.md'}`, `/runs/finding-foreman/report.md"
+        self.assertEqual(signal, channel.Signal("finding-1", "QA finding left", ts(5), (
+            "- Rung: b0 (chatgpt-forgejo)", "- Why: not the code's: the walk needs a login",
+            "- Title: The story stalled"), read, True))
+        page = channel.compose([], events, ts(6))
+        self.assertIn(f"""## Open signals
+
+### finding-1, QA finding left, since {ts(5)}
+
+- Rung: b0 (chatgpt-forgejo)
+- Why: not the code's: the walk needs a login
+- Title: The story stalled
+- Read: `{read}`
+- Clear: `fab page clear finding-1 TEXT`
+
+## Daily reports""", page)
+
+    def test_finding_signal_closes_only_at_its_rungs_pass_after_settlement(self):
+        events = settled_finding_events()
+        earlier = qa.rung_passed("b0", ts=ts(0))
+        self.assertEqual(len(channel.signals([earlier, *events])), 1)
+        for passed in (qa.rung_passed("b1", ts=ts(6)),
+                       qa.rung_passed("b0", draft="other", ts=ts(6)),
+                       event(6, "rung.passed", draft="ladder", rung="b0")):
+            with self.subTest(passed=passed):
+                self.assertEqual(len(channel.signals([*events, passed])), 1)
+        events.append(qa.rung_passed("b0", ts=ts(6)))
+        self.assertEqual(channel.signals(events), [])
+        self.assertIn("## Open signals\n\n(none)", channel.compose([], events, ts(7)))
+        with self.assertRaisesRegex(ValueError, "no open signal"):
+            channel.clear("finding-1", "already passed", events)
+        self.assertEqual(log.read(), [])
+        self.assertFalse((self.fab_home / "tick.want").exists())
+
+    def test_main_clear_finding_logs_drops_with_reason_and_rewrites_page(self):
+        for record in settled_finding_events():
+            log.append(**record)
+        channel.write(channel.compose([], log.read(), ts(5)))
+        with patch("fab.log.now", return_value=ts(6)), redirect_stdout(io.StringIO()) as output:
+            self.assertEqual(cli.main(["page", "clear", "finding-1", " Reconfigured ",
+                                       "the walk", "--by", "free"]), 0)
+        self.assertEqual(log.read()[-1], event(6, "signal.cleared", signal="finding-1",
+                                             by="free", text="Reconfigured the walk"))
+        self.assertIn("cleared finding-1", output.getvalue())
+        self.assertEqual(channel.signals(log.read()), [])
+        finding = findings.findings(log.read())["finding-1"]
+        self.assertEqual((finding.state, finding.reason), ("dropped", "Reconfigured the walk"))
+        page = (self.fab_home / channel.PAGE).read_text()
+        self.assertIn("## Open signals\n\n(none)", page)
+        self.assertEqual((self.fab_home / "tick.want").read_text(), "clear finding-1\n")
+        before = log.read()
+        with redirect_stderr(io.StringIO()) as errors:
+            self.assertEqual(cli.main(["page", "clear", "finding-1", "again"]), 1)
+        self.assertIn("no open signal", errors.getvalue())
+        self.assertEqual(log.read(), before)
+        self.assertEqual((self.fab_home / channel.PAGE).read_text(), page)
+
+    def test_only_settled_left_findings_open_signals(self):
+        for verdict in ("fix", "none", "left"):
+            events = settled_finding_events(verdict)
+            with self.subTest(verdict=verdict):
+                for length in range(len(events)):
+                    self.assertEqual(channel.signals(events[:length]), [])
+                self.assertEqual([signal.id for signal in channel.signals(events)],
+                                 ["finding-1"] if verdict == "left" else [])
+
+    def test_finding_signal_joins_existing_signal_kinds_in_age_order(self):
+        events = settled_finding_events() + [red_opened(7), self.rejection(8),
+                  event(9, "tiers.run", faults=["browser-jig: offline"], log="/tier.log")]
+        existing = channel.signals(events[7:])
+        self.assertEqual([signal.id for signal in existing],
+                         ["red-1", "queue:hand/pushed", "fault:browser-jig"])
+        self.assertEqual(channel.signals(events)[1:], existing)
+        self.assertEqual(channel.signals(events)[0].id, "finding-1")
 
     def test_red_signal_at_opening_has_evidence_and_reason(self):
         signal, = channel.signals(iter([red_opened()]))
