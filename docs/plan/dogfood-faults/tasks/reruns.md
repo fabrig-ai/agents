@@ -3,7 +3,7 @@ id = "reruns"
 part = "reruns"
 kind = "feature"
 needs = []
-files = ["fab/run.py", "fab/tests/test_run.py"]
+files = ["fab/run.py", "fab/tests/test_run.py", "fab/tests/test_dispatch.py"]
 effort = "high"
 minutes = 50
 +++
@@ -51,3 +51,12 @@ path's `rev-parse -q --verify` today, ~328):
 
 The check as shared, each path's source by kind, and the tests added or
 changed.
+
+## Answers
+
+2026-11-01. May this task update `fab/tests/test_dispatch.py` so
+`OptimisticStartTest.remote` reports an absent task branch for the new
+probe? Yes: its own acceptance (`bin/fab test` green) needs it. Make that
+fixture return `Result(1)` for `rev-parse -q --verify` (the first start has
+pushed nothing) and keep its skeleton-base assertion; change nothing else in
+that file. `files` now lists it.
