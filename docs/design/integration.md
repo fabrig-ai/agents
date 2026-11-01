@@ -544,22 +544,26 @@ only as tweaks once a replay matches its run.
   - An integration plan answers a queued question at once (an answer call
     as soon as the foreman cannot settle it), as the lead did in two
     minutes, not at 4 queued or after 30 minutes.
-- **Retire waits for main.** An integration plan's parts are done when
-  their tasks have merged, but its retire call starts only once the trunk
-  has landed on main (`branch.landed` for task `<draft>/integration` from
-  the queue's record), and after its verdict after landing (after-landing.md 2).
-  It then works from main, not the trunk: the call starts from
-  `origin/main` and its branch is delivered as a queue plan's call is
+- **Retire waits for main.** An integration plan's parts are done when their
+  tasks have merged, but its retire call starts only once the trunk has
+  landed on main (`branch.landed` for task `<draft>/integration` from the
+  queue's record), and after its verdict after landing (after-landing.md 2).
+  It then works from main, not the trunk, and so does every other call,
+  foreman and repair of the plan started after the trunk landed (an answer,
+  review, triage or amend call; the queue deletes the trunk, and
+  `origin/<trunk>` is soon pruned from the clone): it starts from
+  `origin/main`, and the tick takes no further trunk step for the plan (no
+  catch-up, check or ready read of `origin/<trunk>`). The retire call starts
+  from `origin/main` and its branch is delivered as a queue plan's call is
   (fabrig's queue: `ready/calls/<id>`, `call.finished` when the queue's
   record says it landed), never merged into the landed trunk; so is any
   other call of the plan delivered after its trunk landed. Once the trunk
   has landed (`fab.integration.trunk_landed`), the tick reads the plan from
-  main: each fetch of the plan checkout moves it, detached, to
-  `origin/main` (which holds the trunk's tip; the queue deleted the
-  trunk), so the retire's
-  `retired = true` ends the plan once the queue lands it. Fixed 11-01
-  (found by dogfood/design): the tick merged the retire into the trunk, so
-  the plan's status files and `retired = true` never reached main.
+  main: each fetch of the plan checkout moves it, detached, to `origin/main`
+  (which holds the trunk's tip; the queue deleted the trunk), so the
+  retire's `retired = true` ends the plan once the queue lands it. Fixed
+  11-01 (found by dogfood/design): the tick merged the retire into the
+  trunk, so the plan's status files and `retired = true` never reached main.
 - **Departures from the user's drafts, at the user's word** (10-31;
   `execution-modes.md`): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
