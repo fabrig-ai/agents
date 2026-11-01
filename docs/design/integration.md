@@ -401,40 +401,39 @@ only as tweaks once a replay matches its run.
     below those lines, never repeating or changing them
   ```
 
-  `fab/roles/cut.md` drops its `draft`, `repo`, `sources` bullet
-  (keeping `[buffer]`), `fab/roles/cut-fabrig.md` drops ``set `repo =
-  "fabrig"` ``, and `fab/roles/cut-run.md`'s "What you write" first
-  bullet becomes "`plan.toml` exists on your branch with `draft`,
-  `repo`, `sources` and fab's plan options; add below them:", its
-  template dropping its `draft`/`repo`/`sources` lines and `# the plan
-  options, verbatim`. The tick restores them where code may write: for an
-  integration plan, every merge of the cut's branch (`_merge_branch`, its
-  early releases and its last merge) restores the options in the trunk,
-  never on the cut's branch: after a clean merge and before the push, the
-  tick rewrites plan.toml's option lines from the root cut's
-  `call.started` `options` (parsed with `parse_options`) and commits
-  `<draft>: plan options restored` on the trunk; for a queue plan, the
-  restore is a commit on the cut's branch before `_deliver`, the call
-  having ended by then, with retire's guards and open finish (calls.md 3),
-  worktree `FAB_HOME/options/<root>` (a missing plan.toml makes no restore
-  and raises nothing; only retire's edit raises). Code never writes a
-  branch while a call on it is in flight. Options compare by parsed value (a different spelling of the
-  same value makes no commit); a restore removes every top-level line
-  assigning one of the keys and writes them under the comment, putting
-  the comment back before the first table line when the cut removed it; a branch with no
-  plan.toml gets none. Its
-  `call.started` carries them (`options`), so the tick reads `landing` and
-  `reviews` for the cut's own chain before plan.toml exists. For a replay
-  the operator gives the cut the manual run's inputs as `--source`: the
-  draft (`skein/docs/design/draft/component-kit.md`), fabrig's
-  `AGENTS.md` and `agents/lead.md`, `implementer.md`, `operations.md` at
-  the base, and, committed under the plan directory's `inputs/`, the
-  kickoff, the review and the manual run's brief, with a README saying the
-  brief's How, Machines and Measure are fab's in this run. With `direct =
-  true` the cut writes every task spec itself and puts notes several tasks
-  share in the plan's `notes/`, cited from each spec (the lead's
-  `common.md`, `stage-common.md`, `lib-common.md`); implementers read them
-  in their checkout.
+  `fab/roles/cut.md` drops its `draft`, `repo`, `sources` bullet (keeping
+  `[buffer]`), `fab/roles/cut-fabrig.md` drops ``set `repo = "fabrig"` ``,
+  and `fab/roles/cut-run.md`'s "What you write" first bullet becomes
+  "`plan.toml` exists on your branch with `draft`, `repo`, `sources` and
+  fab's plan options; add below them:", its template dropping its
+  `draft`/`repo`/`sources` lines and `# the plan options, verbatim`. The
+  tick restores them where code may write: for an integration plan, every
+  merge of the cut's branch (`_merge_branch`, its early releases and its
+  last merge) restores the options in the trunk, never on the cut's branch:
+  after a clean merge and before the push, the tick rewrites plan.toml's
+  option lines from the root cut's `call.started` `options` (parsed with
+  `parse_options`) and commits `<draft>: plan options restored` on the
+  trunk; for a queue plan, the restore is a commit on the cut's branch
+  before `_deliver`, the call having ended by then, with retire's guards and
+  open finish (calls.md 3), worktree `FAB_HOME/options/<root>` (a missing
+  plan.toml makes no restore and raises nothing; only retire's edit raises).
+  Code never writes a branch while a call on it is in flight. Options
+  compare by parsed value (a different spelling of the same value makes no
+  commit); a restore removes every top-level line assigning one of the keys
+  and writes them under the comment, putting the comment back before the
+  first table line when the cut removed it; a branch with no plan.toml gets
+  none. Its `call.started` carries them (`options`), so the tick reads
+  `landing` and `reviews` for the cut's own chain before plan.toml exists.
+  For a replay the operator gives the cut the manual run's inputs as
+  `--source`: the draft (`skein/docs/design/draft/component-kit.md`),
+  fabrig's `AGENTS.md` and `agents/lead.md`, `implementer.md`,
+  `operations.md` at the base, and, committed under the plan directory's
+  `inputs/`, the kickoff, the review and the manual run's brief, with a
+  README saying the brief's How, Machines and Measure are fab's in this run.
+  With `direct = true` the cut writes every task spec itself and puts notes
+  several tasks share in the plan's `notes/`, cited from each spec (the
+  lead's `common.md`, `stage-common.md`, `lib-common.md`); implementers read
+  them in their checkout.
 - **The run's own texts** (the user, 10-31): the cut and the implementers
   are told what the manual run's lead and implementers were told, and fab
   adds only what its mechanics need.

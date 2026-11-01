@@ -97,15 +97,16 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
         count toward the amend. The tick tries the finish again, each try
         `LAND_AFTER` (10) minutes after the chain's last refusal at that
         step since its reset (so an answer retries at once), up to
-        `LAND_TRIES` (3) refusals at that step counted per chain: `fab land` refusals (no `queue_ts`) at that step for the
-        chain's branch since the later of its latest call's `call.ended`
-        and its last reset (a `call.answered` for its subject or a
-        `chain.settled` amend), never by the rejection's `tip` (a rebase
-        makes a new sha each try). The third parks the chain
-        (`call.parked` with the subject, the root as call, reason `fab
-        land refused at <step> 3 times`, report the refusal's log), which
-        reaches the page (channel.md 2): a failing fetch or push is the
-        machines', the user's; its answer resets the count.
+        `LAND_TRIES` (3) refusals at that step counted per chain: `fab land`
+        refusals (no `queue_ts`) at that step for the chain's branch since
+        the later of its latest call's `call.ended` and its last reset (a
+        `call.answered` for its subject or a `chain.settled` amend), never
+        by the rejection's `tip` (a rebase makes a new sha each try). The
+        third parks the chain (`call.parked` with the subject, the root as
+        call, reason `fab land refused at <step> 3 times`, report the
+        refusal's log), which reaches the page (channel.md 2): a failing
+        fetch or push is the machines', the user's; its answer resets the
+        count.
       - **`test`:** `fab call amend` (`calls._chain_call`), before it
         compiles the brief, when the chain's last refusal is a `fab land`
         `test` refusal, rebases `origin/calls/<root>` onto `origin/main` in
