@@ -1,0 +1,91 @@
+landing = "queue"
+
+# The thin cut of findings-loop: the first build of QA findings in fab
+# (docs/design/fab.md, 13.15, "Built in this order", "Now, independent"), on
+# walks a session still starts by hand. Every part is direct; its task specs
+# are in tasks/, the shared notes in notes/. The repair path and walks run by
+# fab are a second plan, cut once red-routing's tick wiring is on main.
+draft = "findings-loop"
+repo = "agents"
+sources = [
+  "docs/plan/findings-loop/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+# What most parts read: the ladder plan and the findings' and rungs' fold.
+
+[[part]]
+id = "ladder"
+title = "The plan's [[rung]] and [ladder], and a rung's edition"
+mode = "direct"
+needs = []
+design = "docs/design/fab.md, 4 and 13.15"
+
+[[part]]
+id = "findings"
+title = "The findings' and rungs' fold: where each finding and rung stands, and passes"
+mode = "direct"
+needs = ["ladder"]
+design = "docs/design/fab.md, 13.15"
+
+# Slice 1: a hand walk enters fab.
+
+[[part]]
+id = "intake"
+title = "fab qa: walk, result and rungs, under qa.lock"
+mode = "direct"
+needs = ["ladder", "findings"]
+design = "docs/design/fab.md, 13.15"
+
+# Slice 2: the loop's judgement and its record.
+
+[[part]]
+id = "triage-rules"
+title = "When triage is due, its decisions recorded, the backlog rendered"
+mode = "direct"
+needs = ["ladder", "findings"]
+design = "docs/design/fab.md, 13.15"
+
+[[part]]
+id = "triage-call"
+title = "The triage call: report-only calls, the triager's role text and brief"
+mode = "direct"
+needs = ["findings", "triage-rules"]
+design = "docs/design/fab.md, 12 and 13.15"
+
+[[part]]
+id = "tick"
+title = "The tick's ladder steps: triage started and recorded, rung.passed, the backlog readied and landed"
+mode = "direct"
+needs = ["findings", "triage-rules"]
+design = "docs/design/fab.md, 13.8, 13.9 and 13.15"
+
+[[part]]
+id = "page"
+title = "The page's finding asks, the backlog signal and ## The ladder"
+mode = "direct"
+needs = ["ladder", "findings", "triage-rules"]
+design = "docs/design/fab.md, 13.6 and 13.15"
+
+[[part]]
+id = "figures"
+title = "The landing report's QA figures"
+mode = "direct"
+needs = []
+design = "docs/design/fab.md, 10 and 13.15"
+
+[[slice]]
+id = 1
+story = "A session's hand walk enters fab: fab qa walk compiles its brief at a rung's edition, fab qa result logs its findings and merges with walk.ended last, and fab qa rungs shows each rung due, walking, waiting, holding or passed"
+parts = ["ladder", "findings", "intake"]
+walk = false
+
+[[slice]]
+id = 2
+story = "The tick starts a triage call when findings are due, records its decisions, readies and lands the backlog as ladder/<draft>/backlog-<n>, records a rerun's pass; the user's finding questions and the ladder are on the page, and the landing report counts walks, findings and passes"
+parts = ["triage-rules", "triage-call", "tick", "page", "figures"]
+walk = true

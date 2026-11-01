@@ -1,0 +1,82 @@
++++
+id = "ladder-plan"
+part = "ladder"
+kind = "feature"
+needs = []
+files = ["fab/plan.py", "fab/walks.py", "fab/tests/test_plan.py", "fab/tests/test_walks.py", "fab/tests/ladder_plans.py", "fab/designer.py", "fab/state.py", "fab/tests/test_designer.py", "fab/tests/test_state.py"]
+effort = "medium"
+minutes = 40
++++
+# The ladder is a plan; a rung's edition is its brief's bytes
+
+Read first: `docs/plan/findings-loop/notes/common.md`,
+`docs/plan/findings-loop/notes/fold.md`.
+
+Design: `docs/design/fab.md`, 4 (a ladder plan names `[ladder]` and its
+`[[rung]]`s instead of parts) and 13.15, "The ladder is a plan" and "A
+rung's edition is its brief's bytes".
+
+## What to build
+
+In `fab/plan.py` (sites: `RESERVED` near line 17, `Plan` near 55,
+`load_plan` near 116, `_plan_tables` near 189, `problems` near 301, `load`
+near 105):
+- `Rung` (frozen dataclass: `id`, `backend`, `brief: tuple[str, ...]`,
+  `after: tuple[str, ...] = ()`) and `Ladder` (`happy_path`, `backlog`);
+- `Plan.rungs: dict[str, Rung]` (plan order, default empty) and
+  `Plan.ladder: Ladder | None` (default None), as keyword fields after the
+  existing ones;
+- `load_plan`: `[[part]]` optional (default none); `[ladder]` with both
+  keys strings; each `[[rung]]` with `id`, `backend`, `brief` (strings),
+  `after` (default none); wrong types a PlanError as for parts;
+- `problems(plan, tasks, plan_dir: Path | None = None)` adds: a plan with
+  neither parts nor rungs; a rung id not matching `[a-z0-9-]+` or used
+  twice; `after` naming no rung, or a cycle among rungs; rungs without
+  `[ladder]`, or `[ladder]` without rungs; rungs in a plan whose landing is
+  not `queue`; with plan_dir, a brief file missing under it. `load` passes
+  its plan_dir;
+- `"triage"` joins `RESERVED`.
+
+New module `fab/walks.py`, its first two functions (qa-intake adds the
+rest):
+- `edition(files: Sequence[tuple[str, str]]) -> str`: the first 12 hex of
+  sha256 over each (path, text) in order (path as plan.toml writes it,
+  UTF-8; separate path and text unambiguously, e.g. each followed by a NUL).
+  Pure.
+- `editions(plan, plan_dir, *, sh=run) -> dict[str, str]`: each rung's
+  edition from its brief files at `origin/main` of the checkout holding
+  plan_dir (`git rev-parse --show-toplevel`, then `git show
+  origin/main:<path from the checkout's root>`), in plan order; a file
+  `git show` cannot read is a ValueError naming the rung and the file.
+
+Check that a plan with rungs and no parts is never designed or retired
+(`fab.designer.retire_due` already needs a part; `fab.state` and the
+design calls must not fail on no parts); fix there only if they do.
+
+Test vocabulary `fab/tests/ladder_plans.py`: `write_ladder(directory,
+draft="ladder", rungs=None, *, briefs=None) -> Path`: a sound ladder plan
+(landing queue, `[ladder]`, rungs `{id: (backend, after)}`, default two
+rungs `b0` and `b1` after `b0` on `claude-forgejo`, and the brief files
+`briefs/kit.md` and `briefs/<rung>.md` written), through
+`fab.atomic.write`.
+
+## Acceptance
+
+Tests in `fab/tests/test_plan.py` and `fab/tests/test_walks.py`:
+- a ladder plan loads with its rungs in order and its ladder; a plan with
+  parts loads as before (existing tests unchanged);
+- each new problem is reported, one line each, in the sorted order
+  `problems` keeps; a part named `triage` is refused;
+- `edition` changes when a file's text or path changes and not otherwise;
+  `editions` reads `origin/main` through the runner (a `FakeRunner`
+  answering `git show`) and raises naming a missing file.
+
+## Pre-approved defaults
+
+- The backend check against `fab.findings.BACKENDS` is not yours (it
+  comes with rungs-fold); do not import `fab.findings`.
+- `fab status` of a ladder plan prints no task lines: fine.
+
+## Report
+
+The new fields and problems, and whether designer or state needed a change.
