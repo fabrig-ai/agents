@@ -3,7 +3,7 @@ id = "ladder-plan"
 part = "ladder"
 kind = "feature"
 needs = []
-files = ["fab/plan.py", "fab/walks.py", "fab/tests/test_plan.py", "fab/tests/test_walks.py", "fab/tests/ladder_plans.py", "fab/designer.py", "fab/state.py", "fab/tests/test_designer.py", "fab/tests/test_state.py"]
+files = ["fab/plan.py", "fab/walks.py", "fab/tests/test_plan.py", "fab/tests/test_walks.py", "fab/tests/ladder_plans.py", "fab/designer.py", "fab/state.py", "fab/tests/test_designer.py", "fab/tests/test_state.py", "fab/tests/test_dispatch.py"]
 effort = "medium"
 minutes = 40
 +++
@@ -80,3 +80,16 @@ Tests in `fab/tests/test_plan.py` and `fab/tests/test_walks.py`:
 ## Report
 
 The new fields and problems, and whether designer or state needed a change.
+
+## Answers
+
+2026-11-01. May `fab/tests/test_dispatch.py` join this task's files to
+replace its empty registered-plan fixture? Yes: the rejection of a plan with
+neither parts nor rungs is this task's acceptance, and the suite cannot be
+green without that fixture changing, so it is added to `files`. Change only
+the fixture of
+`TickTest.test_tick_writes_page_after_actions_using_explicit_log_and_registered_plans`:
+write the registered plan with `write_ladder` and keep its `[[question]]`
+`budget` (append it, or pass it through, without widening `write_ladder`'s
+signature beyond what the test needs), so the test still asserts actions
+`["start"]` and both questions on the page. Touch no other dispatcher test.
