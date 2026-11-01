@@ -1,0 +1,32 @@
+landing = "queue"
+
+# The thin cut of call-rebase-fixes: call-rebase's acceptance fixes, so the
+# code and role texts match docs/design/calls.md 2's "A `fab land` refusal
+# counts as a refusal of the chain" (the design stands). One direct part of
+# two independent tasks on disjoint files: the finish path's `fetch` rule in
+# fab/dispatch.py (the blocking finding), and the settle and amender role
+# texts (the two minor ones). Specs in tasks/, shared rules in
+# notes/common.md, decisions and the critical path in notes/decisions.md.
+draft = "call-rebase-fixes"
+repo = "agents"
+sources = [
+  "docs/plan/call-rebase-fixes/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "land-refusal-fixes"
+title = "call-rebase's acceptance fixes: only a branch absent from origin ends the chain at fetch; settle and amender role texts"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[slice]]
+id = 1
+story = "A `fab land` refusal at fetch ends the chain failed only when `git ls-remote --exit-code` reports the branch absent (exit 2); a network or auth failure goes on to amend; settle never lands a tip fab land refused; the amender at test rebases onto origin/main before fixing"
+parts = ["land-refusal-fixes"]
+walk = false
