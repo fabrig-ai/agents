@@ -596,10 +596,20 @@ def _merge_branch(branch: str, plan: Plan, checkout: Path, *, task: str | None =
             log.append("branch.rejected", path=log_path, task=task or branch, branch=branch,
                        tip=tip, step="merge", findings=findings)
         return False
+    sha = integration.catch_up_main(plan, events, task or branch)
+    contained = _contains(sha, "HEAD", checkout, sh=sh) if sha else False
     sh(["git", "push", "origin", f"HEAD:refs/heads/{plan.trunk}"], cwd=str(checkout), check=True)
     main = sh(["git", "rev-parse", "HEAD"], cwd=str(checkout), check=True).out.strip()
     log.append("branch.landed", path=log_path, task=task or branch, branch=branch,
                tip=tip, main=main, into=plan.trunk)
+    if sha:
+        if contained:
+            log.append("branch.landed", path=log_path, task=f"{plan.draft}/integration", branch="main",
+                       tip=sha, main=main, into=plan.trunk, by="repair")
+        else:
+            log.append("branch.rejected", path=log_path, task=f"{plan.draft}/integration", branch="main",
+                       tip=main, main=sha, step=integration.CATCH_UP,
+                       findings=f"Catch-up repair {task or branch} merged without main sha {sha}.")
     return True
 
 
@@ -1563,6 +1573,15 @@ def _integration_tasks(plan: Plan, tasks: Mapping[str, Task], events: list[dict]
     return integration.with_repairs(plan, tasks, events)
 
 
+def _contains(sha: str, descendant: str, checkout: Path, *, sh: Runner) -> bool:
+    """Check git ancestry in the plan checkout; errors are failures, never missing ancestry."""
+    argv = ["git", "merge-base", "--is-ancestor", sha, descendant]
+    ancestor = sh(argv, cwd=str(checkout))
+    if ancestor.code not in (0, 1):
+        raise Failed(argv, ancestor)
+    return ancestor.ok
+
+
 def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                  hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
     """Read main's ancestry after the checkout's fetch and take the trunk's next action."""
@@ -1572,22 +1591,21 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
     step = None
     try:
         main = trunk = None
+        waiting = integration.catch_up_waiting(plan, events)
+        caught = False
         if plan.landing == "integration" and plan.ready:
-            argv = ["git", "merge-base", "--is-ancestor", "origin/main", f"origin/{plan.trunk}"]
-            ancestor = sh(argv, cwd=str(checkout))
-            if ancestor.code == 1:
+            if not _contains("origin/main", f"origin/{plan.trunk}", checkout, sh=sh):
                 main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
-            elif not ancestor.ok:
-                raise Failed(argv, ancestor)
             trunk = sh(["git", "rev-parse", f"origin/{plan.trunk}"],
                        cwd=str(checkout), check=True).out.strip()
-        step = integration.next_step(plan, tasks, events, main=main, trunk=trunk)
+            if waiting:
+                caught = _contains(waiting, f"origin/{plan.trunk}", checkout, sh=sh)
+        step = integration.next_step(plan, tasks, events, main=main, trunk=trunk, caught=caught)
         if step is None:
             return
         detail = step.detail
         if step.kind == "caught":
-            main = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
-            log.append("branch.landed", path=log_path, task=subject, branch="main", tip=main,
+            log.append("branch.landed", path=log_path, task=subject, branch="main", tip=waiting,
                        main=step.tip, into=plan.trunk, by="hand")
         elif step.kind == "catch-up":
             _catch_up(plan, step.tip, checkout, sh=sh, log_path=log_path)

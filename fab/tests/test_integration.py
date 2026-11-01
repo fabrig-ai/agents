@@ -167,13 +167,12 @@ class IntegrationTest(unittest.TestCase):
                 step = integration.next_step(PLAN, pending, [*events, landed])
                 self.assertEqual((step.kind, step.tip), ("mid-check", "repaired"))
 
-    def test_third_catch_up_refusal_stops_without_a_third_repair(self):
+    def test_three_refusals_without_a_clean_catch_up_stop_without_a_third_repair(self):
         self.assertEqual(integration.CATCH_LIMIT, 3)
         events = [merged()]
         for n in range(1, 3):
             events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
-                            main=f"main-{n}", tip="tip"),
-                       merged("tip", f"demo/catch-up-{n}")]
+                            main=f"main-{n}", tip="tip")]
         clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
                      tip="main-2", main="tip")
         # Only this plan's main landing into its trunk resets the count.
@@ -195,40 +194,60 @@ class IntegrationTest(unittest.TestCase):
                 for n in range(1, 3 if repeated else 4):
                     events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
                                        main="main-1" if repeated else f"main-{n}", tip="tip"))
-                    if n == 1 or not repeated and n == 2:
+                    if repeated and n == 1:
                         events.append(merged("tip", f"demo/catch-up-{n}"))
                 repairs = integration.repair_tasks(PLAN, events, {})
                 self.assertEqual(integration.next_step(PLAN, repairs, events, main="moved", trunk="hand").kind,
                                  "stop")
                 self.assertEqual(integration.next_step(PLAN, repairs, events).kind, "stop")
                 self.assertEqual(integration.next_step(replace(PLAN, ready=False), repairs, events,
-                                                      trunk="hand").kind, "stop")
-                self.assertEqual(integration.next_step(PLAN, repairs, events, trunk="hand"),
+                                                      trunk="hand", caught=True).kind, "stop")
+                waiting = "main-1" if repeated else "main-3"
+                self.assertEqual(integration.catch_up_waiting(PLAN, events), waiting)
+                self.assertEqual(integration.next_step(PLAN, repairs, events, trunk="hand").kind, "stop")
+                self.assertEqual(integration.next_step(PLAN, repairs, events, main="moved", trunk="hand", caught=True),
                                  integration.Step("caught", "hand", "main caught up by hand"))
-                events.append(dict(clean, tip="main-new", main="hand", by="hand"))
+                events.append(dict(clean, tip=waiting, main="hand", by="hand"))
+                self.assertIsNone(integration.catch_up_waiting(PLAN, events))
                 self.assertEqual(integration.next_step(PLAN, repairs, events),
-                                 integration.Step("check", "hand", "hand"))
+                                 integration.Step("check", "hand", "hand") if repeated else None)
 
-    def test_clean_catch_up_restarts_refusal_count_and_keeps_repair_numbers(self):
-        events = [merged()]
-        for n in range(1, 3):
-            events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
-                            main=f"main-{n}", tip="tip"), merged("tip", f"demo/catch-up-{n}")]
-        events.append(dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
-                           tip="main-2", main="caught"))
-        for n in range(3, 6):
-            events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
-                               main=f"main-{n}", tip="caught"))
-            repairs = integration.repair_tasks(PLAN, events, {})
-            self.assertEqual(len(repairs), min(n, 4))
-            step = integration.next_step(PLAN, repairs, events, main=f"main-{n}")
-            if n < 5:
-                self.assertIsNone(step)
-                self.assertIn(f"demo/catch-up-{n}", repairs)
-                events.append(merged("caught", f"demo/catch-up-{n}"))
-            else:
-                self.assertEqual(step.kind, "stop")
-                self.assertNotIn("demo/catch-up-5", repairs)
+    def test_any_clean_catch_up_restarts_refusal_count_and_keeps_repair_numbers(self):
+        for by in (None, "repair", "hand"):
+            with self.subTest(by=by):
+                events = [merged()]
+                for n in range(1, 3):
+                    events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                                       main=f"main-{n}", tip="tip"))
+                clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                             tip="main-2", main="caught")
+                events.append(clean if by is None else dict(clean, by=by))
+                for n in range(3, 6):
+                    events.append(dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                                       main=f"main-{n}", tip="caught"))
+                    repairs = integration.repair_tasks(PLAN, events, {})
+                    self.assertEqual(len(repairs), min(n, 4))
+                    step = integration.next_step(PLAN, repairs, events, main=f"main-{n}")
+                    if n < 5:
+                        self.assertIsNone(step)
+                        self.assertIn(f"demo/catch-up-{n}", repairs)
+                    else:
+                        self.assertEqual(step.kind, "stop")
+                        self.assertNotIn("demo/catch-up-5", repairs)
+
+    def test_catch_up_main_uses_the_numbered_refusal_and_ignores_other_events(self):
+        refusal = dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
+                       main="main-1", tip="tip")
+        clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                     tip="main-1", main="caught", by="repair")
+        events = [refusal, merged("caught", "demo/catch-up-1"), clean,
+                  dict(refusal, task="other/integration"), dict(refusal, step="default"),
+                  dict(refusal, main="main-2")]
+        self.assertEqual(integration.catch_up_main(PLAN, events, "demo/catch-up-1"), "main-1")
+        self.assertEqual(integration.catch_up_main(PLAN, events, "demo/catch-up-2"), "main-2")
+        for identifier in ("demo/catch-up-3", "demo/repair-1", "other/catch-up-1"):
+            self.assertIsNone(integration.catch_up_main(PLAN, events, identifier))
+        self.assertIsNone(integration.catch_up_waiting(PLAN, events))
 
     def test_catch_up_repairs_fold_in_log_order_with_separate_numbers_and_answers(self):
         refusal = dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
@@ -279,14 +298,14 @@ class IntegrationTest(unittest.TestCase):
         del tasks["demo/b"]
         self.assertEqual(step().kind, "check")
 
-    def test_catch_up_repairs_never_count_as_three_reds_and_end_check_ignores_mid(self):
+    def test_checked_catch_up_repairs_never_count_as_three_reds_and_end_check_ignores_mid(self):
         events = [merged()]
         for n in range(1, 4):
             events += [dict(ev="branch.rejected", task="demo/integration", step=integration.CATCH_UP,
                             main=f"main-{n}", tip=f"tip{n-1}"),
                        merged(f"tip{n}", f"demo/catch-up-{n}"),
                        dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
-                            main=f"tip{n}", tip=f"main-{n}")]
+                            main=f"tip{n}", tip=f"main-{n}", by="repair")]
         tasks = integration.repair_tasks(PLAN, events, {})
         self.assertEqual(integration.next_step(PLAN, tasks, events), integration.Step("check", "tip3", "tip3"))
         events += [dict(run_started("demo/integration", 1, kind="check", base="tip3"), mid=True),

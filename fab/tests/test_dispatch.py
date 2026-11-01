@@ -4421,7 +4421,7 @@ class IntegrationCheckTickTest(unittest.TestCase):
                 patch.object(dispatch, "_catch_up", return_value="caught") as catch, \
                 patch.object(dispatch, "_integration_check") as check:
             dispatch._integration(self.plan, tasks, self.home, self.hosts, sh=self.fake, log_path=self.path)
-        self.assertEqual(next_step.call_args.kwargs, {"main": "main-sha", "trunk": "fetched-trunk-tip"})
+        self.assertEqual(next_step.call_args.kwargs, {"main": "main-sha", "trunk": "fetched-trunk-tip", "caught": False})
         catch.assert_called_once_with(self.plan, "trunk-tip", self.home, sh=self.fake, log_path=self.path)
         check.assert_not_called()
         self.assertEqual(self.fake.argvs(), [ancestor, ["git", "rev-parse", "origin/main"],
@@ -4449,7 +4449,7 @@ class IntegrationCheckTickTest(unittest.TestCase):
                     dispatch._integration(replace(self.plan, ready=ready), self.tasks, self.home, self.hosts,
                                           sh=self.fake, log_path=self.path)
                 self.assertEqual(next_step.call_args.kwargs,
-                                 {"main": None, "trunk": "fetched-trunk-tip" if ready else None})
+                                 {"main": None, "trunk": "fetched-trunk-tip" if ready else None, "caught": False})
                 self.assertEqual(self.fake.argvs(), [["git", "merge-base", "--is-ancestor", "origin/main",
                                   f"origin/{self.plan.trunk}"],
                                   ["git", "rev-parse", f"origin/{self.plan.trunk}"]] if ready else [])
@@ -4470,46 +4470,46 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertIn("integration draft - failed: bad decision\n", self.output.getvalue())
         self.assertEqual(log.read(self.path)[-1]["text"], "failed: bad decision")
 
-    def test_third_catch_up_refusal_starts_no_third_repair(self):
+    def test_three_refusals_without_a_clean_catch_up_start_no_third_repair(self):
         self.fake.on(["git", "merge-base"], Result(1))
         self.fake.on(["git", "rev-parse", "origin/main"], Result(0, "main-3\n"))
         for n in range(1, 4):
             self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
                               step=integration.CATCH_UP, main=f"main-{n}"))
-            if n < 3:
-                self.append(event("branch.landed", task=f"draft/catch-up-{n}", into=self.plan.trunk,
-                                  main="trunk-tip", tip=f"repair-{n}"))
         actions = self.tick()
         self.assertFalse(any(action.kind == "start" for action in actions))
         self.assertFalse(any(entry.get("task") == "draft/catch-up-3" for entry in log.read(self.path)))
         self.assertIn("integration draft stop", self.output.getvalue())
 
-    def test_stopped_catch_up_logs_a_hand_merge_and_the_next_tick_checks_it(self):
-        self.fake.on(["git", "rev-parse", "origin/main"], Result(0, "hand-main-sha\n"))
-        for repeated in (True, False):
-            with self.subTest(repeated=repeated):
-                write(self.path, "")
-                self.append(event("branch.landed", into=self.plan.trunk, main="trunk-tip", tip="a-tip"))
-                for n in range(1, 3 if repeated else 4):
-                    self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
-                                      step=integration.CATCH_UP, main="main-1" if repeated else f"main-{n}"))
-                    if n == 1 or not repeated and n == 2:
-                        self.append(event("branch.landed", task=f"draft/catch-up-{n}", into=self.plan.trunk,
-                                          main="trunk-tip", tip=f"repair-{n}"))
-                with patch.object(dispatch, "_catch_up") as catch:
-                    self.tick()
-                catch.assert_not_called()
-                record = log.read(self.path)[-1]
-                self.assertEqual({key: record[key] for key in
-                                  ("ev", "task", "branch", "tip", "main", "into", "by")},
-                                 dict(ev="branch.landed", task="draft/integration", branch="main",
-                                      tip="hand-main-sha", main="fetched-trunk-tip", into=self.plan.trunk, by="hand"))
-                self.assertIn("integration draft caught", self.output.getvalue())
-                self.tick()
-                check = log.read(self.path)[-1]
-                self.assertEqual((check["ev"], check["kind"], check["base"]),
-                                 ("run.started", "check", "fetched-trunk-tip"))
-                self.assertEqual(sum(entry.get("by") == "hand" for entry in log.read(self.path)), 1)
+    def test_stopped_catch_up_accepts_its_sha_by_hand_after_main_moves_again(self):
+        held = {"sha": False}
+        ancestry = ["git", "merge-base", "--is-ancestor", "main-1", f"origin/{self.plan.trunk}"]
+        self.fake.on(ancestry, lambda call: Result(0 if held["sha"] else 1))
+        self.fake.on(["git", "merge-base", "--is-ancestor", "main-1", "HEAD"], Result(1))
+        self.fake.on(["git", "merge-base", "--is-ancestor", "origin/main"], Result(1))
+        self.fake.on(["git", "rev-parse", "origin/main"], Result(0, "newer-main-sha\n"))
+        self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
+                          step=integration.CATCH_UP, main="main-1", findings="CONFLICT: Cargo.lock"))
+        self.tick()
+        self.append(run_ended("draft/catch-up-1"))
+        self.tick()  # Its merge logs the stopping refusal: it did not contain main-1.
+        self.assertIn("integration draft stop", self.output.getvalue())
+        held["sha"] = True
+        with patch.object(dispatch, "_catch_up") as catch:
+            self.tick()
+        catch.assert_not_called()
+        self.assertIn(ancestry, self.fake.argvs())
+        record = log.read(self.path)[-1]
+        self.assertEqual({key: record[key] for key in ("ev", "task", "branch", "tip", "main", "into", "by")},
+                         dict(ev="branch.landed", task="draft/integration", branch="main",
+                              tip="main-1", main="fetched-trunk-tip", into=self.plan.trunk, by="hand"))
+        self.assertIn("integration draft caught", self.output.getvalue())
+        with patch.object(dispatch, "_catch_up", return_value="newly-caught-tip") as catch:
+            self.tick()
+        catch.assert_called_once_with(self.plan, "fetched-trunk-tip", self.home, sh=self.fake, log_path=self.path)
+        check = log.read(self.path)[-1]
+        self.assertEqual((check["ev"], check["kind"], check["base"]), ("run.started", "check", "newly-caught-tip"))
+        self.assertEqual(sum(entry.get("by") == "hand" for entry in log.read(self.path)), 1)
 
     def test_catch_up_refusal_starts_implement_repair_from_trunk_then_merges_and_checks(self):
         self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
@@ -4532,6 +4532,90 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertEqual((check["kind"], check["base"]), ("check", "fixed-tip"))
         self.assertTrue(any(entry["ev"] == "branch.landed" and entry["task"] == "draft/catch-up-1"
                             and entry["into"] == self.plan.trunk for entry in log.read(self.path)))
+
+    def test_four_conflicting_main_moves_each_log_a_checked_repair_and_never_stop(self):
+        # Drive real catch-up refusals and task merges; only git and builders are faked.
+        current = {"sha": "", "caught": True}
+        self.fake.on(["git", "rev-parse", "origin/main"], lambda call: Result(0, current["sha"]))
+        self.fake.on(["git", "merge-base"],
+                     lambda call: Result(0 if call.argv[-2] != "origin/main" or current["caught"] else 1))
+        self.fake.on([*dispatch.FAB_GIT, "merge"],
+                     lambda call: Result(1, "CONFLICT: Cargo.lock") if call.argv[-1] == current["sha"] else Result(0))
+        for n in range(1, 5):
+            with self.subTest(move=n), patch.object(dispatch, "_integration_check"):
+                current.update(sha=f"main-{n}", caught=False)
+                self.assertIsNone(dispatch._catch_up(self.plan, "fixed-tip", self.home,
+                                                    sh=self.fake, log_path=self.path))
+                actions = self.tick()
+                start, = [action for action in actions if action.kind == "start"]
+                self.assertEqual((start.task, start.run_kind), (f"draft/catch-up-{n}", "implement"))
+                self.append(run_ended(start.task))
+                current["caught"] = True
+                actions = self.tick()
+                self.assertTrue(any(action.kind == "merge" and action.task == start.task for action in actions))
+                records = log.read(self.path)
+                clean, = [entry for entry in records if entry.get("by") == "repair" and entry["tip"] == current["sha"]]
+                self.assertEqual({key: clean[key] for key in ("ev", "task", "branch", "main", "into")},
+                                 dict(ev="branch.landed", task="draft/integration", branch="main",
+                                      main="fixed-tip", into=self.plan.trunk))
+                index = records.index(clean)
+                self.assertEqual(records[index - 1]["task"], start.task)
+                ancestry = ["git", "merge-base", "--is-ancestor", current["sha"], "HEAD"]
+                self.assertIn(ancestry, self.fake.argvs())
+                call = next(call for call in self.fake.calls if call.argv == ancestry)
+                self.assertEqual(call.cwd, str(self.home))
+                self.assertIsNone(integration.catch_up_waiting(self.plan, records))
+                tasks = integration.with_repairs(self.plan, self.tasks, records)
+                self.assertEqual(integration.next_step(self.plan, tasks, records).kind, "check")
+        self.assertEqual(sum(entry.get("by") == "repair" for entry in log.read(self.path)), 4)
+        self.assertNotIn("integration draft stop", self.output.getvalue())
+
+    def test_repair_merged_without_its_main_sha_logs_refusal_and_stops_at_once(self):
+        ancestry = ["git", "merge-base", "--is-ancestor", "main-sha", "HEAD"]
+        self.fake.on(ancestry, Result(1))
+        waiting = ["git", "merge-base", "--is-ancestor", "main-sha", f"origin/{self.plan.trunk}"]
+        self.fake.on(waiting, Result(1))
+        self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
+                          step=integration.CATCH_UP, main="main-sha", findings="CONFLICT: Cargo.lock"))
+        self.tick()
+        self.append(run_ended("draft/catch-up-1"))
+        with patch.object(dispatch, "_catch_up") as catch, patch.object(dispatch, "_integration_check") as check:
+            self.tick()
+        catch.assert_not_called()
+        check.assert_not_called()
+        records = log.read(self.path)
+        refusal, = [entry for entry in records if entry.get("ev") == "branch.rejected" and entry["tip"] == "fixed-tip"]
+        self.assertEqual({key: refusal[key] for key in ("task", "branch", "step", "main")},
+                         dict(task="draft/integration", branch="main", step=integration.CATCH_UP, main="main-sha"))
+        self.assertIn("draft/catch-up-1 merged without main sha main-sha", refusal["findings"])
+        self.assertEqual(records[records.index(refusal) - 1]["task"], "draft/catch-up-1")
+        self.assertFalse(any(entry.get("by") == "repair" for entry in records))
+        self.assertEqual(list(integration.repair_tasks(self.plan, records, {})), ["draft/catch-up-1"])
+        self.assertEqual(integration.catch_up_waiting(self.plan, records), "main-sha")
+        self.assertIn("integration draft stop", self.output.getvalue())
+        # A later tick still waits for the refused sha, despite containing current main.
+        self.tick()
+        self.assertFalse(any(entry.get("by") == "hand" for entry in log.read(self.path)))
+
+    def test_catch_up_repair_ancestry_error_leaves_its_merge_retryable(self):
+        answer = {"code": 128}
+        ancestry = ["git", "merge-base", "--is-ancestor", "main-sha", "HEAD"]
+        self.fake.on(ancestry, lambda call: Result(answer["code"], err="ancestry unavailable"))
+        self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
+                          step=integration.CATCH_UP, main="main-sha", findings="CONFLICT: Cargo.lock"))
+        self.tick()
+        self.append(run_ended("draft/catch-up-1"))
+        self.tick()
+        records = log.read(self.path)
+        self.assertFalse(any(entry.get("ev") == "branch.landed" and entry.get("task") == "draft/catch-up-1"
+                             for entry in records))
+        self.assertEqual(sum(entry["ev"] == "branch.rejected" for entry in records), 1)
+        self.assertFalse(any(argv[:2] == ["git", "push"] for argv in self.fake.argvs()))
+        self.assertIn("ancestry unavailable", self.output.getvalue())
+        answer["code"] = 0
+        self.tick()
+        self.assertEqual(sum(entry.get("by") == "repair" for entry in log.read(self.path)), 1)
+        self.assertEqual(sum(argv[:2] == ["git", "push"] for argv in self.fake.argvs()), 1)
 
     def test_catch_up_repair_question_skips_foreman_and_report_answer_reaches_next_brief(self):
         self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",

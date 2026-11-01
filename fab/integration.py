@@ -64,7 +64,7 @@ def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
 
 
 def _clean_catch_up(plan: Plan, event: dict) -> bool:
-    """A logged merge of main into this plan's trunk, by the tick or by hand."""
+    """A logged merge of main into this plan's trunk, by the tick, a checked repair or by hand."""
     return (event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
             and event.get("task") == f"{plan.draft}/integration" and event.get("branch") == "main")
 
@@ -94,6 +94,22 @@ def _catch_up_refusals(plan: Plan, events: Sequence[dict]) -> dict[int, str | No
         if identifier is not None:
             repairs[identifier] = main
     return result
+
+
+def catch_up_main(plan: Plan, events: Sequence[dict], identifier: str) -> str | None:
+    """The main sha named by the refusal that made this catch-up repair, or None. Pure."""
+    return next((events[position].get("main")
+                 for position, repair in _catch_up_refusals(plan, events).items()
+                 if repair == identifier), None)
+
+
+def catch_up_waiting(plan: Plan, events: Sequence[dict]) -> str | None:
+    """The first stopping refusal's sha since the last clean catch-up, or None. Pure."""
+    clean = next((position for position in range(len(events) - 1, -1, -1)
+                  if _clean_catch_up(plan, events[position])), -1)
+    return next((events[position].get("main")
+                 for position, identifier in _catch_up_refusals(plan, events).items()
+                 if identifier is None and position > clean), None)
 
 
 def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
@@ -176,13 +192,14 @@ def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) 
 
 
 def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
-              main: str | None = None, trunk: str | None = None) -> Step | None:
+              main: str | None = None, trunk: str | None = None, caught: bool = False) -> Step | None:
     """Check an entirely merged trunk, ready its green tip when requested (queue_step), or stop
     after three failed checks. Wait for unfinished tasks, absent merges and checks in flight.
     The third end red stops before its generated repair can start. A catch-up refusal after
     its main sha's repair merged, or the third since a clean catch-up, stops for judgement.
     main is origin/main's sha when the trunk lacks it, otherwise None; trunk is the fetched
-    origin/<trunk> tip. A stopped ready plan containing main logs a hand catch-up there. Pure."""
+    origin/<trunk> tip. caught says that trunk contains catch_up_waiting's sha, so a stopped
+    ready plan can log a hand catch-up even if main has moved on. Pure."""
     if plan.landing != "integration":
         return None
     tasks = {identifier: task for identifier, task in tasks.items() if task.kind != "red"}
@@ -198,11 +215,8 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
         return None
     if sum(check["outcome"] == "failed" and not check.get("mid") for check in checks) >= 3:
         return Step("stop", tip, "red 3 times; needs judgement")
-    clean = next((position for position in range(len(events) - 1, -1, -1)
-                  if _clean_catch_up(plan, events[position])), -1)
-    if any(identifier is None and position > clean
-           for position, identifier in _catch_up_refusals(plan, events).items()):
-        if plan.ready and main is None and trunk:
+    if catch_up_waiting(plan, events):
+        if plan.ready and caught and trunk:
             return Step("caught", trunk, "main caught up by hand")
         return Step("stop", tip, "main catch-up refused repeatedly; needs judgement")
     views = state.fold(tasks, events)
