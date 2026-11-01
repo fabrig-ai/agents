@@ -174,8 +174,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   subject). A `fab page answer` follows the same path. Completed mutations
   are logged before moving on; a crash between a forge mutation and its
   record can repeat that mutation on the next pass.
-- Deployment (the token file, a transient timer on hel8 running
-  `fab issues sync` every 2 minutes) is by hand.
+- Deployment: the token file (`~/.config/fab/forgejo.token`) is by hand;
+  the timer running `fab issues sync` every 2 minutes is `fab issues
+  --install`'s (machines.md 4).
 
 ## 4. Later
 

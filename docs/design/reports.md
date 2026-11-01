@@ -213,13 +213,16 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   issues at `https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1`.
   The repository is private; the public page links to it without showing
   issue contents.
-- **Deployment is by hand at the user's OK:** a transient unit on hel8 and
-  Caddy's `status.fabrig.ai` moved to `reverse_proxy 127.0.0.1:8370`.
+- **Deployment:** `fab serve --install` writes and enables
+  `fab-status.service` on the dispatcher (machines.md 4); the server exits
+  with status 75 when its install moves, to restart on the new code. Caddy's
+  `status.fabrig.ai` proxies to 127.0.0.1:8370 (by hand, ops'), except the
+  director's static `/v0.1.0.html` and `/user/`.
 
 ## 5. Later
 
-- `fab report daily` on a timer on hel8, with the dispatcher's; reports
-  posted to the director rather than read from FAB_HOME.
+- Reports posted to the director rather than read from FAB_HOME (the daily
+  timer is `fab report daily --install`'s, machines.md 4).
 - Report metrics the records do not hold yet: lines changed per landed
   branch, questions by kind, continuity, CPU per step against its budget,
   after-landing verdicts by outcome, lag and coverage (its reds are counted,

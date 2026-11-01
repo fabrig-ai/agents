@@ -33,6 +33,11 @@
 
 ## Gaps and departures
 
+- **The dispatcher's own units** (4, 11-01): designed; to be built by plan
+  `hel8-units`. Until it lands, `fab-status`, `fab-issues` and
+  `fab-logins-check` are transient units started by hand
+  (`FAB_HOME/bin/start-*.sh`), and `fab report daily` has no timer.
+
 - **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; the
   tick (`fab-tick.timer`, every 2 minutes) on hel8, a transient user unit a
   reboot loses. It becomes a unit installed by `fab wake --install`.

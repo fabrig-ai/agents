@@ -186,7 +186,51 @@ login that still works reused across them before more are signed in.
   login, as it does places), and checks of `chatgpt` records, which only a
   temper box can read: their live runs show whether they work.
 
-## 4. Later
+## 4. The dispatcher's own units
+
+hel8 runs four services besides the tick (tick.md 6): the status page,
+the forge issue loop, the login checks and the daily reports. Each was a
+transient unit started by hand until 11-01; each is now a persistent
+systemd user unit that fab writes, on one pattern (the user, 11-01, via the
+director: "lab.html item 3").
+
+| Command | Units | Runs | When |
+|---|---|---|---|
+| `fab serve --install` | `fab-status.service` | `fab serve --port 8370 --bind 127.0.0.1` (reports.md 4) | always, restarted on failure |
+| `fab issues --install` | `fab-issues.service`, `fab-issues.timer` | `fab issues sync` (channel.md 3) | every 2 minutes (`*:0/2`) |
+| `fab logins check --install` | `fab-logins-check.service`, `fab-logins-check.timer` | `fab logins check --all` (3); `StandardOutput=null`, its stderr kept | at :05 and :35 (`*:5/30`), TimeoutStartSec 1800 |
+| `fab report daily --install` | `fab-report-daily.service`, `fab-report-daily.timer` | `fab report daily` with no plan dir, which takes the plans listed in `FAB_HOME/plans` (reports.md 2; with plan dirs given it reports those, as today) | daily at 00:30 UTC |
+
+- **One pattern** (`fab/units.py`): each command installs only on a machine
+  whose role in `fab/hosts.toml` is `dispatcher`; elsewhere it does nothing
+  and says so. It writes its files into `~/.config/systemd/user` through
+  `fab.atomic.write`, stops a transient unit of the same name first (check
+  off: it may be gone), then `daemon-reload` and `enable --now` (the timer,
+  or the service when there is none). It is idempotent: a second run
+  rewrites the same text and restarts nothing that is running unchanged,
+  except that a written service whose text changed is restarted. A unit
+  disabled by hand stays disabled, as `fab/units.py` treats a pause. It
+  prints each path written and `enabled <unit>`.
+- **Following main as the tick's units do:** every unit runs fab from
+  `FAB_HOME/install`. A timer's oneshot service first runs `{ git -C
+  <install> fetch -q origin && git -C <install> checkout -q --detach
+  origin/main; } || true`, then `exec <install>/bin/fab <command>`, so a
+  failed fetch still runs on the code it has. The long-running
+  `fab-status.service` cannot move its code under itself: `fab serve`
+  checks its install's `HEAD` every 60 seconds and, when it changed since it
+  started, stops serving and exits with status 75, which `Restart=on-failure`
+  (after 5 seconds) turns into a start on the new code. The tick moves the
+  install at least every 10 minutes (its backstop).
+- **Survives a reboot:** user units of an enabled `WantedBy=` start at boot
+  only with linger on for the user. Each install reads `loginctl show-user
+  <user> -p Linger` and prints a warning when it is not `yes`, without
+  failing.
+- **Deployment:** ops runs the four commands on hel8 once they land; the
+  hand-made clones `FAB_HOME/serve-install` and `FAB_HOME/issues-install`
+  and the scripts `FAB_HOME/bin/start-{status,issues,logins-check}.sh` are
+  then unused.
+
+## 5. Later
 
 - Elastic builders from `fab hosts check`'s numbers.
 - Logins (3), next: after-landing `--live` run on the
