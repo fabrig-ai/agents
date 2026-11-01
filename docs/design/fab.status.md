@@ -5,6 +5,41 @@
 
 ## Present
 
+- **Reds reach their owners** (11-01; the user, after the night of 10-31,
+  when every after-landing red and a hand-pushed rejection were handled by
+  sessions noticing them by chance). Built and wired into the tick:
+  - the records: the after-landing `run` carries `reds` and `commits`,
+    `test` records their `key`, an unattributed red names the run's
+    suspects' branches; the imports give `tiers.red` (new and
+    unattributed, with key, state, error, rerun), `tiers.recovered` and
+    `tiers.run`, each with `host`, deduplicated with the binary in the
+    key; `fab after-landing run` wakes the tick after a new or unattributed
+    red or a recovery (11, 13.9);
+  - `fab/tier_reds.py` and `fab/roles/foreman-red.md`: the reds' one-pass
+    fold and states (`covered` and unfixed among them), openings by tip and
+    suspects, closings (the absent rule among them), owners, the evidence
+    file, the red tasks `<draft>/red-<n>`, the red foreman's brief, start,
+    remedy and settle (11, 13.1);
+  - the tick: reds closed and opened each round (deferred after a failed
+    load, never in a replay, against an empty owner map with no plan
+    loaded), red foremen started and settled, `<draft>/red-<n>` tasks run
+    from `origin/main` in both landing modes, sorted with the repairs and
+    readied to the queue, `RED_RUNS`, answer calls listing them in both
+    modes; the specless refusal foreman, for 13.12's repairs too; a fabrig
+    plan's retire waiting for its verdict; `red.settled` and `red.closed`
+    waking the tick again; the lost-event note counting after-landing
+    records as one entry (11, 13.1, 13.4, 13.9, 13.10, 13.12);
+  - hand-pushed queue records imported as `queue.*` with `gate` (13.8), the
+    page's `## Open signals` with its `queue:`, `red-` and `fault:` kinds,
+    its first line, `fab page clear` and its wake (13.6), and the landing
+    report's red figures and signal line (10); the queue's retire fix and
+    `rejected`'s `tests` (6, their own entry below).
+  Tests use fake runners, records and logs. Deployed (11-01) to hetzner8
+  (the queue and after-landing units) and hel8 (the tick follows main).
+  What is left (bisection, a second repair round, the owner's spec, the
+  pushing session told, reds standing from before `reds`, Fix mode's
+  public-item gate) is in section 14.
+
 - **The user's questions on the forge** (11-01, 13.16): `fab issues sync`
   opens one labelled issue per subject, reads user comments through medium
   reply calls, records decisions through `channel.answer`, and closes
@@ -110,49 +145,7 @@
 - **After landing is live:** `fab-after-landing.service` on hetzner8,
   slot 7, since 11-01 (hetzner10 until it retired, 11-01); the tick imports its verdicts onto the user's page.
   The old `tools/after-landing` (hetzner7, slot 4) stopped with hetzner7,
-  which no longer answers. A new red reaches no task yet: the page is where
-  it is heard (the next bullet).
-- **Reds reach their owners: the design leads the code** (the user, 11-01,
-  after the night of 10-31, when every after-landing red and a hand-pushed
-  rejection were handled by sessions noticing them by chance). Built
-  (11-01), the records' side: the after-landing `run` record carries
-  `reds` and `test` records their `key`; an unattributed red names the
-  run's suspects' branches; `fab.after_landing.imported` gives `tiers.red`
-  for new and unattributed tests (with key, state, error and rerun) and
-  `tiers.recovered`, and `tiers.run` carries `reds` and `commits`; the
-  import's dedup key includes the binary; `fab after-landing run` wakes the
-  tick after a run with a new or unattributed red or a recovery (13.9's
-  sender side); the page labels the newest run's reds `new red:` or
-  `unattributed red:`. Built (11-01), the hand-pushed side: the queue's
-  records of a branch that is not fab's (13.8: neither owned nor known to
-  the log) imported as `queue.rejected`, `queue.landed` and
-  `queue.collateral` with `gate`, an unloaded plan's records deferred, and
-  a tick with no loaded plan importing them and rewriting the page (13.4);
-  the page's `## Open signals` with the `queue:<branch>` kind and its new
-  first line (13.6); `fab page clear` and its wake; the backstop's
-  `lost event` note naming taskless records by branch (13.9). Built
-  (11-01), the reds' module, not yet wired: `fab/tier_reds.py` (the reds'
-  one-pass fold and their states, `covered` and unfixed among them; the
-  openings by tip and suspects; the closings, the absent rule among them;
-  owners; the evidence file; the red tasks `<draft>/red-<n>`; the red
-  foreman's brief, start, remedy and settle) and `fab/roles/foreman-red.md`
-  (11, 13.1). Built (11-01), the page and the report: the after-landing
-  imports carry `host` (11); the page's `red-<n>` signals (opened to the
-  page, left, unfixed; hidden as soon as the red's closing is due, and a
-  clear refused while that closure is pending) and `fault:<profile>`
-  signals (an unbroken streak, never cleared by hand), and the open-red
-  lines under `## After landing` (13.6, 11); the landing report's red
-  figures and its signal line for ownerless reds and hand-pushed
-  rejections, counted on their `queue_ts` day (10). Designed, not built:
-  the tick's wiring, that is, the dispatcher's round (reds opened and
-  closed, foremen started and settled, `red_actions`), red tasks run from
-  main and readied, and their `RED_RUNS` limit (11); the specless refusal
-  foreman (13.1); `red.settled` and `red.closed` waking the tick again and
-  the lost-event note for `tiers.red` and `tiers.recovered` (13.9); a
-  fabrig plan's retire waiting for its verdict (11, 13.12). So today no red
-  opens: only faults and queue signals reach the page, and a specless
-  repair's refusal foreman still reads its spec from `task.path`
-  (`fab.repairs.start`), which a specless task does not have.
+  which no longer answers. Its reds reach their owners (Present, 11-01).
 - **QA findings: designed, not built** (13.15; the user, 11-01, after
   qa-ladder ran v0.1.0's ladder by hand and left 48 off-path findings in
   `coord/qa-ladder/findings.md` with no owner). Nothing of it is in the

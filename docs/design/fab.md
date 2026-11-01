@@ -646,9 +646,11 @@ which folds where each red stands, and the tick.
     task's (13.1, specless).
   - **Two runs, then Claude:** its run limit is `RED_RUNS` (2), not
     `MAX_RUNS`: Fix mode wakes Claude after two failed tries
-    (`execution-modes.md`). A park at the limit queues for the answerer at
-    once, as any park; a question of its runs skips the foreman (no spec,
-    no options) and queues, as a specless repair's does (13.12).
+    (`execution-modes.md`). A park at the limit queues for the answerer as
+    any park does, its thresholds applying; a question of its runs skips
+    the foreman (no spec, no options) and queues, as a specless repair's
+    does (13.12). Answer calls list red tasks and their questions in both
+    landing modes (`fab/calls.py`), not only in integration plans.
 - **One open repair per red, until it recovers.** A red is open from its
   `red.opened`; it closes when every one of its keys has closed, and the
   tick logs `red.closed` (reason `recovered`, `absent` or `cleared`, tip the
@@ -716,6 +718,15 @@ which folds where each red stands, and the tick.
   action: a foreman still deciding ends and is collected, and nothing
   settles it. A red task that exists is one of the plan's tasks, so
   `decide` starts, readies and parks it as any.
+  - **A failed load defers openings:** in a round where any listed plan
+    failed to load (a fetch failure among them), new reds are not opened
+    until the next round (closing still runs), and, when there is a
+    machine with the role `after-landing`, no fabrig plan's retire starts
+    that round. Otherwise a red whose suspect is that plan's task would
+    open as hand-pushed, and lose its owner for good.
+  - **A replay never opens reds:** `fab tick --only` opens none and skips
+    the retire wait below, since its plans never land on main.
+  - With no loaded plan the round still closes and opens reds (13.4).
 - **A fabrig plan retires after its verdict:** its retire call starts only
   once a `tiers.run` names its last branch to land on main among its
   `branches` (the trunk for an integration plan, its last task's for a
@@ -1084,10 +1095,14 @@ before it lands (13.1).
   same draft) is printed and skipped; the others tick. It logs nothing,
   and `fab tick` exits 1. A retired plan is skipped.
 - **A tick with no loaded plan** (none listed or named, or none that
-  loads) imports the queue's unowned records (13.8) and rewrites the page,
-  and nothing else: no after-landing import, no measurement of the
-  builders, no decisions and no strays collected. Failed loads are still
-  printed and still make `fab tick` exit 1.
+  loads) imports the queue's unowned records (13.8) and the after-landing
+  records (section 11), closes reds, and, when no listed plan failed to
+  load, opens new reds against an empty owner map, so each is a page
+  signal; then it rewrites the page and starts nothing: no measurement of
+  the builders, no decisions, no foremen and no strays collected. On 11-01
+  hel8 had no plan listed and its log held no `tiers.run` at all: the night
+  of 10-31's situation, every suspect hand-pushed, which only the page can
+  hear. Failed loads are still printed and still make `fab tick` exit 1.
 - **Design calls run in parallel** for independent parts. A plan's
   skeleton and contract calls in flight number at most its flow target
   (13.2): two at its start, growing as the target does. The eligible parts
@@ -1335,7 +1350,8 @@ only the backstop.
   every change of state arrives as an event, so the backstop finds nothing
   to do. A backstop tick that took a want, collected an ended run or
   imported a queue record, a `tiers.red` or a `tiers.recovered` found a
-  lost event, and logs a note saying so
+  lost event, and logs a note saying so (the after-landing records count
+  as one entry, `after-landing: <n> records`)
   (`lost event: ...`); its other work (an answer due after 30 minutes, a
   review after 4 hours, a builder become calm, a retried failure) is the
   timer's by nature and is not noted. `fab wake --install [PLAN_DIR...]`
@@ -1379,6 +1395,9 @@ things fab follows, whatever the clock says:
   - a repair or rebase is a task whose next run carries a refusal (a
     `branch.rejected` since its last run); a rerun after an `Infra:`
     outcome is not, and keeps its part's place;
+  - a red task (`<draft>/red-<n>`, kind `red`, section 11) sorts into the
+    repair group too, ahead of the plan's slice tasks, behind
+    consolidations: a red reaches its owner at once;
   - within each group, tasks go by the first slice that holds their part,
     then their part's place in the plan, then their specs' order.
 - **Then, as written:** contracts land alone and their readers are pulled;
