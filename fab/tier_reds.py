@@ -39,6 +39,7 @@ class Red:
     tasks contains suspect owners: task ids, or draft names for integration trunks.
     covered is the first fault-free tiers.run tip naming the landed repair (including
     rebased branches); empty until covered. hand_pushed lists suspects without fab owners.
+    signal_ts is when it became a signal, empty until then and retained after closing.
     """
 
     id: str
@@ -63,6 +64,7 @@ class Red:
     repair: bool = False
     started: bool = False
     covered: str = ""
+    signal_ts: str = ""
     _signal_at: int = field(default=-1, repr=False, compare=False)  # log position, for clears with tied ts
 
     @property
@@ -124,7 +126,8 @@ def reds(events: Iterable[dict]) -> list[Red]:
     red.closed is terminal and supplies close_reason/close_tip. since is the record's
     ts for each state transition; report is the foreman's run.ended report path, even
     when collected after closing.
-    Missing required fields are skipped. A clear is decided by closures, not folded as
+    Missing required fields, non-string red/tip/draft/route, and keys/suspects/tasks
+    other than lists of strings are skipped. A clear is decided by closures, not folded as
     closed until close_reds writes red.closed. No files are read.
     """
     found: dict[str, Red] = {}
@@ -135,6 +138,11 @@ def reds(events: Iterable[dict]) -> list[Red]:
             continue
         if kind == OPENED and all(k in event for k in
                                   ("red", "tip", "keys", "suspects", "tasks", "draft", "route")):
+            if (not all(isinstance(event[key], str) for key in ("red", "tip", "draft", "route"))
+                    or not all(isinstance(event[key], list)
+                               and all(isinstance(value, str) for value in event[key])
+                               for key in ("keys", "suspects", "tasks"))):
+                continue
             identifier = event["red"]
             if identifier not in found:
                 state = "foreman" if event["route"] == "foreman" else "signal"
@@ -142,6 +150,7 @@ def reds(events: Iterable[dict]) -> list[Red]:
                           tuple(event["suspects"]), tuple(event["tasks"]),
                           event["draft"], event["route"], stamp, state, stamp,
                           signal_reason=event.get("reason", "") if state == "signal" else "",
+                          signal_ts=stamp if state == "signal" else "",
                           _signal_at=position if state == "signal" else -1)
                 found[identifier] = red
                 if red.task:
@@ -168,7 +177,7 @@ def reds(events: Iterable[dict]) -> list[Red]:
             if advanced is red:
                 continue
             if advanced.state == "signal" and red.state != "signal":
-                advanced = replace(advanced, _signal_at=position)
+                advanced = replace(advanced, signal_ts=stamp, _signal_at=position)
             found[identifier] = advanced
             if advanced.foreman is not None:
                 by_run[advanced.foreman] = identifier

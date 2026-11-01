@@ -269,6 +269,34 @@ class TierRedsFoldTest(unittest.TestCase):
         events = [opened(), *malformed, *foreman_run("done"), settled()]
         self.assertEqual(reds.reds(events)[0].state, "repairing")
 
+    def test_openings_require_string_fields_and_lists_of_strings(self):
+        for changes in ({"tip": None}, {"keys": None}, {"keys": [None]}, {"keys": [[KEY]]},
+                        {"suspects": None}, {"suspects": [7]}, {"suspects": [{"branch": "demo/a"}]},
+                        {"red": []}, {"draft": None}, {"route": None}, {"tasks": [None]}):
+            with self.subTest(changes=changes):
+                malformed = opened(**changes)
+                self.assertEqual(reds.reds([malformed]), [])
+                red, = reds.reds([malformed, opened()])
+                self.assertEqual((red.id, red.state), ("red-1", "foreman"))
+
+    def test_signal_time_covers_each_route_and_survives_closure(self):
+        routes = [
+            [opened(route="signal", reason="no suspects")],
+            [opened(), *foreman_run("done"), settled("left")],
+            repair_events() + [event("branch.landed", task="demo/red-1"),
+                               checked(tip="unfixed", branches=["demo/red-1-r2"])],
+        ]
+        for records in routes:
+            with self.subTest(route=records[-1]["ev"]):
+                records = [{**record, "ts": str(i)} for i, record in enumerate(records)]
+                self.assertTrue(all(not red.signal_ts for red in reds.reds(records[:-1])))
+                red, = reds.reds(records)
+                self.assertEqual((red.state, red.signal_ts), ("signal", records[-1]["ts"]))
+                records += [event(reds.CLOSED, red="red-1", reason="recovered") | {"ts": "later"}]
+                red, = reds.reds(records)
+                self.assertEqual((red.state, red.since, red.signal_ts),
+                                 ("closed", "later", records[-2]["ts"]))
+
     def test_closed_is_terminal_preserves_settlement_and_opening_order(self):
         events = repair_events() + [opened(red="red-2"),
                  event(reds.CLOSED, red="red-1", reason="absent", tip="green"),

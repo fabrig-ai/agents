@@ -98,17 +98,19 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
     return questions + _log_asks(events)
 
 
-def signals(events: Iterable[dict]) -> list[Signal]:
+def signals(events: Iterable[dict], *, folded: Sequence[tier_reds.Red] | None = None) -> list[Signal]:
     """Open signals, oldest first, from the log alone (docs/design/fab.md, 13.6).
 
     Queue rejections open queue:<branch>; a landing, a rejection or collateral at another
     tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
     again. Reds in state signal open red-<n>, until red.closed or a hand clear.
     Faults open fault:<profile> for consecutive tiers.run records faulting that pair;
-    only a run without that fault closes it. Pure: no files are read.
+    only a run without that fault closes it. Pending red closures are hidden.
+    folded may be tier_reds.reds(events), reused for this same snapshot. Pure: no files are read.
     """
     events = list(events)
-    return sorted([*_queue_signals(events), *_red_signals(events), *_fault_signals(events)],
+    folded = tier_reds.reds(events) if folded is None else folded
+    return sorted([*_queue_signals(events), *_red_signals(events, folded=folded), *_fault_signals(events)],
                   key=lambda signal: signal.since)
 
 
@@ -145,14 +147,12 @@ def _queue_signals(events: Iterable[dict]) -> list[Signal]:
     return found
 
 
-def _red_signals(events: Sequence[dict]) -> list[Signal]:
-    """Show the red fold's signals, hiding hand clears before the tick records closure."""
-    folded = tier_reds.reds(events)
-    cleared = {identifier for identifier, reason, _ in tier_reds.closures(events, folded=folded)
-               if reason == "cleared"}
+def _red_signals(events: Sequence[dict], *, folded: Sequence[tier_reds.Red]) -> list[Signal]:
+    """Show the red fold's signals, hiding every pending closure before the tick records it."""
+    closing = {identifier for identifier, _, _ in tier_reds.closures(events, folded=folded)}
     found = []
     for red in folded:
-        if red.state != "signal" or red.id in cleared:
+        if red.state != "signal" or red.id in closing:
             continue
         tests = []
         for key in red.keys[:10]:
@@ -161,18 +161,18 @@ def _red_signals(events: Sequence[dict]) -> list[Signal]:
             except (TypeError, json.JSONDecodeError):
                 case = None
             tests.append(" ".join(case) if isinstance(case, list) and len(case) == 3
-                         and all(isinstance(part, str) for part in case) else key)
+                         and all(isinstance(part, str) for part in case) else str(key))
         if len(red.keys) > 10:
             tests.append(f"and {len(red.keys) - 10} more")
-        suspects = [branch + (" (hand-pushed)" if branch in red.hand_pushed else "")
+        suspects = [str(branch) + (" (hand-pushed)" if branch in red.hand_pushed else "")
                     for branch in red.suspects]
         facts = (f"- Tip: `{red.tip}`", f"- Why: {red.signal_reason}",
                  "- Tests: " + (", ".join(tests) or "(none)"),
                  "- Suspects: " + (", ".join(suspects) or "(none)"))
         read = str(tier_reds.evidence_path(red.id))
         if red.report:
-            read += "`, `" + red.report
-        found.append(Signal(red.id, "after-landing red", red.since, facts, read, True))
+            read += "`, `" + str(red.report)
+        found.append(Signal(red.id, "after-landing red", red.signal_ts, facts, read, True))
     return found
 
 
@@ -296,18 +296,21 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def landing_lines(events: Iterable[dict]) -> list[str]:
+def landing_lines(events: Iterable[dict], *, folded: Sequence[tier_reds.Red] | None = None) -> list[str]:
     """The newest tiers.run's verdict, counts, faults, CPU and budget diagnostics,
     then its tiers.red records labelled `new red:` or `unattributed red:` with suspects.
     Append `<red> (<draft>/<red>): <state>, <k> tests at `<tip[:12]>`, since <ts>`
     for each open red that is not a signal, in opening order. Without a run, only those
-    open-red lines remain. Pure.
+    open-red lines remain. Pending closures are hidden. folded may be tier_reds.reds(events),
+    reused for this same snapshot. Pure.
     """
     events = list(events)
+    folded = tier_reds.reds(events) if folded is None else folded
+    closing = {identifier for identifier, _, _ in tier_reds.closures(events, folded=folded)}
     last = next((event for event in reversed(events) if event.get("ev") == "tiers.run"), None)
     opened = [f"{red.id} ({red.task}): {red.state}, {len(red.keys)} tests at "
-              f"`{red.tip[:12]}`, since {red.since}"
-              for red in tier_reds.reds(events) if red.state not in ("closed", "signal")]
+              f"`{str(red.tip)[:12]}`, since {red.since}"
+              for red in folded if red.state not in ("closed", "signal") and red.id not in closing]
     if last is None:
         return opened
     line = (f"{last.get('verdict', '?')} at `{str(last.get('tip', ''))[:12]}`, {last.get('ts', '')}: "
@@ -315,18 +318,18 @@ def landing_lines(events: Iterable[dict]) -> list[str]:
                 ("new", "new"), ("standing", "standing"), ("unattributed", "unattributed"),
                 ("flakes", "flake"))))
     if last.get("faults"):
-        line += "; faults: " + "; ".join(last["faults"])
+        line += "; faults: " + "; ".join(map(str, last["faults"]))
     if "cpu_s" in last:
         line += f"; CPU {last['cpu_s']:.3f}s, wall {last.get('wall_s', 0):.3f}s, starved {last.get('starved', 0)}"
         if last.get("wall_starved"):
             line += "; wall limit: starved"
     details = []
     if last.get("budget"):
-        details.append("budget: " + ", ".join(last["budget"]))
-    details.extend("over budget: " + value for value in last.get("over_budget", []))
-    details.extend("possible hang: " + value for value in last.get("possible_hangs", []))
+        details.append("budget: " + ", ".join(map(str, last["budget"])))
+    details.extend(f"over budget: {value}" for value in last.get("over_budget", []))
+    details.extend(f"possible hang: {value}" for value in last.get("possible_hangs", []))
     reds = [f"{event.get('state', 'new')} red: {event.get('profile')} {event.get('test')}, since "
-            + (", ".join(event.get("branches") or []) or "unknown branches")
+            + (", ".join(map(str, event.get("branches") or [])) or "unknown branches")
             for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")
             and event.get("state", "new") in ("new", "unattributed")]
     return [line, *details, *reds, *opened]
@@ -411,7 +414,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     and events; each ask's body: plan, its text; call, excerpt(Path(report)); parked, its
     text, then a blank line and excerpt(Path(report)) when report is not "". The reports are
     latest_reports(fab.log.home() / "reports"). Return render(entries, reports, now,
-    unread, landing_lines(events), signals(events))."""
+    unread, landing_lines(events), signals(events)), sharing one tier_reds.reds fold."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
@@ -427,8 +430,9 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
         if ask.kind == "parked" and ask.report:
             body += "\n\n" + excerpt(Path(ask.report))
         entries.append((ask, body))
+    folded = tier_reds.reds(events)
     return render(entries, latest_reports(log.home() / "reports"), now, unread,
-                  landing_lines(events), signals(events))
+                  landing_lines(events, folded=folded), signals(events, folded=folded))
 
 
 def write(text: str) -> Path:

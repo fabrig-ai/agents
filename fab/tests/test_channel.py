@@ -223,6 +223,65 @@ class ChannelTest(unittest.TestCase):
         events.insert(1, event(1, "signal.cleared", signal="red-1"))
         self.assertEqual([signal.id for signal in channel.signals(events)], ["red-1"])
 
+    def test_pending_red_closures_hide_signals_and_refuse_repeated_clears(self):
+        key = red_opened()["keys"][0]
+        for closing in (event(2, "tiers.recovered", key=key, tip="green"),
+                        event(2, "tiers.run", tip="absent", faults=[], reds=[],
+                              starved=0, unobserved=0),
+                        event(2, "signal.cleared", signal="red-1")):
+            with self.subTest(closing=closing["ev"]):
+                events = [red_opened(), closing]
+                self.assertEqual(channel.signals(events), [])
+                self.assertNotIn("### red-1,", channel.compose([], events, ts(3)))
+                for _ in range(2):
+                    with self.assertRaisesRegex(ValueError, "no open signal"):
+                        channel.clear("red-1", "seen", events)
+                self.assertEqual(log.read(), [])
+                self.assertFalse((self.fab_home / "tick.want").exists())
+
+    def test_pending_repair_closures_hide_after_landing_lines(self):
+        events = foreman_events("fix")
+        for closing in (event(5, "tiers.recovered", key=events[0]["keys"][0], tip="green"),
+                        event(5, "tiers.run", tip="absent", faults=[], reds=[],
+                              starved=0, unobserved=0)):
+            with self.subTest(closing=closing["ev"]):
+                page = channel.compose([], [*events, closing], ts(6))
+                self.assertNotIn("red-1 (demo/red-1)", page)
+                self.assertNotIn("### red-1,", page)
+
+    def test_compose_folds_reds_once_and_consumers_reuse_an_explicit_fold(self):
+        events = [*foreman_events("fix"), red_opened(5, "red-2")]
+        folded = tier_reds.reds(events)
+        with patch.object(tier_reds, "reds", wraps=tier_reds.reds) as fold:
+            page = channel.compose([], events, ts(6))
+        fold.assert_called_once_with(events)
+        self.assertIn("red-1 (demo/red-1): repairing", page)
+        self.assertIn("### red-2,", page)
+        with patch.object(tier_reds, "reds", side_effect=AssertionError("fold repeated")):
+            self.assertEqual([signal.id for signal in channel.signals(events, folded=folded)], ["red-2"])
+            self.assertEqual(len(channel.landing_lines(events, folded=folded)), 1)
+            self.assertEqual(channel.signals(events, folded=[]), [])
+            self.assertEqual(channel.landing_lines(events, folded=[]), [])
+
+    def test_page_skips_malformed_red_openings_and_prints_non_string_facts(self):
+        for changes in ({"tip": None}, {"keys": None}, {"keys": [1]},
+                        {"suspects": [None]}, {"suspects": [{"branch": "hand/pushed"}]}):
+            for route in ("signal", "foreman"):
+                with self.subTest(changes=changes, route=route):
+                    events = [red_opened(route=route, **changes)]
+                    self.assertEqual(channel.signals(events), [])
+                    self.assertEqual(channel.landing_lines(events), [])
+                    self.assertIn("## Open signals\n\n(none)", channel.compose([], events, ts(2)))
+        events = foreman_events()
+        events[2]["report"] = 123
+        events += [event(5, "tiers.run", tip=None, faults=[7], budget=[8],
+                         over_budget=[9], possible_hangs=[10]),
+                   event(5, "tiers.red", tip=None, profile=11, test=12, branches=[13])]
+        page = channel.compose([], events, ts(6))
+        for text in ("`, `123`", "faults: 7", "budget: 8", "over budget: 9", "possible hang: 10",
+                     "new red: 11 12, since 13"):
+            self.assertIn(text, page)
+
     def test_fault_signals_count_runs_keep_first_time_and_latest_text_and_log(self):
         events = [event(1, "tiers.run", faults=["live-temper: exit 4", "browser-jig: exit 75"],
                         log="/al/first.log"),
