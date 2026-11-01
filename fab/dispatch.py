@@ -1225,9 +1225,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
         _record_passes(plan, log.read(log_path), directory, sh=sh, log_path=log_path)
         _ready_backlog(plan, log.read(log_path), checkout, sh=sh, log_path=log_path)
         events = log.read(log_path)
-    tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
-    tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind not in fix.FIX_KINDS},
-             **tier_reds.tasks(plan, events, folded=folded), **fixes.tasks(plan, events)}
+    tasks = calls.answer_tasks(plan, specs.checked_tasks(plan, tasks, events), events, folded=folded)
     actions = decide(plan, tasks, events, hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
@@ -1753,7 +1751,7 @@ def main(argv: list[str]) -> int:
             hosts = machines.load() if loaded else {}
             folded = tier_reds.reds(events)
             for plan, tasks, _, _ in loaded:
-                tasks = {**tasks, **tier_reds.tasks(plan, events, folded=folded), **fixes.tasks(plan, events)}
+                tasks = calls.answer_tasks(plan, tasks, events, folded=folded)
                 for action in decide(plan, tasks, events, hosts):
                     print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:

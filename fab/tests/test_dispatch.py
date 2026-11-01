@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import atomic, call_review, channel, cli, designer, dispatch, drafts, findings, fix, fixes, flow, foreman, gates, integration, log, overlaps, plan, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
+from fab import atomic, call_review, calls, channel, cli, designer, dispatch, drafts, findings, fix, fixes, flow, foreman, gates, integration, log, overlaps, plan, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Failed, Result, run, ssh
@@ -6367,6 +6367,77 @@ class RedDispatchTest(unittest.TestCase):
         self.assertEqual([e["ev"] for e in imported], ["tiers.run", "tiers.red"])
         wake.settle("backstop", None, imported, log_path=self.path)
         self.assertEqual("lost event: after-landing: 1 records", log.read(self.path)[-1]["text"])
+
+
+class FindingAnswerDispatchTest(unittest.TestCase):
+    def setUp(self):
+        from fab.tests.test_fixes import records, foreman_events, settlement
+        self.home = self.enterContext(tmp_home())
+        self.directory = write_ladder(self.home / "plan")
+        path = self.directory / "plan.toml"
+        write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
+        self.plan = plan.load_plan(path)
+        for record in records() + foreman_events() + [settlement()]:
+            log.append(**record)
+        self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(self.home)))
+        self.fake.on(["git", "ls-tree"], Result(0, self.plan.ladder.backlog))
+        self.fake.on(["git", "show"], Result(0, triage.backlog_text(self.plan, log.read())))
+        self.enterContext(redirect_stdout(io.StringIO()))
+
+    def ask(self):
+        log.append(**run_started("ladder/finding-1"))
+        log.append(**run_ended("ladder/finding-1", outcome="question"))
+        log.append("question.asked", task="ladder/finding-1", run="ladder/finding-1-1",
+                   text="Which finding fix?")
+
+    def test_finding_answer_tick_launches_one_call_whose_brief_has_the_question(self):
+        self.ask()
+        actions = dispatch.tick(self.directory, sh=self.fake, hosts={}, only=True)
+        self.assertEqual([action for action in actions if action.run_kind == "answer"],
+                         [Action("call", task="ladder", run_kind="answer")])
+        launched = [argv for argv in self.fake.argvs() if argv[:1] == ["systemd-run"] and "answer" in argv]
+        self.assertEqual(len(launched), 1)
+        self.assertEqual(launched[0][-4:], ["call", "answer", "--plan", str(self.directory.resolve())])
+        output = io.StringIO()
+        with patch.object(calls, "run", self.fake), redirect_stdout(output):
+            self.assertEqual(calls.main(["answer", "--plan", str(self.directory), "--brief-only"]), 0)
+        self.assertIn("# Question: ladder/finding-1 (ladder/finding-1-1)", output.getvalue())
+        self.assertIn("Which finding fix?", output.getvalue())
+        self.assertIn("# Repair a QA finding (finding-1)", output.getvalue())
+
+    def test_finding_answer_tick_starts_no_answer_call_without_a_queued_question(self):
+        actions = dispatch.tick(self.directory, sh=self.fake, hosts={}, only=True)
+        self.assertFalse(any(action.run_kind == "answer" for action in actions))
+        self.assertFalse(any(argv[:1] == ["systemd-run"] and "answer" in argv for argv in self.fake.argvs()))
+
+    def test_finding_answer_dry_run_uses_the_shared_task_set(self):
+        self.ask()
+        before = log.read()
+        output = io.StringIO()
+        with patch.object(dispatch, "run", self.fake), patch.object(dispatch.machines, "load", return_value={}), \
+             patch.object(calls, "answer_tasks", wraps=calls.answer_tasks) as answer_tasks, redirect_stdout(output):
+            self.assertEqual(dispatch.main([str(self.directory), "--dry-run"]), 0)
+        answer_tasks.assert_called_once()
+        current, tasks, events = answer_tasks.call_args.args
+        self.assertEqual(current, self.plan)
+        self.assertIn("ladder/finding-1", calls.answer_tasks(current, tasks, events))
+        self.assertEqual(log.read(), before)
+        self.assertFalse(any(argv[:1] == ["systemd-run"] for argv in self.fake.argvs()))
+
+    def test_finding_answer_report_is_logged_and_folded_into_the_repair_body(self):
+        self.ask()
+        log.append(**call_started("answer-finding", "answer", "ladder"))
+        log.append(**call_ended("answer-finding"))
+        write(log.home() / "calls/answer-finding/report.md",
+              "Done: answered\nAnswer ladder/finding-1: Reproduce with the fake model.\n"
+              "Answered: ladder/finding-1\n")
+        dispatch._finish(Action("finish", task="answer-finding"), log_path=None)
+        answered = log.read()[-1]
+        self.assertEqual({key: answered[key] for key in ("ev", "task", "call", "answer")},
+                         dict(ev="question.answered", task="ladder/finding-1", call="answer-finding",
+                              answer="Reproduce with the fake model."))
+        repair = fixes.tasks(self.plan, log.read())["ladder/finding-1"]
+        self.assertIn("## Answers\n\n- Reproduce with the fake model.", repair.body)
 
 
 class FindingDispatchTest(unittest.TestCase):

@@ -11,11 +11,11 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import call_review, calls, channel, cli, designer, log
-from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
+from fab import call_review, calls, channel, cli, designer, fix, fixes, integration, log, tier_reds
+from fab.plan import Part, Plan, Question, Slice, Task, load_plan, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.ladder_plans import write_ladder
-from fab.tests.support import FakeRunner, call_started, call_ended, tmp_home
+from fab.tests.support import FakeRunner, call_started, call_ended, run_ended, run_started, tmp_home
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -1164,6 +1164,70 @@ class MainTest(unittest.TestCase):
                 self.assertIn("Which red fix?", output.getvalue())
                 self.assertIn("# Repair a red after landing", output.getvalue())
                 self.assertIn("## Task spec (none: its body)", output.getvalue())
+
+    def test_answer_tasks_keeps_folded_repairs_and_replaces_loaded_fix_kinds(self):
+        from fab.tests.test_fixes import records, foreman_events, settlement
+        from fab.tests.test_tier_reds import opened, settled
+        with tmp_home() as root:
+            plan = load_plan(write_ladder(root / "plan") / "plan.toml")
+            plan = replace(plan, repo="fabrig")
+            events = records() + foreman_events() + [settlement(), opened(draft=plan.draft),
+                run_started("ladder/red-1/foreman", kind="foreman", red="red-1", tip="tip"),
+                run_ended("ladder/red-1/foreman"), settled(run="ladder/red-1/foreman-1")]
+            finding = fixes.tasks(plan, events)["ladder/finding-1"]
+            loaded = {finding.id: replace(finding, body="Stale finding spec.")}
+            loaded["ladder/red-1"] = replace(finding, id="ladder/red-1", kind="red", body="Stale red spec.")
+            loaded["ladder/feature"] = replace(finding, id="ladder/feature", kind="feature", body="Keep this task.")
+            for kind in fix.FIX_KINDS:
+                identifier = f"ladder/absent-{kind}"
+                loaded[identifier] = replace(finding, id=identifier, kind=kind)
+            before = dict(loaded)
+            for landing in ("queue", "integration"):
+                current = replace(plan, landing=landing)
+                history = events + [dict(ev="branch.landed", task="ladder/feature", into=current.trunk, main="tip"),
+                    run_started("ladder/integration", kind="check", base="tip"),
+                    run_ended("ladder/integration", outcome="failed")]
+                for folded in (None, tier_reds.reds(history)):
+                    with self.subTest(landing=landing, folded=folded is not None):
+                        actual = calls.answer_tasks(current, loaded, history, folded=folded)
+                        expected = {"ladder/feature": loaded["ladder/feature"],
+                                    **tier_reds.tasks(current, history), **fixes.tasks(current, history)}
+                        if landing == "integration":
+                            expected.update(integration.repair_tasks(current, history, {}, loaded))
+                        self.assertEqual(actual, expected)
+                        self.assertEqual(actual[finding.id], finding)
+            self.assertEqual(loaded, before)
+
+    def test_answer_tasks_reuses_the_supplied_red_snapshot(self):
+        from fab.tests.test_tier_reds import repair_events
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            events = repair_events()
+            folded = tier_reds.reds(events)
+            with patch.object(tier_reds, "reds", side_effect=AssertionError("folded again")):
+                actual = calls.answer_tasks(plan, tasks, events, folded=folded)
+            self.assertIn("demo/red-1", actual)
+
+    def test_answer_includes_ladder_finding_question_and_repair_body(self):
+        from fab.tests.test_fixes import records, foreman_events, settlement
+        with tmp_home() as root:
+            directory = write_ladder(root / "plan")
+            path = directory / "plan.toml"
+            write(path, path.read_text().replace('repo = "agents"', 'repo = "fabrig"'))
+            plan = load_plan(path)
+            events = records() + foreman_events() + [settlement(),
+                run_started("ladder/finding-1"), run_ended("ladder/finding-1", outcome="question"),
+                dict(ev="question.asked", task="ladder/finding-1", run="ladder/finding-1-1", text="Which finding fix?")]
+            for record in events:
+                log.append(**record)
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), redirect_stdout(output):
+                self.assertEqual(calls.main(["answer", "--plan", str(directory), "--brief-only"]), 0)
+            repair = fixes.tasks(plan, events)["ladder/finding-1"]
+            self.assertIn("# Question: ladder/finding-1 (ladder/finding-1-1)", output.getvalue())
+            self.assertIn("Which finding fix?", output.getvalue())
+            self.assertIn("## Task spec (none: its body)\n\n" + repair.body.rstrip("\n"), output.getvalue())
 
     def test_answer_stop_reports_follow_each_open_ask_even_with_equal_fields(self):
         with tmp_home() as root:

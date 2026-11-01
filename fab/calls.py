@@ -16,11 +16,11 @@ import shlex
 import sys
 import time
 import uuid
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, channel, foreman, integration, log, state, tier_reds, wake
+from fab import atomic, channel, fix, fixes, foreman, integration, log, state, tier_reds, wake
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -690,6 +690,19 @@ def _chain_call(role: str, root: str, repo: Path, events: list[dict],
     return text, chain.subject + "/settle", dict(report_only=True, fields={"settles": chain.root})
 
 
+def answer_tasks(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
+                 folded: Sequence[tier_reds.Red] | None = None) -> dict[str, Task]:
+    """The task set shared by the tick and the answer call's brief.
+
+    Add integration repairs, drop loaded tasks of fix.FIX_KINDS, then fold red and
+    finding repairs from events. folded reuses the round's red snapshot. A stop's
+    question comes through fab.foreman.questions over this set, without a stop task.
+    """
+    tasks = integration.with_repairs(plan, tasks, events)
+    return {**{identifier: task for identifier, task in tasks.items() if task.kind not in fix.FIX_KINDS},
+            **tier_reds.tasks(plan, events, folded=folded), **fixes.tasks(plan, events)}
+
+
 def _answer_questions(tasks: Mapping[str, Task], events: list[dict]) -> list[dict]:
     """Queued questions with stop reports captured before each ask, in log order."""
     queued = {(item.task, item.run, item.text, item.asked): item
@@ -752,9 +765,7 @@ def main(argv: list[str]) -> int:
             text = review_brief(plan, tasks, events, root, plan_path=plan_path, **facts)
             subject = f"{plan.draft}/review"
         else:
-            # An integration plan's repairs have no spec file; their questions come too.
-            tasks = integration.with_repairs(plan, tasks, events) if plan.landing == "integration" else tasks
-            tasks = {**tasks, **tier_reds.tasks(plan, events)}
+            tasks = answer_tasks(plan, tasks, events)
             questions = _answer_questions(tasks, events)
             text = answer_brief(questions, tasks, root, plan=plan, **facts)
             subject = plan.draft
