@@ -202,9 +202,10 @@ def landing_lines(events: Iterable[dict]) -> list[str]:
         details.append("budget: " + ", ".join(last["budget"]))
     details.extend("over budget: " + value for value in last.get("over_budget", []))
     details.extend("possible hang: " + value for value in last.get("possible_hangs", []))
-    reds = [f"new red: {event.get('profile')} {event.get('test')}, since "
+    reds = [f"{event.get('state', 'new')} red: {event.get('profile')} {event.get('test')}, since "
             + (", ".join(event.get("branches") or []) or "unknown branches")
-            for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")]
+            for event in events if event.get("ev") == "tiers.red" and event.get("tip") == last.get("tip")
+            and event.get("state", "new") in ("new", "unattributed")]
     return [line, *details, *reds]
 
 

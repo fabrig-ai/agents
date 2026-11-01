@@ -311,6 +311,19 @@ capacity
         page = channel.render([], [], ts(0), landing=["green at `x`, t: new 0"])
         self.assertIn("\n\n## After landing\n\n- green at `x`, t: new 0\n", page)
 
+    def test_landing_lines_distinguish_new_and_unattributed_reds(self):
+        events = [dict(ev="tiers.run", tip="x", verdict="red", new=2, unattributed=1),
+                  dict(ev="tiers.red", tip="x", profile="p", test="legacy"),
+                  dict(ev="tiers.red", tip="x", state="new", profile="p", test="new",
+                       branches=["d/a"]),
+                  dict(ev="tiers.red", tip="x", state="unattributed", profile="p", test="unknown",
+                       branches=["d/b"]),
+                  dict(ev="tiers.red", tip="old", state="unattributed", profile="p", test="old")]
+        self.assertEqual(channel.landing_lines(events)[1:], [
+            "new red: p legacy, since unknown branches",
+            "new red: p new, since d/a",
+            "unattributed red: p unknown, since d/b"])
+
     def test_render_empty_page_and_no_unread_section(self):
         self.assertEqual(channel.render([], [], ts(0)), f"""# The user's page
 {ts(0)}. Only what is the user's: budgets, machines, what is hard to reverse.
