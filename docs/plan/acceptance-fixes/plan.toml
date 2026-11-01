@@ -3,3 +3,43 @@ repo = "agents"
 sources = ["docs/plan/acceptance-fixes/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of acceptance-fixes: the acceptance review's findings on
+# precheck-starved and df-followups, in the request's two tasks. Items 1-2
+# first (a starved or unobserved receipt never stands in for the gate; the
+# collector's records leave the builders), then items 3-5 (an integration
+# plan's settles, and its tasks started from main, work once its trunk has
+# landed). Both parts are direct, one task each; specs in tasks/, the standing
+# rules in notes/common.md, the decisions and the critical path in
+# notes/decisions.md. trunk-landed waits for precheck-receipt because the
+# request orders them; they share no file.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "precheck-receipt"
+title = "A receipt with starved or unobserved tests is never reused, and precheck removes the collector's records from the builder"
+mode = "direct"
+needs = []
+design = "docs/design/landing.md, 3"
+
+[[part]]
+id = "trunk-landed"
+title = "After an integration trunk lands, a settle and a remedy commit from main and a task started from main lands, not merges"
+mode = "direct"
+needs = ["precheck-receipt"]
+design = "docs/design/integration.md, 3"
+
+[[slice]]
+id = 1
+story = "A precheck that starves 7 tests and never runs 938 writes a green receipt counting both, so a batch of one on the same main runs the queue's checks instead of fmt alone, and the builder keeps no collector records"
+parts = ["precheck-receipt"]
+walk = false
+
+[[slice]]
+id = 2
+story = "With an integration plan's trunk landed and pruned, a foreman's answer and a repair's section commit from origin/main, and a task started from main lands or readies instead of failing at origin/<trunk> each tick"
+parts = ["trunk-landed"]
+walk = false
