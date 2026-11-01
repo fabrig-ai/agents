@@ -198,7 +198,7 @@ each is now a persistent systemd user unit that fab writes, on one pattern
 | Command | Units | Runs | Schedule and limits |
 |---|---|---|---|
 | `fab serve --install` | `fab-status.service` | `fab serve --port 8370 --bind 127.0.0.1` (reports.md 4) | always; `Restart=on-failure`, `RestartSec=5`; exit 75 restarts it on new code |
-| `fab issues --install` | `fab-issues.timer`, `fab-issues.service` | `fab issues sync` (channel.md 3) | `OnCalendar=*:1/2`; `TimeoutStartSec=3600` |
+| `fab issues --install` | `fab-issues.timer`, `fab-issues.service` | `fab issues sync` (channel.md 3) | `OnCalendar=*:1/2`; `TimeoutStartSec=infinity` (each reply call keeps its own limit, `calls.TIMEOUT`) |
 | `fab logins check --install` | `fab-logins-check.timer`, `fab-logins-check.service` | `fab logins check --all` (3); `StandardOutput=null`, `StandardError=journal` (its stdout names emails) | `OnCalendar=*:5/30`; `TimeoutStartSec=1800` |
 | `fab report daily --install` | `fab-report-daily.timer`, `fab-report-daily.service` | `fab report daily` with no plan dir (below) | `OnCalendar=*-*-* 00:33:00 UTC`, `Persistent=true`; `TimeoutStartSec=1800` |
 
@@ -206,7 +206,8 @@ each is now a persistent systemd user unit that fab writes, on one pattern
   units, `install_units(files, *, primary, restartable, role="dispatcher",
   sh, directory, known)`, and a pure text function per unit; `Service`,
   `text` and `install` and their callers (the queue, after-landing) are
-  unchanged. `files` maps unit names to texts, `primary` is the unit to
+  unchanged. All the texts and the installer live in `fab/units.py`; each
+  command's `--install` calls them. `files` maps unit names to texts, `primary` is the unit to
   enable (the timer, or `fab-status.service`), `restartable` is true only
   for `fab-status.service`. The role is read through `fab.hosts.load()`
   (`hosts.local.toml` applied) and `fab.hosts.this`.
@@ -220,16 +221,19 @@ each is now a persistent systemd user unit that fab writes, on one pattern
     -lc "exec <install>/bin/fab serve --port 8370 --bind 127.0.0.1"`,
     `Restart=on-failure`, `RestartSec=5`, `SuccessExitStatus=75`,
     `RestartForceExitStatus=75`; `[Install]` `WantedBy=default.target`.
-  - each timer's service: `[Unit]` `Description=fab: <what>`; `[Service]`
+  - each timer's service: `[Unit]` `Description=fab: <what>`, `<what>`
+    being `the user's questions as forge issues`, `the logins' checks` or
+    `yesterday's reports`; `[Service]`
     `Type=oneshot`, `Environment=FAB_HOME=<home>`, `KillSignal=SIGINT`,
     `TimeoutStartSec=<t>`, the login check's two output lines,
     `ExecStart=/usr/bin/bash -lc "exec <install>/bin/fab <command>"`; no
     `[Install]`. `KillSignal=SIGINT` makes a timeout, stop or shutdown run
     the command's cleanup (a login check gives back its lent login).
-  - each timer: `[Unit]` `Description=fab: <what>, <when>`; `[Timer]`
+  - each timer: `[Unit]` `Description=fab: <what>, <when>`, `<when>` being
+    `every 2 minutes`, `at :05 and :35` or `daily at 00:33 UTC`; `[Timer]`
     `OnCalendar=<as in the table>`, `Persistent=true` for the report only,
     `Unit=<its service>`; `[Install]` `WantedBy=timers.target`.
-- **Following main:** no unit fetches. The tick alone moves
+- **Following main:** no unit fetches. The tick (and a deploy) moves
   `FAB_HOME/install` to `origin/main` (every event tick and at least every
   10 minutes, tick.md 6); a timer's run uses the install as it finds it.
   The timers sit off the backstop's minutes (`*:1/2`, 00:33) so they rarely
@@ -243,27 +247,29 @@ each is now a persistent systemd user unit that fab writes, on one pattern
   or later, is never a change. The reader and the interval are parameters
   (a test runs in under a second); the thread prints nothing.
 - **An install, in order, all through `fab.sh.run`:**
-  1. Without the role: no unit file present, nothing (`<command>: no
-     dispatcher role here: nothing to do`); a file present, `disable` then
-     `stop --no-block` the primary unit, as `units.install` does
-     (`… disabled and stopping`). Done.
-  2. Transient units first, timer before service: for each of its unit
-     names, `systemctl --user show --property=Transient --value <unit>`.
-     When it prints `yes`: a timer's service that is active refuses the
-     whole install with `<unit> is running; rerun when it ends` (exit 1,
-     nothing written); otherwise `stop <unit>` then `reset-failed <unit>`
-     (both check=False). A unit that is not transient is never stopped.
+  1. Without the role: no unit file present, nothing; a file present,
+     `disable` then `stop --no-block` the primary unit, as `units.install`
+     does. It prints as the CLI bullet says. Done.
+  2. Transient units first: query `systemctl --user show
+     --property=Transient,ActiveState --value <unit>` for every one of its
+     unit names before stopping any. When a timer's service is transient
+     and its ActiveState is neither `inactive` nor `failed`, the install
+     refuses with `<unit> is running; rerun when it ends` (exit 1, nothing
+     stopped or written). Otherwise each transient unit, timer before
+     service, gets `stop` then `reset-failed` (both check=False). A unit
+     that is not transient is never stopped.
   3. Paused: the primary unit's file existed before this run and
      `systemctl --user is-enabled <primary>` prints `disabled` (a pause by
-     hand, `disable --now`). Its files are still written; nothing is
-     enabled, started or restarted, and it prints `<path> written; <unit>
-     left disabled`.
+     hand, `disable --now`). Its files are still written and
+     `daemon-reload` runs; nothing is enabled, started or restarted, and it
+     prints as the CLI bullet says.
   4. Each file through `fab.atomic.write`; then `daemon-reload`; then
      `enable --now <primary>`.
   5. Changed text: only `fab-status.service` is ever restarted, when its
      file existed with other text (`restart fab-status.service`). A timer
      whose text changed is restarted (`restart <timer>`), which does not
-     start its service. A timer's service is never started, stopped or
+     start its service (the report's `Persistent=true` may run a missed
+     day at once; harmless, daily keeps what exists). A timer's service is never started, stopped or
      restarted by an install; its next run reads the new text. Unchanged
      text restarts nothing.
   6. Linger: `loginctl show-user <uid> --property=Linger --value`
@@ -276,8 +282,10 @@ each is now a persistent systemd user unit that fab writes, on one pattern
   command (the command becomes optional; neither given: exit 2). `fab logins
   check --install` takes no ids and no `--all`, and is handled before the
   shelf is opened. `fab report daily --install` takes no plan dirs. Each
-  prints the paths written, then `enabled <unit>` or `<unit> left
-  disabled`, and exits 0; an OSError, ValueError or `fab.sh.Failed` prints
+  prints one line per path written, then `enabled <primary>`, or
+  `<primary> left disabled` when paused; without the role it prints only
+  `<primary>: no dispatcher role here: nothing to do` or `<primary>: no
+  dispatcher role here: disabled and stopping`; it exits 0; an OSError, ValueError or `fab.sh.Failed` prints
   `fab <command>: <error on one line>` on stderr and exits 1, as `fab
   wake` does.
 - **`fab report daily` with no plan dir** (now nargs `*`) takes

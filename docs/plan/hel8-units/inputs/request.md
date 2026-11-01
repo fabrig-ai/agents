@@ -26,7 +26,7 @@ Tests (fab.md 4: `FakeRunner`, temporary HOME and FAB_HOME): each unit's text pi
 byte by its pure function; without the role, no systemctl call but the disable of a present file;
 a first install over transient units in argv order (`show Transient`, `stop`, `reset-failed`, the
 writes, `daemon-reload`, `enable --now`); an active transient timer's service refuses with exit 1
-and nothing written; a rerun with unchanged text stops and restarts nothing; changed
+and nothing stopped or written; a rerun with unchanged text stops and restarts nothing; changed
 `fab-status` text restarts it, a changed timer service's text does not; a pause is left disabled;
 linger other than `yes`, or a failing `loginctl`, warns and exits 0; the serve watch returns 75 on
 an injected HEAD change and keeps serving on an unreadable one; `report daily` with no plan dir
