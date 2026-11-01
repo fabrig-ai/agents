@@ -5,6 +5,15 @@
 
 ## Present
 
+- **Held call chains go to settle** (13.1, 13.6; 11-01): a second refusal,
+  failed amend or three infra reviews starts a report-only medium-effort
+  `settle` call under the plan's answer limit. Land approves, amend resets
+  review counts and carries guidance into later briefs, user parks with
+  its reason; failed settlement parks. After amend, one final settlement
+  permits only land or user. `chain.settled` closes older parked asks for
+  forge sync; legacy automatic parks settle when their plan next ticks.
+  Tested with temporary homes, fake runners and log folds; not run live.
+
 - **Drafts beside each other** (13.17, 11-01): built by fab's loop as plan
   `docs/plan/trunk-overlaps` (four tasks, landed 12:09-12:27Z): the overlap
   probe (`fab/overlaps.py`, its cache, its call after every plan ticks), the
