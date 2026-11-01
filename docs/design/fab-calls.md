@@ -271,10 +271,29 @@ before it lands (2).
   cite and its status file, and changes the plan only where the measurement
   does. What starts it is the probe's (4).
 - **retire:** when a plan's parts are all done, the tick starts one retire
-  call (subject `<draft>/retire`). Its brief holds every design changed
-  since the plan started, with its status file: those a commit since the
-  one that added plan.toml changed, or whose status file it changed. It
-  brings the status files current and sets `retired = true` in plan.toml.
+  call (subject `<draft>/retire`). Its brief holds the designs changed
+  since the plan started (those a commit since the one that added plan.toml
+  changed, or whose status file it changed, as `changed_designs` finds
+  them), each as the shorter of its diff since the plan started (`git diff
+  <start>^ <rev> -- <design> <status>`, rev being `changed_designs`' rev,
+  origin/main; against the empty tree when the start has no parent) and its
+  text and status file at rev (`(removed)` when the design does not exist
+  at rev). The section is filled in path order within a budget:
+  `BRIEF_LIMIT` less the compiled text of every other section (headings and
+  separators included) and less the list lines below. A design that does
+  not fit is skipped and filling goes on with the later ones; each skipped
+  design is listed instead, as the cut's design index does: `- <path> (<n>
+  lines, diff <m> lines): read it in your worktree`, `<n>` its line count at
+  rev (0 when removed). So the brief passes the limit only if its other
+  sections alone do.
+  Quoting every design whole did (11-01: trunk-overlaps' retire, 216k
+  characters of fab.md and fab.status.md before the split; the tick
+  started the failing call again every tick, nine units in three minutes,
+  until the plan was retired by hand). A helper gives the plan's start and
+  the diffs; `changed_designs` keeps returning paths. The retire role text
+  (`fab/roles/retire.md`) says designs come as diffs or as a list, and that
+  it reads a design whole in its worktree when it needs more. It brings the
+  status files current and sets `retired = true` in plan.toml.
   The Codex consistency pass is its chain's review run, with its own role
   text (`fab/roles/consistency.md`) and the list of changed designs; a
   refusal goes back once as an amend call. Once it lands, the tick skips the
@@ -290,6 +309,12 @@ before it lands (2).
 
 ## 5. Later
 
+- A call whose brief cannot be compiled (past `BRIEF_LIMIT`, or any
+  other deterministic failure before `call.started`) is started again every
+  tick. Retire's brief is bounded (3); a park for such a start (a
+  `call.parked` with no call, lifted by an answer, seen by the tick's
+  parked set, triage and amend starts) waits until another call kind meets
+  it.
 - (The self-critique is 2's, part `critique`, not later.)
 - The foreman for plans whose specs live in another repository: its answers
   and repair sections landing through that repository's landing, not `fab land`.

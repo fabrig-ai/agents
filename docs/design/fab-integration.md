@@ -435,9 +435,10 @@ anything.
   `<draft>/integration` carrying `queue_ts`, as `fab.integration.queue_step`
   reads it). A replay (`ready` false) sits on an old base and is never
   probed. Pairs are formed within one `plan.repo`; every git command for a
-  repository runs in the checkout of its first probed plan in draft-name
-  order, which the tick has fetched, so cached tree ids always live in the
-  object store they are used from.
+  repository runs in the checkout of its first candidate plan in draft-name
+  order (chosen before its trunk is resolved on origin), which the tick has
+  fetched; the checkout is part of the cache's key, so cached tree ids always
+  live in the object store they are used from.
   - **Each trunk as if caught up.** A trunk can lag main (3's catch-ups
     wait), and a trunk behind main would show main's changes it lacks as
     overlaps with every trunk ahead of it. So for each probed trunk fab
@@ -460,9 +461,15 @@ anything.
     15, ~9 s). To keep that off ticks where nothing moved, results are
     cached in `FAB_HOME/overlaps.json`, keyed by main's sha and the trunk
     tips; a pair or trunk whose key is unchanged is answered from the cache.
-    It holds results only (a trunk's tree, a pair's `files` and `more`),
-    never failures, and a cached tree is dropped when a pair that used it
-    fails. It is written with `fab.atomic.write`. Losing the file loses only
+    It holds results, never failures: trunks' trees, pairs' `files` and
+    `more`, and, in a third object `conflicts` (key to `true`), trunks whose
+    catch-up conflicts, so such a trunk is not merged again every tick while
+    nothing moved. A file without `conflicts` (the first format) still reads
+    as valid. A cached tree is dropped when a pair that used it fails, and is
+    not kept even though it was looked up. Each probe keeps only the entries
+    it looked up or stored, so the file holds this tick's keys and never
+    grows with old mains and tips, and it is written (with
+    `fab.atomic.write`) only when it changed. Losing the file loses only
     time.
   - **The event:** `trunks.overlap` with `drafts` (the two drafts in name
     order), `tips` (their trunk tips, in that order), `files` (the
@@ -483,6 +490,13 @@ anything.
     plans and the log, the pairs, the parse of merge-tree's output, whether
     a result is news, and the pairs gone. The shell is one function the
     tick calls with its runner.
+  - **A malformed record is ignored, never fatal.** The fold over
+    `trunks.overlap` (for news, for pairs gone, and for the status page)
+    takes only records whose `drafts` and `tips` are lists of two strings,
+    `files` a list of strings and `more` a non-negative integer; others
+    (hand-written, or a later format) are skipped, so one bad line can
+    neither abort a tick nor break the public page. fab always writes
+    complete records.
 - **What it is for, for now: report only.** Nothing waits on an overlap
   and nothing is started by one: the trunk that lands second still meets
   the conflict at its catch-up and repairs it there (3). The status

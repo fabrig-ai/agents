@@ -10,11 +10,16 @@
   page's `overlaps` panel, and the cut brief's `Drafts beside this one`.
   Untried live: no integration plan with `ready` runs yet, so no
   `trunks.overlap` has been logged. Retired by hand: its retire call's brief
-  exceeds `BRIEF_LIMIT` (fab.md alone is ~216k characters), as
-  `retire_brief` says such a plan is.
+  exceeded `BRIEF_LIMIT` (fab.md and fab.status.md, ~216k characters before
+  the split).
 
 ## Gaps and departures
 
+- **The overlap probe's paper cuts** (4, 11-01, from its acceptance review):
+  the cache pruned to this tick's keys and written only on change, catch-up
+  conflicts cached, malformed `trunks.overlap` records ignored, the checkout
+  wording matched to the code; designed, to be built by plan
+  `docs/plan/paper-cuts`, with a real-git test of the probe.
 - **An integration trunk through the queue is untried live:** the catch-up
   with main (before a check and along the way), catch-up repairs, the
   re-check after a rejection and the stops are tested against fakes and real

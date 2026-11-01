@@ -16,6 +16,15 @@
 
 ## Gaps and departures
 
+- **Designs a retire brief lists are read by the call** (3, 11-01), as the
+  cut's design index names designs the cut reads itself: a departure from
+  `execution-modes.md`'s "compiled by code" only for what the budget leaves
+  out.
+- **Retire's brief is bounded** (3, 11-01): designed, to be built by plan
+  `docs/plan/paper-cuts`. Until then a retire brief quotes changed designs
+  whole, and one over the limit is started again every tick (trunk-overlaps
+  was retired by hand; findings-loop's, started before the split, would
+  quote ~404k characters).
 - **Claude calls** are made by the tick (skeleton, review, amend, answer);
   the cut still starts by hand.
 - **The review of calls' output is a skeleton:** `fab/call_review.py`
