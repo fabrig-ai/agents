@@ -5339,28 +5339,51 @@ class RetireFinishTest(unittest.TestCase):
         dispatch._take(self.action, self.tasks, {}, self.directory, plan=self.plan,
                        checkout=self.checkout, sh=self.fake, log_path=self.path)
 
+    def test_retire_key_spellings_preserve_complete_plan(self):
+        for key in ("retired", '"retired"', "'retired'", r'"r\u0065tired"'):
+            with self.subTest(key=key):
+                directory = write_plan(self.directory, "draft",
+                                       {"core": (), "edge": ("core",)})
+                path = directory / "plan.toml"
+                write(path, f"{key} = false\n" + path.read_text())
+                before = plan.load_plan(path)
+                self.assertIs(before.retired, False)
+                write(path, dispatch._retire_plan(path.read_text()))
+                after = plan.load_plan(path)
+                self.assertIs(after.retired, True)
+                self.assertEqual(after.parts, before.parts)
+                self.assertEqual(after.slices, before.slices)
+                self.assertEqual(after, replace(before, retired=True))
+
     def test_retire_edit_replaces_or_inserts_top_level_flag(self):
         cases = [
             ('draft = "draft"\nretired = false # pending\n[options]\nretired = false\n',
-             'draft = "draft"\nretired = true # pending\n[options]\nretired = false\n'),
+             'draft = "draft"\nretired = true\n[options]\nretired = false\n'),
             ('draft = "draft"\n  [[part]]\nid = "core"\n',
              'draft = "draft"\nretired = true\n  [[part]]\nid = "core"\n'),
             ('draft = "draft"', 'draft = "draft"\nretired = true\n'),
+            ('description = """\nretired = false\n"""\nretired = false\n[options]\n',
+             'description = """\nretired = false\n"""\nretired = true\n[options]\n'),
+            ('description = """\nretired = false\n"""\n[options]\nretired = false\n',
+             'description = """\nretired = false\n"""\nretired = true\n[options]\nretired = false\n'),
             ('retired=true # set\n', 'retired=true # set\n'),
             ('[options]\nretired = false\n', 'retired = true\n[options]\nretired = false\n'),
         ]
         for before, after in cases:
             with self.subTest(before=before):
                 self.assertEqual(dispatch._retire_plan(before), after)
+                self.assertEqual(dispatch._retire_plan(after), after)
         with self.assertRaisesRegex(ValueError, "missing plan.toml"):
             dispatch._retire_plan("")
-        with self.assertRaises(ValueError):
-            dispatch._retire_plan("invalid TOML")
+        for invalid in ("invalid TOML", "[retired]\na = 1\n",
+                        "retired.a = 1\nretired.b = 2\n"):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                dispatch._retire_plan(invalid)
 
     def test_retire_commits_branch_plan_before_agents_delivery(self):
         write(self.directory / "plan.toml", 'retired = true\n')
         self.take()
-        expected = 'draft = "draft"\nretired = true # pending\n[[part]]\nid = "core"\n'
+        expected = 'draft = "draft"\nretired = true\n[[part]]\nid = "core"\n'
         self.assertEqual(self.branch_text, expected)
         self.assertEqual((self.worktree / self.relative).read_text(), expected)
         self.assertEqual((self.directory / "plan.toml").read_text(), 'retired = true\n')
@@ -5382,6 +5405,32 @@ class RetireFinishTest(unittest.TestCase):
         self.assertEqual((finished["ev"], finished["role"], finished["outcome"]),
                          ("call.finished", "retire", "done"))
         self.assertEqual(log.read(), [])
+
+    def test_retire_quoted_key_is_valid_when_pushed(self):
+        self.branch_text = self.branch_text.replace("retired =", '"retired" =')
+        self.take()
+        self.assertIs(tomllib.loads(self.branch_text)["retired"], True)
+        self.assertIn(["git", "push", "-q", "--force", "origin",
+                       "HEAD:refs/heads/calls/root"], self.fake.argvs())
+        self.land.assert_called_once_with(["calls/root"])
+        self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+
+    def test_retire_final_parse_failure_leaves_finish_open_and_retries(self):
+        self.branch_text = "retired.a = 1\nretired.b = 2\n"
+        self.take()
+        self.land.assert_not_called()
+        records = log.read(self.path)
+        self.assertEqual(records[-1]["ev"], "note")
+        self.assertIn("finish root failed:", records[-1]["text"])
+        self.assertFalse(any(entry["ev"] == "call.finished" for entry in records))
+        self.assertEqual(call_review.chains(records)["root"].state, "approved")
+        self.assertFalse(any("commit" in argv or "push" in argv for argv in self.fake.argvs()))
+        self.assertIn(["git", "worktree", "remove", "--force", str(self.worktree)], self.fake.argvs())
+        self.assertEqual((self.worktree / self.relative).read_text(), self.branch_text)
+        self.branch_text = 'draft = "draft"\nretired = false\n'
+        self.take()
+        self.land.assert_called_once_with(["calls/root"])
+        self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
 
     def test_retire_guards_skip_commit_and_keep_delivery(self):
         for guard in ("retired", "landed", "gone", "other-role"):

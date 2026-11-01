@@ -857,21 +857,29 @@ def _untry(branch: str, hosts: Mapping[str, Host], *, sh: Runner) -> None:
 
 
 def _retire_plan(text: str) -> str:
-    """Set the plan's top-level retired flag, preserving its tables and other text."""
+    """Set retired True, replacing its top-level assignment however the key is spelled.
+
+    Insert only when absent; preserve tables and other statements. Return unchanged
+    when already True. Raise ValueError for missing plan.toml or final text that
+    does not parse with retired True, before commit_path can commit it.
+    """
     if not text:
         raise ValueError("missing plan.toml")
-    if tomllib.loads(text).get("retired") is True:
+    parsed = tomllib.loads(text)
+    if parsed.get("retired") is True:
         return text
-    lines = text.splitlines(keepends=True)
-    table = next((index for index, line in enumerate(lines) if line.lstrip().startswith("[")),
-                 len(lines))
-    header = "".join(lines[:table])
-    edited, count = re.subn(r"(?m)^([ \t]*retired[ \t]*=[ \t]*)false(?=[ \t]*(?:#|$))",
-                          r"\g<1>true", header)
-    if not count:
-        edited = header + ("\n" if header and not header.endswith("\n") else "")
-        edited += "retired = true\n"
-    return edited + "".join(lines[table:])
+    statements, tables = designer._plan_header(text)
+    if "retired" in parsed:
+        header = "".join("retired = true\n" if "retired" in tomllib.loads(statement)
+                         else statement for statement in statements)
+    else:
+        header = "".join(statements)
+        header += "\n" if header and not header.endswith("\n") else ""
+        header += "retired = true\n"
+    edited = header + tables
+    if tomllib.loads(edited).get("retired") is not True:
+        raise ValueError("plan.toml does not set retired true")
+    return edited
 
 
 def _pre_deliver(action: Action, plan: Plan, plan_dir: Path, checkout: Path, *,

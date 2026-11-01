@@ -68,8 +68,10 @@
   before `_retire_plan`'s own `missing plan.toml`) and, unless `tomllib` reads
   `retired` True, calls `fab.spec_edit.commit_path` on the call's branch from
   `origin/<branch>`, worktree `FAB_HOME/retire/<root>`, author fab, message
-  `<draft>: retired`. `_retire_plan` replaces a top-level `retired = false` or
-  inserts `retired = true` before the first table. A failure is `_take`'s
+  `<draft>: retired`. `_retire_plan` replaces the top-level assignment however
+  the `retired` key is spelled, inserts `retired = true` before the first table
+  only when the key is absent, and refuses final text that does not parse with
+  `retired` True (plan `docs/plan/edge-fixes`). A failure is `_take`'s
   note `finish <root> failed: ...`; the delivery not having run, `_take`'s
   `finally` records no `call.finished`, and the next tick tries again.
   `_queue_branch` reads origin's tip and readies again when it differs from
@@ -80,8 +82,9 @@
   `test_fabrig_queue_readies_moved_tip_without_later_call_end`). Live on this
   repository at three retires, each `<draft>: retired` by fab: precheck-starved
   (ab4e3ba), df-followups (7e143f7) and start-commands (18b5d7f), which it
-  carried through three refusals at `rebase`. The re-ready is untried live:
-  no fabrig retire has been delivered since.
+  carried through three refusals at `rebase`. The key spelling and final
+  validation cases have not run live. The re-ready is untried live: no fabrig
+  retire has been delivered since.
 - **`fab land` refusals, code first** (2; the user, 11-01; plan
   mechanisms-out; db47677). `_fold_review` skips `fab land`'s `fetch` and
   `push` refusals (no `queue_ts`), so they count toward no amend.
