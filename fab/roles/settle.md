@@ -7,7 +7,9 @@ Write a report and stop. Do not change the branch. Its first line must be exactl
 - `Done: land`, then a paragraph saying why the branch is good enough and naming
   remaining findings as later work.
 - `Done: amend`, then concrete guidance for the next amendment. When the brief says
-  amend is no longer an option, choose land or user instead.
+  amend is no longer an option, choose land or user instead. When the brief says
+  land would land a tip `fab land` refused, land is not an option: choose amend,
+  or user when the brief says user only.
 - `Done: user`, then one line saying why this requires the user: budgets, machines,
   something hard to reverse, or a change of direction.
 
