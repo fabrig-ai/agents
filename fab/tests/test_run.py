@@ -25,9 +25,12 @@ def command(call):
     return shlex.split(shlex.split(call.argv[-1])[2])
 
 
-def starter():
+def starter(pushed=False):
+    """A builder whose slot 2 is idle; pushed says whether the task's branch is on origin."""
     def answer(call):
         argv = command(call)
+        if argv[3:6] == ["rev-parse", "-q", "--verify"]:
+            return Result(0 if pushed else 1)
         if argv[:2] == ["codex-run", "task"] or argv[:3] == ["fab", "codex", "start"]:
             return Result(0, "codex-123 /state/codex-123\n")
         if argv == ["fab", "slot", "list"]:
@@ -390,6 +393,15 @@ class RunStartTest(unittest.TestCase):
             self.assertEqual(len(log.read(path)), 1)
             self.assertEqual(log.read(), [])
 
+    def test_an_implement_rerun_continues_from_its_pushed_branch(self):
+        with tmp_home():
+            fake = starter(pushed=True)
+            run.start(replace(TASK, repo="fabrig"), HOST, kind="implement",
+                      events=[started(kind="implement")], sh=fake)
+            commands = [command(call) for call in fake.calls]
+            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes",
+                           "-C", TASK.id, f"origin/{TASK.id}"], commands)
+
     def test_start_fabrig_claims_slot_and_switches_for_every_kind(self):
         for kind in run.KINDS:
             with self.subTest(kind=kind), tmp_home() as home:
@@ -402,10 +414,12 @@ class RunStartTest(unittest.TestCase):
                 slot = ROOT.parent / "slots/2"
                 directory = ROOT / "runs" / run_id
                 commands = [command(call) for call in fake.calls]
-                self.assertEqual(commands[3:8], [
+                probe = ([["git", "-C", str(slot), "rev-parse", "-q", "--verify", f"refs/remotes/origin/{branch}"]]
+                         if kind == "implement" else [])
+                self.assertEqual(commands[3:8 + len(probe)], [
                     ["fab", "slot", "list"],
                     ["fab", "slot", "claim", "2", run_id, TASK.id],
-                    ["git", "-C", str(slot), "fetch", "origin"],
+                    ["git", "-C", str(slot), "fetch", "origin"], *probe,
                     ["git", "-C", str(slot), "clean", "-fdq"],
                     ["git", "-C", str(slot), "switch", "--discard-changes", "-C", branch, source]])
                 expected = ["fab", "codex", "start", "--effort", run.EFFORTS.get(kind, task.effort), "--model", run.MODEL]
@@ -413,7 +427,7 @@ class RunStartTest(unittest.TestCase):
                     expected.append("--read-only")
                 self.assertEqual(commands[-1], [*expected, str(directory / "brief.md"), str(slot),
                                                str(directory / "report.md")])
-                self.assertEqual(len(commands), 10)
+                self.assertEqual(len(commands), 10 + len(probe))
                 record, = log.read()
                 self.assertEqual({key: value for key, value in record.items() if key != "ts"},
                                  {"ev": "run.started", "run": run_id, "task": TASK.id, "kind": kind,

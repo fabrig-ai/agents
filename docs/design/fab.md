@@ -1137,6 +1137,23 @@ only as tweaks once a replay matches its run.
     before the specs, as the lead's `binding.md`, gives each side of a
     boundary its own task built to it, and keeps a task many others need
     small: its surface first, its bodies and its readers' fallout later.
+- **After the playground replay** (the user, 11-01): r4 merged all 64 tasks
+  at T+6h51 (playground-kit: done at 4h24m) and stopped red three times.
+  Four changes from what it showed:
+  - The answerer prefers leaving what is not the task's (another task's
+    files, fixtures, tests, crates) to its owner or the end check, widening a
+    task only when its own acceptance cannot hold otherwise: r4 asked 61
+    questions, nearly all answered by widening, each a longer rerun.
+  - An implementer commits and pushes its work before it asks, and an
+    implement rerun in a slot starts from the task's pushed branch when there
+    is one, not from the trunk: r4's repair-2 stopped on a question with 46
+    files uncommitted, which its rerun would have cleaned away.
+  - The cut writes `plan.md` and its report's first lines with its first
+    push and updates them with each later one: r4's cut ran out of its 60
+    minutes and both were lost.
+  - A start whose builder has no idle slot moves to the next builder with
+    free places, since slots other work claimed are not fab's runs: r4
+    retried a full hetzner6 every tick while other sessions held its slots.
 - **The flow stays wide.** An integration plan keeps its target for runs
   in flight at its builders' places throughout: no halving on a refusal or
   an `Infra:` outcome and no growth (13.11's start-wide rule is the queue
@@ -1177,8 +1194,10 @@ only as tweaks once a replay matches its run.
     options to settle by) and queues, and an answer logged with `answer`
     is folded into the repair's body under Answers, which its next run
     reads (the playground replay, 11-01: a repair's question crashed the
-    foreman on its empty spec path, every tick). An answer call cannot yet
-    record a repair's answer: it writes answers into spec files.
+    foreman on its empty spec path, every tick). The answer call's brief
+    lists the repairs' questions too (`fab.integration.with_repairs`), and
+    it records a repair's answer as a report line `Answer <task>: <text>`,
+    which the tick logs as that question's `answer`.
 - **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan options
   that differ from the defaults (`ready=false` for a replay) to the cut: its brief says to write them into plan.toml verbatim, and its
   `call.started` carries them (`options`), so the tick reads `landing` and

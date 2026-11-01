@@ -85,6 +85,20 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str])
     return tasks
 
 
+def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> dict[str, Task]:
+    """tasks plus the log-derived repairs, reading the collected check reports locally; an
+    unreadable report is empty. Shared by the tick and the answer call's brief."""
+    reports = {}
+    for event in events:
+        if (event.get("ev") == "run.started" and event.get("kind") == "check"
+                and event.get("task") == f"{plan.draft}/integration"):
+            try:
+                reports[event["run"]] = (log.home() / "runs" / event["run"] / "report.md").read_text()
+            except (OSError, UnicodeError):
+                reports[event["run"]] = ""
+    return {**tasks, **repair_tasks(plan, events, reports)}
+
+
 def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> Step | None:
     """Check an entirely merged trunk, ready its green tip when requested (queue_step), or stop
     after three failed checks. Wait for unfinished tasks, absent merges and checks in flight.

@@ -4123,3 +4123,44 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertEqual((landed["ev"], landed["task"], landed["main"]),
                          ("branch.landed", "draft/integration", "main-tip"))
         self.assertNotIn("into", landed)
+
+
+class ReplayFindingsTest(unittest.TestCase):
+    """The playground replay's fixes (11-01): repair answers through answer calls, and starts
+    that move on when a builder's slots are all held by other work."""
+
+    def test_answered_reads_the_answer_lines_of_specless_tasks(self):
+        with tmp_home():
+            write(log.home() / "calls/answer-1/report.md",
+                  "Done: 2\n- d/a: B\nAnswer d/repair-2: Add the empty-store fixture.\n"
+                  "Answer bad line\nAnswered: d/a d/repair-2\n")
+            chain = call_review.Chain("answer-1", "answer", "d", "calls/answer-1", ("answer-1",), "answer-1", (),
+                                      "finished")
+            names, given = dispatch._answered(chain)
+        self.assertEqual(names, ["d/a", "d/repair-2"])
+        self.assertEqual(given, {"d/repair-2": "Add the empty-store fixture."})
+
+    def test_a_start_moves_to_the_next_builder_when_slots_are_full(self):
+        hosts = {"one": Host("one", "f@one", ("builder",), places=7),
+                 "two": Host("two", "f@two", ("builder",), places=7),
+                 "none": Host("none", "f@none", ("builder",), places=0)}
+        tasks = {"d/a": plan.Task("d/a", "core", "feature", "fabrig", (), (), "high", 20, "", "a.md")}
+        loaded = plan.Plan("d", "fabrig", (), 1, 2, {}, (), landing="integration")
+        tried = []
+
+        def start(task, host, **kwargs):
+            tried.append(host.name)
+            if host.name == "one":
+                raise ValueError("one: no idle slot")
+            return "d/a-1"
+
+        action = Action("start", task="d/a", host="one", run_kind="implement")
+        with tmp_home(), patch.object(runs, "start", side_effect=start):
+            dispatch._start(action, tasks, hosts, plan=loaded, checkout=Path("."), sh=FakeRunner(),
+                            log_path=None)
+            self.assertEqual(tried, ["one", "two"])
+            tried.clear()
+            with patch.object(runs, "start", side_effect=ValueError("one: something else")):
+                with self.assertRaises(ValueError):
+                    dispatch._start(action, tasks, hosts, plan=loaded, checkout=Path("."),
+                                    sh=FakeRunner(), log_path=None)

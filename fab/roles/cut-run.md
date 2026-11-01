@@ -139,6 +139,10 @@ the first pieces matter most: until your first push, no slot works.
   HEAD`) and run `fab wake cut <your call id>`: the wake tells fab's tick
   at once, which merges what you pushed into the trunk and starts those
   tasks (without it, its next backstop round would, later).
+- With that first push, write `plan.md` (the parts, the tasks so far, the
+  critical path as it stands) and your report's first lines at your report
+  path, and bring both up to date with each later push: if the call is cut
+  short, what it wrote stands.
 - Then write the rest, yourself or through designers (below). Each time a
   further batch holds together (`fab status <the plan directory>` shows no
   problems), commit, push and run `fab wake cut <your call id>` again;

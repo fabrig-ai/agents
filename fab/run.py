@@ -285,6 +285,11 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         worktree = root.parent / "slots" / str(slot)
         remote(["git", "-C", str(worktree), "fetch", "origin"])
         source = f"origin/{branch}" if kind == "repair" else base
+        # A rerun continues from the work its earlier run pushed (the implementer pushes before
+        # it asks: fabrig-run.md), rather than redoing it from the trunk.
+        if kind == "implement" and sh(ssh(host.ssh, ["git", "-C", str(worktree), "rev-parse", "-q", "--verify",
+                                                     f"refs/remotes/origin/{branch}"])).ok:
+            source = f"origin/{branch}"
         # A slot keeps only its build cache between runs: an earlier run's uncommitted edits
         # and untracked files go (ignored files, target/ among them, stay warm). Clean first:
         # an untracked file the new base tracks stops the switch (the playground replay, 10-31).

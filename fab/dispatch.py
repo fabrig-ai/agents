@@ -645,9 +645,13 @@ def _finish(action: Action, *, log_path: Path | None) -> None:
     chain = call_review.chains(events)[action.task]
     if chain.role == "answer":
         # An answer call's subject is its draft; a bare task name is read under it.
-        names = (name if "/" in name else f"{chain.subject}/{name}" for name in _answered(chain))
-        for identifier in dict.fromkeys(names):
-            log.append("question.answered", path=log_path, task=identifier, call=chain.latest)
+        names, given = _answered(chain)
+        full = (name if "/" in name else f"{chain.subject}/{name}" for name in names)
+        for identifier in dict.fromkeys(full):
+            # A task with no spec file (a repair) gets its answer from the report's Answer line.
+            answer = given.get(identifier) or given.get(identifier.split("/", 1)[-1])
+            log.append("question.answered", path=log_path, task=identifier, call=chain.latest,
+                       **({"answer": answer} if answer else {}))
 
 
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
@@ -943,10 +947,25 @@ def _collect(action: Action, hosts: Mapping[str, Host], *, sh: Runner,
 
 def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], *,
            plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
-    """Start a task run with current events and the decision's rejection context."""
-    runs.start(tasks[action.task], hosts[action.host], kind=action.run_kind,
-               events=log.read(log_path), sh=sh, log_path=log_path, rejection=action.rejection,
-               trunk=plan.trunk, checkout=checkout)
+    """Start a task run with current events and the decision's rejection context.
+
+    decide counts only fab's own runs against a host's places; other work may hold its slots
+    (claims made with `fab slot claim` by other sessions). A host with no idle slot hands the
+    start to the next builder by free places, so the task waits only when every builder is full
+    (the playground replay, 11-01: it retried a full hetzner6 every tick)."""
+    events = log.read(log_path)
+    free = places(hosts, in_flight(events))
+    order = [action.host, *sorted((name for name in free if name != action.host and free[name] > 0),
+                                  key=lambda name: (-free[name], name))]
+    for position, name in enumerate(order):
+        try:
+            runs.start(tasks[action.task], hosts[name], kind=action.run_kind,
+                       events=events, sh=sh, log_path=log_path, rejection=action.rejection,
+                       trunk=plan.trunk, checkout=checkout)
+            return
+        except ValueError as error:
+            if not str(error).endswith("no idle slot") or position == len(order) - 1:
+                raise
 
 
 def _vet(action: Action, plan: Plan, checkout: Path, hosts: Mapping[str, Host], *,
@@ -1113,17 +1132,24 @@ def _hold(action: Action, *, log_path: Path | None) -> None:
                reason=action.detail, report=report)
 
 
-def _answered(chain: call_review.Chain) -> list[str]:
-    """Read the latest call's Answered line, falling back to the root when absent or unreadable."""
+def _answered(chain: call_review.Chain) -> tuple[list[str], dict[str, str]]:
+    """Read the latest call's Answered line, falling back to the root when absent or unreadable,
+    and its `Answer <task>: <text>` lines (the answers of tasks with no spec file)."""
     for identifier in dict.fromkeys((chain.latest, chain.root)):
         try:
             report = (log.home() / "calls" / identifier / "report.md").read_text(encoding="utf-8")
         except (OSError, UnicodeError):
             continue
+        given = {}
+        for line in report.splitlines():
+            if line.startswith("Answer ") and ":" in line:
+                task, _, text = line.removeprefix("Answer ").partition(":")
+                if task.strip() and " " not in task.strip() and text.strip():
+                    given[task.strip()] = text.strip()
         for line in report.splitlines():
             if line.startswith("Answered:"):
-                return line.removeprefix("Answered:").split()
-    return []
+                return line.removeprefix("Answered:").split(), given
+    return [], {}
 
 
 def _park(action: Action, *, log_path: Path | None) -> None:
@@ -1328,16 +1354,8 @@ def _screen_ready(action: Action, task: Task, hosts: Mapping[str, Host], *,
 
 
 def _integration_tasks(plan: Plan, tasks: Mapping[str, Task], events: list[dict]) -> dict[str, Task]:
-    """Add log-derived repairs, reading collected check reports locally; unreadable is empty."""
-    reports = {}
-    for event in events:
-        if (event.get("ev") == "run.started" and event.get("kind") == "check"
-                and event.get("task") == f"{plan.draft}/integration"):
-            try:
-                reports[event["run"]] = (log.home() / "runs" / event["run"] / "report.md").read_text()
-            except (OSError, UnicodeError):
-                reports[event["run"]] = ""
-    return {**tasks, **integration.repair_tasks(plan, events, reports)}
+    """Add log-derived repairs (fab.integration.with_repairs)."""
+    return integration.with_repairs(plan, tasks, events)
 
 
 def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,

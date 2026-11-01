@@ -54,7 +54,9 @@ its notes depart from this text, they say why, and they win.
 - Every build and test goes through `heavy`, one command at a time. If
   heavy exits 75 (`heavy: Infra: disk`), stop and report `Infra: disk`.
 - **On a doubt, stop:** the first line is `Question:`, with the options and
-  a recommendation. Never improvise across a boundary; a tool the task lacks
+  a recommendation. Commit and push the work you have first, and say so in
+  the report: your next run starts from your pushed branch's work only if it
+  is pushed. Never improvise across a boundary; a tool the task lacks
   is such a question.
 - Throwaway code lives untracked in the slot and is deleted before the push.
 

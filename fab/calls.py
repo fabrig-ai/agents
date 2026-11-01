@@ -20,7 +20,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from fab import atomic, channel, foreman, log, state, wake
+from fab import atomic, channel, foreman, integration, log, state, wake
 from fab.plan import Plan, Task, load_plan, load_tasks
 from fab.run import TASTE, outcome
 from fab.sh import Failed, Runner, run
@@ -664,6 +664,8 @@ def main(argv: list[str]) -> int:
             text = review_brief(plan, tasks, events, root, plan_path=plan_path, **facts)
             subject = f"{plan.draft}/review"
         else:
+            # An integration plan's repairs have no spec file; their questions come too.
+            tasks = integration.with_repairs(plan, tasks, events) if plan.landing == "integration" else tasks
             questions = [dict(task=item.task, run=item.run, text=item.text, foreman=item.report)
                          for item in foreman.questions(tasks, events) if item.state == "queued"]
             text = answer_brief(questions, tasks, root, plan=plan, **facts)
