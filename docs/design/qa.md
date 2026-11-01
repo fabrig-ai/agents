@@ -1,7 +1,7 @@
 # fab: QA findings
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-qa.status.md`. Shared: the
+section numbers). Status: `docs/design/qa.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -17,16 +17,16 @@ landed them as hand-pushed ready refs and reran each brief unchanged; the
 off-path ones piled up in a file with no owner (`coord/qa-ladder/
 findings.md`, 48 entries). fab runs that loop: a walk's findings enter the
 log, a director's call triages them, on-path ones become Fix-mode repairs
-through the foreman path reds use (fab-after-landing.md 2, fab-calls.md 2), and fab says when a
+through the foreman path reds use (after-landing.md 2, calls.md 2), and fab says when a
 rung's brief is due again, unchanged. `temper/docs/design/draft/v0.1.0.md`,
 2-4, is the process; `execution-modes.md`'s Fix mode ("a finding, a red, a
 bug"; one finding the unit of flow; the finding's own walk, rerun unchanged)
 and "QA's findings enter Fix mode" are the model. In the first build a
 session still walks by hand; walks run by fab are the section's last part.
 
-- **The ladder is a plan,** a fabrig plan (fab-integration.md 2) with `landing = "queue"`,
+- **The ladder is a plan,** a fabrig plan (integration.md 2) with `landing = "queue"`,
   listed in `FAB_HOME/plans`, whose plan.toml names its rungs: v0.1.0's is
-  `temper/docs/plan/v0.1.0-ladder/`. A plan owns its draft's work (fab-tick.md 5), so
+  `temper/docs/plan/v0.1.0-ladder/`. A plan owns its draft's work (tick.md 5), so
   its walks, findings, triage calls and repairs are the plan's.
   - `[ladder]`: `happy_path` (a citation, as a part's `design`:
     `"temper/docs/design/draft/v0.1.0.md, 2 and 4"`) and `backlog` (a
@@ -110,7 +110,7 @@ session still walks by hand; walks run by fab are the section's last part.
   `domain/findings.md`, 2 and 4; fab keeps no forge issue, 1's "interim by
   intent"). `finding.raised`: finding, draft, walk, index, rung, backend,
   commit, edition, kind (`qa`, temper's kind; reds keep their own path,
-  fab-after-landing.md 2), title, severity, area, blocking, reproduction, expected,
+  after-landing.md 2), title, severity, area, blocking, reproduction, expected,
   seen, evidence, `again` (below). Its state, as temper's: `new`, `routed`
   (on the path), `backlog`, `dropped`; and fab's: `asked` (needs the user),
   `merged`, and a routed finding's repair states.
@@ -155,7 +155,7 @@ session still walks by hand; walks run by fab are the section's last part.
     finished or landed. Its output is its report.
   - **When** (`fab.triage.due`, pure, in `fab.dispatch.call_actions`): a
     finding of the plan is new, no triage call of the plan is in flight, no
-    triage `Question:` of the plan is open (an ask of kind call, fab-gates.md 2,
+    triage `Question:` of the plan is open (an ask of kind call, gates.md 2,
     until `fab page answer <draft>/triage`), and either a new finding is
     blocking or came from a failed or void walk (it holds its rung: at once, as a
     question that holds up work), or the answerer's thresholds hold:
@@ -215,7 +215,7 @@ session still walks by hand; walks run by fab are the section's last part.
     call. A call with no valid line logs one note (`call`, `triage <call>:
     no decisions`).
 - **Off the path is the tree's backlog,** `[ladder].backlog`, not the
-  user's page: the page is for what is the user's (fab-channel.md 2) and 48 entries
+  user's page: the page is for what is the user's (channel.md 2) and 48 entries
   would bury it; the backlog outlives the plan, for the owner after v0.1.0
   (v0.1.0.md 4: it "waits until v0.1.0 is out"), as fabrig's
   `jig/docs/design/debt/` and `skein/docs/design/debt/` do.
@@ -237,12 +237,12 @@ session still walks by hand; walks run by fab are the section's last part.
     include each `ladder/<draft>/backlog-<n>` that has a `branch.ready`,
     mapped to its draft, so its queue records become `branch.landed` and
     `branch.rejected` with task the branch, and advance the draft's cursor,
-    as a call's branch's do (fab-integration.md 2). `ladder/` joins the fab branch forms
-    kept out of `queue.*` (fab-landing.md 3).
+    as a call's branch's do (integration.md 2). `ladder/` joins the fab branch forms
+    kept out of `queue.*` (landing.md 3).
   - A rejected or failed commit is tried again, as a new n, on a later
     round; no triage waits for it. After two rejections of the same render
     (its sha256 recorded as `render` on `branch.ready`), the page raises
-    `backlog:<draft>` (fab-channel.md 2: the branch, the step, the queue's log) and the
+    `backlog:<draft>` (channel.md 2: the branch, the step, the queue's log) and the
     tick readies no more until the render changes or the signal is cleared.
     The page shows the backlog's count and path only.
 - **On the path is a Fix-mode repair through the reds' foreman path,** a
@@ -285,7 +285,7 @@ session still walks by hand; walks run by fab are the section's last part.
     detail=<red or finding id>, run_kind=<kind>)` and `Action("remedy-fix",
     run=<foreman run>, run_kind=<kind>)`; `fab.dispatch.red_actions` and
     `finding_actions` (both pure) make them, and `_take` sends each to its
-    kind's start or settle: fab-after-landing.md 2's `examine-red` and `remedy-red`,
+    kind's start or settle: after-landing.md 2's `examine-red` and `remedy-red`,
     renamed with the move.
   - **Its foreman** (Codex, medium, read-only;
     `fab/roles/foreman-finding.md`): a finding routed starts one through
@@ -327,7 +327,7 @@ session still walks by hand; walks run by fab are the section's last part.
     `temper/docs/help/` with its help tests); then the task's own checks as
     any fabrig task (precheck `--onto origin/main`): qa-ladder's
     `tasks/TEMPLATE.md`, which every hand repair carried.
-  - **Everything fab-after-landing.md 2 gives kind `red` holds for each of
+  - **Everything after-landing.md 2 gives kind `red` holds for each of
     `fab.fix.FIX_KINDS`:** an implement run from `origin/main` in a slot;
     readied for the queue and landed as `Merge <draft>/finding-<n>`; in the
     queue import's tasks; `fab.fix.RUNS` (2), then the answerer (Fix mode:
@@ -364,14 +364,14 @@ session still walks by hand; walks run by fab are the section's last part.
   - **walking:** a walk of it in flight;
   - **waiting:** a rung in `after` is not passed (it is holding, due,
     walking or waiting itself): "a rung's open findings hold the rungs above
-    it" (qa.md 3), and "down before up";
+    it" (`temper/docs/design/qa.md` 3), and "down before up";
   - **holding:** a finding holds it;
   - **due:** otherwise, a `first walk` when no walk at its current edition
     has ended pass or fail, else a `rerun`, at a main containing each
     landed repair of its findings (the newest such `branch.landed`'s main).
   The rerun does not wait for after-landing's verdict on that main: the
   walk is its own check on real backends, a red after landing reaches its
-  owner by fab-after-landing.md 2, and the tiers would add an hour to each round.
+  owner by after-landing.md 2, and the tiers would add an hour to each round.
 - **A pass is recorded by the tick** (`fab.findings.passes`, pure, then
   `rung.passed`: draft, rung, walk, edition, commit; before `decide`; at
   most one per walk): a walk ended pass at the rung's current edition,
@@ -383,7 +383,7 @@ session still walks by hand; walks run by fab are the section's last part.
   another commit, counts no more: the rung is due again. A passing walk's
   non-blocking findings are triaged as any; the pass stands.
 - **fab says a rerun is due** on the user's page and in `fab qa rungs`, one
-  line per rung (fab-channel.md 2, `## The ladder`): `<rung> (<backend>), edition <e>:
+  line per rung (channel.md 2, `## The ladder`): `<rung> (<backend>), edition <e>:
   due: rerun at a main containing <sha12>`, `walking: <walk> since <ts>`,
   `waiting for <rungs>`, `holding: finding-3 repairing, finding-7 new`,
   `passed at <commit12> (<walk>)`. The first build's session reads it,
@@ -442,14 +442,14 @@ session still walks by hand; walks run by fab are the section's last part.
     --path W/<file> --holder <walk>`) before it starts the call, and starts
     none while one is missing, saying `due, waiting for a <kind> login` on
     the page: one live box per login (v0.1.0.md 2.2: "one holder per
-    login"), the tick deciding who gets one as it does places (fab-machines.md 3). The
+    login"), the tick deciding who gets one as it does places (machines.md 3). The
     walk returns them at its end (`fab logins return`) after its give-back
     has exported the account; one that cannot be returned stays lent with
-    an `error` record, as a pair's (fab-machines.md 3);
+    an `error` record, as a pair's (machines.md 3);
   - its timeout is the kit's wall cap, 3 hours: `fab.calls.TIMEOUTS`, new,
     a timeout per role (`walk` 3 hours), `fab.calls.TIMEOUT` (60 minutes)
     for the rest.
-- **Built in this order; what waits for red-routing** (fab-after-landing.md 2's code:
+- **Built in this order; what waits for red-routing** (after-landing.md 2's code:
   `fab/tier_reds.py` and the page's red and fault signals are on main,
   21e391c; its wiring into the tick followed, 11-01):
   - **Now, independent of red-routing's wiring:** the plan's `[[rung]]` and
@@ -464,7 +464,7 @@ session still walks by hand; walks run by fab are the section's last part.
     `rung.passed`) in `fab/dispatch.py`, rebased on red-routing's
     `_tick_plan` wiring if that lands first; the page's `finding` asks, `backlog:<draft>` signal and
     `## The ladder` (`fab/channel.py`); the landing report's QA figures
-    (fab-reports.md 2). With these alone, findings enter, are triaged, the backlog lands,
+    (reports.md 2). With these alone, findings enter, are triaged, the backlog lands,
     questions reach the page and rungs show their state; an on-path finding
     waits at its foreman, holding its rung.
   - **After red-routing's tick wiring lands** (`red_actions`, red tasks run

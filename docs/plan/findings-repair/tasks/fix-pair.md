@@ -13,10 +13,10 @@ Read first: `docs/plan/findings-repair/notes/common.md`,
 `docs/plan/findings-repair/notes/fix.md` ("The action pair").
 
 The request: "one examine/remedy action pair for reds and findings
-(`examine-fix`, `remedy-fix`, the rename fab-after-landing.md 2 names)",
+(`examine-fix`, `remedy-fix`, the rename after-landing.md 2 names)",
 and "`FIX_KINDS` wherever the red wiring reads kind `red`". Design:
-`docs/design/fab-qa.md`, 2, "One action pair for both kinds";
-`docs/design/fab-after-landing.md`, 2 (near line 308).
+`docs/design/qa.md`, 2, "One action pair for both kinds";
+`docs/design/after-landing.md`, 2 (near line 308).
 
 ## What to build
 

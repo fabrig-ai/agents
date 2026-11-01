@@ -5,14 +5,14 @@ The standing rules of this plan's implementers. Read this, then
 
 ## Scope
 
-- The design is `docs/design/fab-qa.md`, 2 (QA findings): "On the path is
+- The design is `docs/design/qa.md`, 2 (QA findings): "On the path is
   a Fix-mode repair through the reds' foreman path" to "One repair per
   finding", and "The tick, each round"; the red path it shares is
-  `docs/design/fab-after-landing.md`, 2 and `docs/design/fab-calls.md`, 2.
+  `docs/design/after-landing.md`, 2 and `docs/design/calls.md`, 2.
   The request (`docs/plan/findings-repair/inputs/request.md`) says what this
   plan builds: `fab/fix.py`, `fab/fixes.py` with
   `fab/roles/foreman-finding.md`, the tick's steps, and the `finding-<n>`
-  signal. **Not** walks run by fab, **not** "Then it holds" (fab-qa.md 3):
+  signal. **Not** walks run by fab, **not** "Then it holds" (qa.md 3):
   build neither, and no hook for them.
 - `fab/findings.py` already folds every repair state (foreman, deciding,
   decided, repairing, landed, left, fixed, unfixed) from the records this
@@ -25,8 +25,8 @@ The standing rules of this plan's implementers. Read this, then
   `notes/fix.md` are binding: other tasks are written against them in
   parallel. Private helpers are yours to name.
 - Follow the design. Where the code shows the design cannot hold as
-  written, change `docs/design/fab-qa.md` 2 (and the line of
-  `docs/design/fab-qa.status.md` that says it) in the same branch, say so
+  written, change `docs/design/qa.md` 2 (and the line of
+  `docs/design/qa.status.md` that says it) in the same branch, say so
   in your report, and keep the change to that point. Otherwise leave the
   designs and their status files alone: they are the designer's.
 

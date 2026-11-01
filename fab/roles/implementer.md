@@ -30,7 +30,7 @@ task names, and nothing unrelated.
 
 ## The gates
 
-Code checks every branch before it lands (`docs/design/fab-gates.md`, 2), and
+Code checks every branch before it lands (`docs/design/gates.md`, 2), and
 refuses it for any finding, costing a foreman and a repair run:
 
 - **size:** a function you add or grow is at most 60 lines, docstring

@@ -1,4 +1,4 @@
-"""`fab run`: start a Codex run on a builder, read its outcome, collect it (docs/design/fab-tick.md, 3)."""
+"""`fab run`: start a Codex run on a builder, read its outcome, collect it (docs/design/tick.md, 3)."""
 
 from __future__ import annotations
 
@@ -184,14 +184,14 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     """Start a run of task on host and log run.started; return the run id.
 
     early names (need, branch) for each need not merged yet whose pushed work the run starts
-    from (docs/design/fab-integration.md, 3): each origin/<branch> is merged into the
+    from (docs/design/integration.md, 3): each origin/<branch> is merged into the
     run's checkout after it is set up, in order, and the brief says so; a merge that conflicts
     aborts the start with a ValueError beginning `early:`. run.started carries early (the needs).
 
     With checkout, an absolute task.path inside it is repository-relative in the brief;
     paths outside it, paths already relative and checkout=None keep their given spelling.
     First move an unpinned builder install forward to this package's HEAD; failures only note
-    stderr. Dispatcher hosts are skipped (docs/design/fab-tick.md, 3).
+    stderr. Dispatcher hosts are skipped (docs/design/tick.md, 3).
     On the builder, over ssh: make sure FAB_HOME/repos/<task.repo> is a clone of
     REMOTES[task.repo] and fetch it; add the worktree FAB_HOME/wt/<run> on the branch
     (implement, review, rebase: the branch made afresh from origin/<trunk>, an earlier run's local branch reset; repair: the existing
@@ -496,9 +496,9 @@ def collect(run_id: str, events: Iterable[dict], hosts: dict[str, Host], *, sh: 
             log_path: Path | None = None) -> str | None:
     """Collect an ended run once: copy its report to FAB_HOME/runs/<run>/report.md here, log
     run.ended (run, task, outcome, report, minutes since run.started, and tokens when status
-    gives them, fab-reports.md 3) and, for a question,
+    gives them, reports.md 3) and, for a question,
     question.asked with the report's first 15 lines as text; for a failed implement, repair or
-    rebase run that did not start early, the same with park = true (fab-calls.md 2). Returns the outcome; None while the
+    rebase run that did not start early, the same with park = true (calls.md 2). Returns the outcome; None while the
     run is still going or when it was already collected.
 
     Then free what the run held on the builder: a slot run's `fab slot release N RUN` (its

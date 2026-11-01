@@ -1,4 +1,4 @@
-"""Pure overlap decisions over plans and records (docs/design/fab.md, 4; fab-integration.md, 4)."""
+"""Pure overlap decisions over plans and records (docs/design/fab.md, 4; integration.md, 4)."""
 
 import json
 import unittest

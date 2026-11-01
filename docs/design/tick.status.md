@@ -1,6 +1,6 @@
-# fab-tick status
+# tick status
 
-2026-11-01. Contract: `docs/design/fab-tick.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/tick.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 
@@ -16,7 +16,7 @@
   Services still move and restart only with `bin/install.sh`.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
   run by hand, live since 20:27Z.
-- **A ladder plan in the tick** (fab-qa.md 2; plan findings-loop, retired
+- **A ladder plan in the tick** (qa.md 2; plan findings-loop, retired
   11-01): `[ladder]` and `[[rung]]` in plan.toml and `triage` reserved (1);
   each round a plan with rungs records ended triage calls' decisions, then
   `rung.passed`, then readies its backlog branch, before `decide`, and
@@ -27,7 +27,7 @@
 
 - **A failed task run parks for the answerer** (11-01, findings-loop): `fab.run.collect`
   logs a failed implement, repair or rebase run's report as a `question.asked` with `park`
-  (fab-calls.md 2), so it queues at once; it parked unheard before.
+  (calls.md 2), so it queues at once; it parked unheard before.
 - **The flow is a skeleton:** `fab/flow.py` holds 4's target, calm and
   measure, and `fab.dispatch.places` and `decide` take a `calm` argument they
   do not use yet. The task `flow` fills them after `gates-tick`; until then

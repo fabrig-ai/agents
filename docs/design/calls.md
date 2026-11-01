@@ -1,7 +1,7 @@
 # fab: Claude calls, review and the designer
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-calls.status.md`. Shared: the
+section numbers). Status: `docs/design/calls.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -38,7 +38,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     `fab/roles/settle.md`, effort medium, as the answerer's). Its subject is
     `<chain subject>/settle`; its `call.started` carries `settles`, the root.
     It shares the plan's answer-call limit and reserves nothing else. It
-    runs report-only (fab-channel.md 3), changes no branch, and is not
+    runs report-only (channel.md 3), changes no branch, and is not
     itself reviewed. Its brief holds the root call's brief path, the
     branch's diff from its merge base as the review brief does, every
     refusing review's report and the amend calls' reports (paths and
@@ -65,9 +65,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     `the amend call ended <outcome>`, or `3 review runs ended infra`, with
     no `call.answered` after it and no `chain.settled`. Its next plan tick
     settles it; its ask stays open until then. Reviews-off plans
-    (fab-integration.md 3) still finish unreviewed chains and never reach
+    (integration.md 3) still finish unreviewed chains and never reach
     a hold.
-  - A `call.answered` naming the subject (fab-channel.md 2) starts the
+  - A `call.answered` naming the subject (channel.md 2) starts the
     chain's counts and its settle allowance afresh: the branch's tip is
     reviewed again, and may be amended once more.
   - While a subject's chain is open, no call starts for that subject; no
@@ -131,8 +131,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   - The repair or rebase run's brief carries the section before the
     refusal, since its checkout is the branch and not main. The run limit
     counts it as before.
-  - **A specless task's refusal** (fab-integration.md 3's `<draft>/repair-<n>`, a red
-    task, fab-after-landing.md 2): its foreman's brief quotes the task's body under
+  - **A specless task's refusal** (integration.md 3's `<draft>/repair-<n>`, a red
+    task, after-landing.md 2): its foreman's brief quotes the task's body under
     `# The task` in place of `# The task spec` (no spec file is read), and
     a fix is written to no spec: `refusal.settled` carries the section with
     branch "", nothing lands, and the fold appends the section to the
@@ -186,7 +186,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     the queue) or a change to a trunk that has already landed (integration
     plans), for history the log (`red.settled`'s section) and the repair's
     commit already hold.
-- **The foreman reads a QA finding too** (fab-qa.md 2): a finding the triage call
+- **The foreman reads a QA finding too** (qa.md 2): a finding the triage call
   puts on the path goes to a foreman of its own (`fab/roles/
   foreman-finding.md`) in the same form, its fix a new task
   `<draft>/finding-<n>` as a red's is.
@@ -195,7 +195,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
   the spec's pre-approved options answer it, the foreman's answer is
   recorded in the spec's Answers section and the task runs again (or, by
-  `Accept:`, the pushed run is the task done: fab-integration.md 3); otherwise
+  `Accept:`, the pushed run is the task done: integration.md 3); otherwise
   the question queues for the answerer: at once when it holds up other work
   (a task waits on the parked one, or nothing is running while work remains),
   otherwise at 4 queued or after 30 minutes (the user, 10-30; the model said 2
@@ -229,7 +229,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     `question.answered` (by the foreman run); a landing that fails is tried
     again next tick. Any other outcome, infra too, queues the question: a
     foreman runs once per question.
-- **The structure review stays its own call** (fab-gates.md 2), never the
+- **The structure review stays its own call** (gates.md 2), never the
   skeleton author's.
 
 ## 3. The designer's calls
@@ -248,7 +248,7 @@ before it lands (2).
   - It is started by hand when a draft lands: `fab call cut --plan
     PLAN_DIR --source PATH...`, PLAN_DIR being `docs/plan/<draft>` in a
     checkout (it need not exist). The call lists PLAN_DIR in
-    `FAB_HOME/plans` (fab-tick.md 5) and runs; its subject is `<draft>/cut`.
+    `FAB_HOME/plans` (tick.md 5) and runs; its subject is `<draft>/cut`.
   - Its chain is the tick's of PLAN_DIR: a plan directory with no
     plan.toml but a cut call in the log ticks as a plan with no parts, so
     only the cut's chain moves. Once its branch lands, the plan is there and
@@ -259,11 +259,11 @@ before it lands (2).
   its brief the skeleton author's with the contract's readers named. Its
   subject is the part's, `<draft>/<part>`, so a part is designed by one or
   the other. Contract and skeleton calls share a plan's limit on design
-  calls in flight (fab-tick.md 5).
+  calls in flight (tick.md 5).
 - **The user's questions park parts, not the plan:** a part named by a
   question without an answer is not designed; its readers wait as for any
   need. A skeleton or contract brief shows the part's questions and their
-  answers. The user's channel (fab-channel.md 2) lists the open ones.
+  answers. The user's channel (channel.md 2) lists the open ones.
 - **decision:** a probe's report in, a design section out. `fab call
   decision PART --run RUN` for a probe part, its brief the probe's report
   (`FAB_HOME/runs/<run>/report.md`), its readers and their designs; its
@@ -299,7 +299,7 @@ before it lands (2).
   refusal goes back once as an amend call. Once it lands, the tick skips the
   plan.
 - **Where they land:** as every call, through `fab land` for this
-  repository, so they may change only what it allows (fab-landing.md 2).
+  repository, so they may change only what it allows (landing.md 2).
 
 ## 4. Probes
 
@@ -336,5 +336,5 @@ before it lands (2).
   task would have run anyway). cut-direct.md now tells the cut to decide
   what its sources settle and to make no task wait for a question.
 - A cap on a call's context or turns, once the user sets one from the
-  measurements (fab-reports.md 3); Claude and Codex usage against their plans' limits,
+  measurements (reports.md 3); Claude and Codex usage against their plans' limits,
   once the limits are recorded somewhere fab can read.

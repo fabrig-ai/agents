@@ -1,4 +1,4 @@
-"""The user's channel: the user's questions and the daily reports on one page (docs/design/fab-channel.md, 2).
+"""The user's channel: the user's questions and the daily reports on one page (docs/design/channel.md, 2).
 
 What is the user's is decided by whoever asks, never here: a plan's `[[question]]` without
 an answer (the cut's), a call that ended `Question:`, a chain referred by settle or
@@ -36,8 +36,8 @@ def _deferred_editions(loaded: Plan, directory: Path) -> dict[str, str]:
 read_editions = getattr(walks, "editions", _deferred_editions)
 
 PAGE = "user.md"  # the page, under FAB_HOME
-PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (fab-tick.md 5)
-KINDS = ("plan", "call", "parked", "finding")  # sources of the user's questions (fab-channel.md 2)
+PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (tick.md 5)
+KINDS = ("plan", "call", "parked", "finding")  # sources of the user's questions (channel.md 2)
 QUESTION_LINES = 12  # lines of an asking report the page quotes
 ANSWERED = "call.answered"  # the user's answer to a subject's open asks
 SIGNALS = "## Signals"  # the standing reports' signals heading (fab.code_report, fab.landing_report)
@@ -61,7 +61,7 @@ class Ask:
 
 @dataclass(frozen=True)
 class Signal:
-    """An open signal's page block, folded from the log (docs/design/fab-channel.md, 2)."""
+    """An open signal's page block, folded from the log (docs/design/channel.md, 2)."""
 
     id: str
     what: str
@@ -98,7 +98,7 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
     - opening a key already open replaces its ask, which moves to the end of the order;
     - a finding.triaged with a user, brief or path question opens kind finding, subject
       <draft>/triage/<finding>, text its question, call the triage call, report the walk
-      report under FAB_HOME/walks (docs/design/fab-qa.md, 2);
+      report under FAB_HOME/walks (docs/design/qa.md, 2);
     - an ANSWERED record closes every log kind of its subject;
     - a chain.settled record closes the parked kind of its subject;
     - a call.ended with outcome done and the same subject closes the call kind: the subject
@@ -117,7 +117,7 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
 
 
 def signals(events: Iterable[dict], *, folded: Sequence[tier_reds.Red] | None = None) -> list[Signal]:
-    """Open signals, oldest first, from the log alone (docs/design/fab-channel.md, 2).
+    """Open signals, oldest first, from the log alone (docs/design/channel.md, 2).
 
     Queue rejections open queue:<branch>; a landing, a rejection or collateral at another
     tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
@@ -197,7 +197,7 @@ def _red_signals(events: Sequence[dict], *, folded: Sequence[tier_reds.Red]) -> 
 
 
 def _finding_signals(events: Sequence[dict]) -> list[Signal]:
-    """Show left findings until their rung passes after settlement; pure (docs/design/fab-channel.md, 2)."""
+    """Show left findings until their rung passes after settlement; pure (docs/design/channel.md, 2)."""
     surveys = fixes.foremen(events)
     settled, passed = {}, {}
     for index, event in enumerate(events):
@@ -475,7 +475,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     and signals, sharing one tier_reds.reds fold.
     Finding bodies quote title, rung and QUESTION_LINES of reproduction before the
     question. Loaded ladders add backlog signals at the current render and rung lines
-    from walks.editions and findings.rungs after After landing, before Unread (docs/design/fab-qa.md, 2).
+    from walks.editions and findings.rungs after After landing, before Unread (docs/design/qa.md, 2).
     An unreadable edition adds the plan directory to Unread."""
     plans, unread = _load_plans(directories)
     found = findings.findings(events)
@@ -517,7 +517,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
 
 
 def _load_plans(directories: Sequence[Path]) -> tuple[list[tuple[Plan, Path]], list[str]]:
-    """Load page plans and collect one-line read failures (docs/design/fab-channel.md, 2)."""
+    """Load page plans and collect one-line read failures (docs/design/channel.md, 2)."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
@@ -530,7 +530,7 @@ def _load_plans(directories: Sequence[Path]) -> tuple[list[tuple[Plan, Path]], l
 
 
 def _backlog_signals(plans: Sequence[tuple[Plan, Path]], events: Sequence[dict]) -> list[Signal]:
-    """The loaded ladders held at their current backlog render; pure (docs/design/fab-channel.md, 2)."""
+    """The loaded ladders held at their current backlog render; pure (docs/design/channel.md, 2)."""
     opened = []
     records = list(events)
     for loaded, _ in plans:
@@ -565,7 +565,7 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
     when text is blank,
     or when no such ask is open: the message names the subject and the open subjects in
     order, comma-separated, or `none`. A plan's question is not answered here: its answer is
-    written in its plan.toml (fab-calls.md 3)."""
+    written in its plan.toml (calls.md 3)."""
     text = text.strip()
     opened = asks((), events)
     subjects = ", ".join(dict.fromkeys(ask.subject for ask in opened)) or "none"
@@ -593,7 +593,7 @@ def clear(identifier: str, text: str, events: Sequence[dict], *, by: str = "user
     Store signal, by and stripped text beside log_path. Blank text, an unknown or closed
     signal, or a signal that cannot be cleared raises ValueError without logging or waking.
     Backlog signals use the ladders registered in FAB_HOME/plans at their current render.
-    The command rewrites the page after this record (docs/design/fab-channel.md, 2).
+    The command rewrites the page after this record (docs/design/channel.md, 2).
     """
     text = text.strip()
     opened = signals(events)

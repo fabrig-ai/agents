@@ -1,4 +1,4 @@
-"""The ready-task buffer's order: which runnable task starts first (docs/design/fab-tick.md, 7).
+"""The ready-task buffer's order: which runnable task starts first (docs/design/tick.md, 7).
 
 The user's timeline puts a structure review's consolidations at the head of the buffer, then
 repairs and rebases, then the tasks of contract parts, then the rest by their part's slice.
@@ -19,9 +19,9 @@ GROUPS = ("consolidation", "repair", "contract", "slice")  # the buffer's groups
 def group(plan: Plan, task: Task, refused: bool) -> str:
     """The GROUPS entry task starts in, the first that holds:
 
-    - "consolidation": task.consolidation is true (a structure review wrote it, fab-gates.md 2),
+    - "consolidation": task.consolidation is true (a structure review wrote it, gates.md 2),
       whatever else holds of it;
-    - "repair": kind in fix.FIX_KINDS (red or finding; docs/design/fab-qa.md, 2), or
+    - "repair": kind in fix.FIX_KINDS (red or finding; docs/design/qa.md, 2), or
       refused is true (its next run is a repair or rebase run on a refusal);
     - "contract": its part is in plan.parts with contract true;
     - "slice": anything else, a task whose part is not in plan.parts among them.

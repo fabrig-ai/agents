@@ -1,7 +1,7 @@
 # The overlap family: overlaps-cache, overlaps-records, overlaps-git
 
 What the three tasks on the overlap probe share
-(`docs/design/fab-integration.md`, 4, "The overlap probe").
+(`docs/design/integration.md`, 4, "The overlap probe").
 
 ## The cache file, `FAB_HOME/overlaps.json`
 

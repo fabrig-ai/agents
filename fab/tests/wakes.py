@@ -1,4 +1,4 @@
-"""The vocabulary of the events tests (docs/design/fab-tick.md, 6): machines with a dispatcher,
+"""The vocabulary of the events tests (docs/design/tick.md, 6): machines with a dispatcher,
 the records a round gains, and assertions on the want file and the log's notes.
 
 test_wake.py, the wakers' tests (codex, calls, land, channel, queue) and the tick's event

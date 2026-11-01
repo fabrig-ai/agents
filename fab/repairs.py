@@ -1,4 +1,4 @@
-"""The foreman reads a refusal and writes its repair or rebase, or retries the tip (fab-calls.md 2).
+"""The foreman reads a refusal and writes its repair or rebase, or retries the tip (calls.md 2).
 
 When the landing refuses a task's branch, the task waits for a foreman run before any repair
 or rebase run starts. The foreman, a read-only Codex run, reads the refusal, the failing

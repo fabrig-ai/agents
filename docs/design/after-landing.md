@@ -1,7 +1,7 @@
 # fab: after landing
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-after-landing.status.md`. Shared: the
+section numbers). Status: `docs/design/after-landing.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -19,7 +19,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **Its machine and slot are config:** the builder with the role
   `after-landing` in `fab/hosts.toml` names its `after_landing_slot`
   (hetzner8, slot 7). `fab after-landing install`, run by the deploy on
-  every machine as `fab queue install` is (fab-landing.md 2, `fab/units.py`),
+  every machine as `fab queue install` is (landing.md 2, `fab/units.py`),
   claims that slot for good and writes `fab-after-landing.service`; a stop
   waits up to two hours for the run in progress, so a deploy never cuts one
   short. On a machine without the role it disables a unit it finds; the
@@ -36,7 +36,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   exhaustive and process-jig pairs ended, their tests re-tiered; process-temper
   joined within its 360 CPU-s). Not by default the live pairs (real
   providers, the user's sign-ins): `--live` adds `live-skein`, on logins
-  borrowed from the shelf (fab-machines.md 3). `live-smith` awaits a signed-in live root.
+  borrowed from the shelf (machines.md 3). `live-smith` awaits a signed-in live root.
   `live-temper` is out pending the user's decision on which ignored owner-run
   stories, if any, should run with `--run-ignored`: since fabrig eb6c40aaf its
   live binaries have no harness unit tests, so it selects no tests, nextest
@@ -63,7 +63,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   needs and apply its per-pair budgets as verdicts. An isolated Python
   worker runs the collector through fab's runner seam; `collect` accepts
   the caller's profile, command and package selection. The queue reuses it
-  for default/fuzzy with report-only per-tree budgets (fab-landing.md 2).
+  for default/fuzzy with report-only per-tree budgets (landing.md 2).
   The collector verifies JUnit attempt coverage and descendant accounting
   (`tools/tiers/design.md`, 7.2–7.3); incomplete CPU on a stopped attempt
   remains a lower bound. A separate nextest listing inventories selected
@@ -142,7 +142,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   <state>, <k> tests at \`<tip[:12]>\`, since <ts>` (below), under `##
   After landing`.
 - **The slot stays bounded:** a run ends by sweeping the slot's target as the
-  queue sweeps its own (fab-machines.md 2).
+  queue sweeps its own (machines.md 2).
 - **Left out from the old tool:** posts to coordinators and its resolver
   (the tick routes reds instead, below), bisection to a culprit commit,
   hourly coverage posts, the records writer and its detail files, heavy
@@ -191,11 +191,11 @@ which folds where each red stands, and the tick.
   integration plan's trunk, `<draft>/integration` (its owner the plan,
   whose tasks the foreman reads). Any other named branch was readied by
   hand; a retired plan is not loaded, so its branches count as hand-pushed.
-  This is a rule of its own, not fab-landing.md 3's: the queue import keeps out of
+  This is a rule of its own, not landing.md 3's: the queue import keeps out of
   `queue.*` every branch the log knows, loaded or not, while a red's
   suspect must belong to a loaded plan that can hold its repair, so a
   retired plan's branch is hand-pushed as a red's suspect.
-- **A red with a fab suspect goes to a foreman** (fab-calls.md 2, `fab/roles/
+- **A red with a fab suspect goes to a foreman** (calls.md 2, `fab/roles/
   foreman-red.md`): it reads the red, its evidence and the suspects' specs
   on main at the red's tip, and decides as a refusal's foreman does. The
   red is a suspect's: it writes what failed, where and what to change, and
@@ -207,10 +207,10 @@ which folds where each red stands, and the tick.
 - **The repair is a task of its own, `<draft>/red-<n>`,** not the landed
   task reopened: the task's branch is gone, its dependents have started on
   its landing, and a landed status that went back would unsettle both. Its
-  n is the red's, so ids never collide across drafts or with fab-integration.md 3's
+  n is the red's, so ids never collide across drafts or with integration.md 3's
   `<draft>/repair-<n>`.
   - Folded from the log (`fab.tier_reds.tasks(plan, events)`, joined to the
-    plan's tasks as fab-integration.md 3's repairs are, `fab.integration.with_repairs`
+    plan's tasks as integration.md 3's repairs are, `fab.integration.with_repairs`
     included), never a spec file: kind `red`, part `after-landing`, repo
     fabrig, no needs, files `**`, effort high, minutes 20. It exists from
     the red's `red.settled` with verdict fix or none, or its foreman's
@@ -226,9 +226,9 @@ which folds where each red stands, and the tick.
     own checks as any fabrig task (precheck `--onto origin/main`). A red of
     a live pair cannot be reproduced without logins: its section is the
     guide and the next after-landing run the check. Answers to its
-    questions fold into the body under `## Answers`, as fab-integration.md 3's.
+    questions fold into the body under `## Answers`, as integration.md 3's.
   - It runs as an implement run from `origin/main`, in a slot, whatever
-    the plan's landing: everything fab-integration.md 3 reads as the trunk is main for it.
+    the plan's landing: everything integration.md 3 reads as the trunk is main for it.
     Done, it is readied for the queue like any fabrig task (`ready/<draft>/
     red-<n>`, `branch.ready`, its precheck receipt) and lands as `Merge
     <draft>/red-<n>`; an integration plan never merges it into its trunk,
@@ -237,13 +237,13 @@ which folds where each red stands, and the tick.
     land`. The queue import's tasks include every loaded plan's red tasks,
     so its `landed` and `rejected` become `branch.landed` and
     `branch.rejected`; a queue refusal goes to its refusal foreman as any
-    task's (fab-calls.md 2, specless).
+    task's (calls.md 2, specless).
   - **Two runs, then Claude:** its run limit is `RED_RUNS` (2), not
     `MAX_RUNS`: Fix mode wakes Claude after two failed tries
     (`execution-modes.md`). A park at the limit queues for the answerer as
     any park does, its thresholds applying; a question of its runs skips
     the foreman (no spec, no options) and queues, as a specless repair's
-    does (fab-integration.md 3). Answer calls list red tasks and their questions in both
+    does (integration.md 3). Answer calls list red tasks and their questions in both
     landing modes (`fab/calls.py`), not only in integration plans.
 - **One open repair per red, until it recovers.** A red is open from its
   `red.opened`; it closes when every one of its keys has closed, and the
@@ -255,7 +255,7 @@ which folds where each red stands, and the tick.
   removed, ignored or renamed). A starved test is not in `reds`, and one
   test past nextest's slow-timeout leaves `wall_starved` false, so without
   the counts starvation would close a red; there is no per-key tracking; a hand clear
-  of the red's signal (fab-channel.md 2) closes them all. A red closes on its last
+  of the red's signal (channel.md 2) closes them all. A red closes on its last
   key's reason, `recovered` when every key recovered. Its state (`fab.tier_reds.reds(events)`, from the log and in log
   order): foreman, deciding, decided, repairing (its task exists and has
   not landed), landed (waiting for a run that covers it), signal or
@@ -272,7 +272,7 @@ which folds where each red stands, and the tick.
     the test is still red. A key starved on the covering run neither
     closes nor unfixes the red there. A second repair round is left for
     later (3).
-- **Reds no task owns are signals, on the user's page** (fab-channel.md 2): a red
+- **Reds no task owns are signals, on the user's page** (channel.md 2): a red
   routed to the page at its opening, one its foreman left (verdict left),
   and an unfixed one. Each stays open until the red closes or its signal
   is cleared by hand. The page names the red, its tip, its tests (at most
@@ -290,12 +290,12 @@ which folds where each red stands, and the tick.
   hand.
 - **Several suspects:** a red whose suspects span several fab tasks, of one
   plan or several, still opens one red and one foreman. The foreman names
-  the owner among them (its report's `Owner:` line, fab-calls.md 2), for the record
+  the owner among them (its report's `Owner:` line, calls.md 2), for the record
   and the report; one repair task, in the newest fab suspect's plan, fixes
   the group whoever the owner. Bisection to a culprit (the red tests run at
   each suspect's merge) stays left out: the foreman reads the suspects'
   diffs on main, and numbers will say whether it guesses wrong.
-- **The after-landing machine wakes the tick** (fab-tick.md 6): at the end of a run
+- **The after-landing machine wakes the tick** (tick.md 6): at the end of a run
   that recorded a test new, unattributed or recovered, `fab after-landing
   run` wakes the dispatcher once, `after-landing <tip[:12]> new <n>
   unattributed <n> recovered <n>`, as the queue does at the end of a cycle;
@@ -307,8 +307,8 @@ which folds where each red stands, and the tick.
   takes its reds' (`fab.dispatch.red_actions`, pure, the reds whose `draft`
   is the plan's): state foreman, `Action("examine-red", task=<draft>/red-<n>,
   detail=<red>)`, which starts the foreman; decided, `Action("remedy-red",
-  run=<foreman run>)`, which settles it (fab-calls.md 2); renamed `examine-fix` and
-  `remedy-fix` when `fab/fix.py` is factored out (fab-qa.md 2). A closed red takes no
+  run=<foreman run>)`, which settles it (calls.md 2); renamed `examine-fix` and
+  `remedy-fix` when `fab/fix.py` is factored out (qa.md 2). A closed red takes no
   action: a foreman still deciding ends and is collected, and nothing
   settles it. A red task that exists is one of the plan's tasks, so
   `decide` starts, readies and parks it as any.
@@ -320,14 +320,14 @@ which folds where each red stands, and the tick.
     open as hand-pushed, and lose its owner for good.
   - **A replay never opens reds:** `fab tick --only` opens none and skips
     the retire wait below, since its plans never land on main.
-  - With no loaded plan the round still closes and opens reds (fab-tick.md 5).
+  - With no loaded plan the round still closes and opens reds (tick.md 5).
 - **A fabrig plan retires after its verdict:** its retire call starts only
   once a `tiers.run` names its last branch to land on main among its
   `branches` (the trunk for an integration plan, its last task's for a
   queue plan) and none of its reds (`draft` the plan's) is in state
   foreman, deciding, decided, repairing or landed; a red that is a signal
   does not hold it. Otherwise an integration plan, retired as soon as its trunk
-  lands (fab-integration.md 3), would be unloaded before its reds arrive and every one
+  lands (integration.md 3), would be unloaded before its reds arrive and every one
   would read as hand-pushed. Without a machine with the role
   `after-landing`, the first condition does not apply.
 - **Tests** (fake runner, records and log): `fab.after_landing.imported`
@@ -351,8 +351,8 @@ which folds where each red stands, and the tick.
 
 - after-landing live: its unit on a builder and its slot (done, 11-01), the
   old tool stopped, fabrig's package map moved to `.config/tiers/`. New
-  reds reaching their tasks through the dispatcher are designed (2, fab-calls.md 2),
-  and the landing report's after-landing figures (fab-reports.md 2). Next, from their
+  reds reaching their tasks through the dispatcher are designed (2, calls.md 2),
+  and the landing report's after-landing figures (reports.md 2). Next, from their
   numbers: bisection when several branches are suspects (the red tests run
   at each suspect's merge in the lowest tier), if foremen name the wrong
   owner; a second repair round for an unfixed red instead of the page; the
@@ -363,5 +363,5 @@ which folds where each red stands, and the tick.
   gate waking Claude when a red's fix touches a public item (with the api
   gate, above). CPU accounting is present (2); the user sets the one total CPU budget
   from measurements after re-tiering lands. Default/fuzzy queue CPU now
-  reuses the collector (fab-landing.md 2); making its report-only excesses red awaits the
+  reuses the collector (landing.md 2); making its report-only excesses red awaits the
   user's decision and budget figures.

@@ -1,4 +1,4 @@
-"""Precheck receipts at the queue (docs/design/fab-landing.md, 3).
+"""Precheck receipts at the queue (docs/design/landing.md, 3).
 
 Precheck writes a receipt on the builder (fab.precheck). The dispatcher carries it to the gate
 when it readies the tip (`deliver`, received by `fab queue receipt`), and the queue reads it

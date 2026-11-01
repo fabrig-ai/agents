@@ -1,7 +1,7 @@
 # fab: reports, accounting and the status page
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-reports.status.md`. Shared: the
+section numbers). Status: `docs/design/reports.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -36,18 +36,18 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **The landing report** (`fab/landing_report.py`): batches, their outcomes
   and branches; the share of the day in gate steps; rejections by step (the
   red classes) and collateral ones (a rejected tip that later lands, and the
-  branches the queue retried after a collateral red, fab-landing.md 3); batches landed
+  branches the queue retried after a collateral red, landing.md 3); batches landed
   on a precheck receipt; ready to
   landed latency (from the log's `branch.ready`), branches waiting and the
   oldest wait; bisection runs and minutes; repair rounds; each step's
   durations, failures and timeouts; batches in error; heavy's waits on the
-  gate. From the log, cheaply (fab-after-landing.md 2, fab-landing.md 3): after-landing reds opened,
+  gate. From the log, cheaply (after-landing.md 2, landing.md 3): after-landing reds opened,
   sent to a foreman and sent to the page; settled fix, none and left (not
   the suspects'); red repairs landed; reds closed, by reason (recovered,
   absent, cleared), with the median hours from opened to recovered (the
   draft's "time to the confirmed fix"); hand-pushed rejections
   (`queue.rejected`). From the log too, the landing draft's "QA passes ...
-  and their findings" (fab-qa.md 2): walks by verdict, findings raised and
+  and their findings" (qa.md 2): walks by verdict, findings raised and
   merged, triaged by decision, finding repairs landed, rungs passed, and
   the median hours from a failed walk to its rung's next pass. These are
   decisions the tick records anyway, not records kept for the report.
@@ -55,7 +55,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   need no number of the user's: idle gaps, rising rejections, Infra runs,
   collateral rejections, queue errors, a ready branch waiting over an hour and
   longer than the day before, disk waits and unread sources, an after-landing
-  red or a hand-pushed rejection with no owner fab knows (fab-channel.md 2's open
+  red or a hand-pushed rejection with no owner fab knows (channel.md 2's open
   signals), each with the draft's first action and owner. Thresholds come with targets.
 - **Where they go:** `FAB_HOME/reports/<draft>/<day>.md` and
   `FAB_HOME/reports/landing/<day>.md` on hel8, written to a sibling and
@@ -114,7 +114,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `waiting_on_user` snapshot has `asks`, `by_kind` (`call`, `parked`, `finding`) and
   `oldest_age_s` from the asks' `since`, null when none. Waiting has no age
   cut; answers, completed designs and finished chains close asks as on the
-  user's page (fab-channel.md 2).
+  user's page (channel.md 2).
 - **Today is UTC.** `landed` counts `branch.landed` without `into` (on main);
   `merged` counts those with `into` (into a trunk). Each has `last_hour` and
   `today` counts; the page labels both under Today. Rejected branches and

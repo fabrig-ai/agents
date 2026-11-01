@@ -1,4 +1,4 @@
-"""Finding foremen and repairs, over records and fake commands (fab-qa.md, 2)."""
+"""Finding foremen and repairs, over records and fake commands (qa.md, 2)."""
 
 import shlex
 import unittest

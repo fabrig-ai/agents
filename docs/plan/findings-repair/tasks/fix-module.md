@@ -15,7 +15,7 @@ Read first: `docs/plan/findings-repair/notes/common.md`,
 The request: "`fab/fix.py`, factored out of `fab/tier_reds.py` (the
 foreman's launch, `parse`, `section`, `settle`, the repair task's
 construction, `FIX_KINDS`, `RUNS`), red's behaviour and tests unchanged".
-Design: `docs/design/fab-qa.md`, 2, "What moves out of `fab/tier_reds.py`".
+Design: `docs/design/qa.md`, 2, "What moves out of `fab/tier_reds.py`".
 
 ## What to build
 

@@ -1,4 +1,4 @@
-"""The vocabulary of the landing checks' tests (docs/design/fab-landing.md, 3): receipts as
+"""The vocabulary of the landing checks' tests (docs/design/landing.md, 3): receipts as
 fab.precheck writes them, nextest's JUnit, and a fake nextest that writes it.
 
 test_receipts.py, test_reds.py and the queue's receipt and classing tests speak in these; add a

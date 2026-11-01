@@ -1,4 +1,4 @@
-"""Pure triage timing, report decisions and backlog views (docs/design/fab-qa.md, 2)."""
+"""Pure triage timing, report decisions and backlog views (docs/design/qa.md, 2)."""
 
 from __future__ import annotations
 
@@ -21,7 +21,7 @@ AFTER = 30  # minutes before triage or a failed call's retry, as dispatch.ANSWER
 
 
 def subject(draft: str) -> str:
-    """The draft's batch triage subject (docs/design/fab-qa.md, 2)."""
+    """The draft's batch triage subject (docs/design/qa.md, 2)."""
     return f"{draft}/triage"
 
 
@@ -29,7 +29,7 @@ def due(plan: Plan, events: list[dict], now: str) -> bool:
     """Whether new findings need a call, absent flight, an open ask or retry delay.
 
     Urgent findings run at once; others batch at AT or AFTER minutes since their
-    walk ended or they became new again (docs/design/fab-qa.md, 2, When).
+    walk ended or they became new again (docs/design/qa.md, 2, When).
     """
     new = {key: finding for key, finding in qa.findings(events).items()
            if finding.draft == plan.draft and finding.state == "new"}
@@ -106,7 +106,7 @@ def decisions(plan: Plan, events: list[dict], reports: Mapping[str, str]) -> lis
     """Records for unrecorded done triage calls whose reports are available.
 
     Apply valid lines in report order, once per finding per call; invalid lines
-    leave it for another call. Prose alone gets a note (docs/design/fab-qa.md, 2).
+    leave it for another call. Prose alone gets a note (docs/design/qa.md, 2).
     """
     recorded = set()
     for event in events:
@@ -198,7 +198,7 @@ def backlog_text(plan: Plan, events: list[dict]) -> str:
     """Render backlog findings in raise order, omitting promoted or merged entries.
 
     The file identifies its ladder and log source, carries each finding's context
-    and triage reason, and ends in a newline (docs/design/fab-qa.md, 2).
+    and triage reason, and ends in a newline (docs/design/qa.md, 2).
     """
     sections = [f"# {plan.draft} backlog",
                 "fab writes this ladder's backlog from its log. Do not edit by hand."]
@@ -217,7 +217,7 @@ def backlog_text(plan: Plan, events: list[dict]) -> str:
 
 
 def render_key(text: str) -> str:
-    """The UTF-8 render's sha256 hex for branch.ready (docs/design/fab-qa.md, 2)."""
+    """The UTF-8 render's sha256 hex for branch.ready (docs/design/qa.md, 2)."""
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
@@ -225,7 +225,7 @@ def backlog_held(plan: Plan, events: list[dict], render: str) -> dict | None:
     """Latest rejection after two of this render since the last clear or backlog landing.
 
     Ready records associate ladder/<draft>/backlog-<n> branches with renders;
-    other drafts and renders cannot hold this one (docs/design/fab-qa.md, 2).
+    other drafts and renders cannot hold this one (docs/design/qa.md, 2).
     """
     branch_form = re.compile(rf"ladder/{re.escape(plan.draft)}/backlog-[1-9][0-9]*")
     ready = {}
@@ -260,7 +260,7 @@ def brief(plan: Plan, events: list[dict], root: Path, plan_dir: Path,
 
     Include whole brief files only for rungs with new findings, and each finding's
     user answers. Refuse a plan without rungs or a ladder; raise on BRIEF_LIMIT
-    overflow rather than trim context (docs/design/fab-qa.md, 2, Its brief).
+    overflow rather than trim context (docs/design/qa.md, 2, Its brief).
     """
     if not plan.rungs or plan.ladder is None:
         raise ValueError("triage requires a plan with rungs and a ladder")
@@ -308,7 +308,7 @@ def main(argv: list[str]) -> int:
 
     Use the plan's repository and trunk for a report-only call, print its outcome,
     and return 0 only for done or a printed brief; refusals and failed calls return
-    1 (docs/design/fab-qa.md, 2, Triage is a Claude call in the director's role).
+    1 (docs/design/qa.md, 2, Triage is a Claude call in the director's role).
     """
     parser = argparse.ArgumentParser(prog="fab call triage", description=main.__doc__)
     parser.add_argument("--plan", type=Path, required=True)

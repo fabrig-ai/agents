@@ -1,4 +1,4 @@
-"""The gates: code's checks of a branch's structure before it lands (docs/design/fab-gates.md, 2).
+"""The gates: code's checks of a branch's structure before it lands (docs/design/gates.md, 2).
 
 Not fabrig's check steps (fab/gate.py). These read the branch's digest (fab/digest.py) and
 its task, and are pure; `screen` is the shell around them that the tick calls before it lands

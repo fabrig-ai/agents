@@ -13,7 +13,7 @@ Read first: `docs/plan/findings-repair/notes/common.md`,
 `docs/plan/findings-repair/notes/fix.md`.
 
 The request: "`FIX_KINDS` wherever the red wiring reads kind `red`".
-Design: `docs/design/fab-qa.md`, 2, "Everything fab-after-landing.md 2
+Design: `docs/design/qa.md`, 2, "Everything after-landing.md 2
 gives kind `red` holds for each of `fab.fix.FIX_KINDS`".
 
 ## What to build

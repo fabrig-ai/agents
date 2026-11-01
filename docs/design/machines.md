@@ -1,7 +1,7 @@
 # fab: builders, slots, disk and logins
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-machines.status.md`. Shared: the
+section numbers). Status: `docs/design/machines.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -19,7 +19,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   `install pinned` on stderr. A person or replay setup creates and removes
   the pin; fab does neither. An install at that commit, ahead or diverged
   stays; sync failures only note stderr and never fail a start. Dispatcher hosts are
-  skipped (docs/design/fab-tick.md, 3). This updates the fab commands on
+  skipped (docs/design/tick.md, 3). This updates the fab commands on
   the builder's PATH without changing the links, worktrees, slots or units.
   Long-running queue and after-landing services still need
   `bin/install.sh HOST` to update and restart them.
@@ -121,7 +121,7 @@ login that still works reused across them before more are signed in.
   `fab.after_landing.LIVE`: only `live-skein`. `live-temper` is out (11-01):
   all its live stories are ignored owner-run sittings, and since fabrig
   eb6c40aaf those binaries have no harness unit tests; nextest exits 4
-  (no tests to run), faulting the pair and holding the cursor (fab-after-landing.md 2). It comes
+  (no tests to run), faulting the pair and holding the cursor (after-landing.md 2). It comes
   back only once the user decides which ignored stories, if any, should run
   with `--run-ignored`. Borrowing and the `chatgpt` record / `claude-box`
   directory kinds remain supported and tested. `live-smith` is

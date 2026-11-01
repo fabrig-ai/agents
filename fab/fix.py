@@ -1,4 +1,4 @@
-"""Shared Fix-mode foremen and repair tasks (docs/design/fab-qa.md, 2)."""
+"""Shared Fix-mode foremen and repair tasks (docs/design/qa.md, 2)."""
 
 from __future__ import annotations
 
@@ -20,7 +20,7 @@ def launch(task_id: str, host: runs.Host, tip: str, brief: Callable[[str, str], 
     """Launch a numbered, read-only fabrig foreman and return its run id.
 
     brief receives the run id and remote report path. Caller fields join run.started;
-    branch is task_id, base and run.started tip are tip (docs/design/fab-qa.md, 2).
+    branch is task_id, base and run.started tip are tip (docs/design/qa.md, 2).
     """
     run_id = runs.next_run(foreman.task_field(task_id), events)
     text = brief(run_id, report_path(host, run_id))
@@ -31,7 +31,7 @@ def launch(task_id: str, host: runs.Host, tip: str, brief: Callable[[str, str], 
 
 
 def report_path(host: runs.Host, run: str) -> str:
-    """Return the foreman's report path on host (docs/design/fab-qa.md, 2)."""
+    """Return the foreman's report path on host (docs/design/qa.md, 2)."""
     return str(Path(runs.remote_home(host)) / "runs" / run / "report.md")
 
 
@@ -41,7 +41,7 @@ def parse(report: str, *, skip: Callable[[str], bool] | None = None
 
     Done: fix: <reason> keeps SECTION_LINES right-stripped following lines; retry
     returns left, other forms none. skip may remove only the immediate next line,
-    returned verbatim in skipped (docs/design/fab-qa.md, 2).
+    returned verbatim in skipped (docs/design/qa.md, 2).
     """
     lines = report.splitlines()
     first = next((i for i, line in enumerate(lines) if line.strip()), None)
@@ -61,7 +61,7 @@ def parse(report: str, *, skip: Callable[[str], bool] | None = None
 def section(heading: str, reason: str, lines: Sequence[str]) -> str:
     """Return heading, a blank line, reason and lines, ending in one newline.
 
-    Drop trailing blank lines (docs/design/fab-qa.md, 2).
+    Drop trailing blank lines (docs/design/qa.md, 2).
     """
     kept = [reason, *lines]
     while kept and not kept[-1].strip():
@@ -71,7 +71,7 @@ def section(heading: str, reason: str, lines: Sequence[str]) -> str:
 
 def settle(ev: str, fields: Callable[[str], dict], *, log_path: Path | None = None) -> dict:
     """Append ev with fields(day), returning the record; one clock read supplies its
-    timestamp and day (docs/design/fab-qa.md, 2).
+    timestamp and day (docs/design/qa.md, 2).
     """
     stamp = log.now()
     return log.append(ev, path=log_path, ts=stamp, **fields(stamp[:10]))
@@ -79,7 +79,7 @@ def settle(ev: str, fields: Callable[[str], dict], *, log_path: Path | None = No
 
 def answers(events: Sequence[dict]) -> dict[str, list[str]]:
     """Return each task's nonempty question.answered answers in log order; pure
-    (docs/design/fab-qa.md, 2).
+    (docs/design/qa.md, 2).
     """
     found = {}
     for event in events:
@@ -90,7 +90,7 @@ def answers(events: Sequence[dict]) -> dict[str, list[str]]:
 
 def sections(events: Sequence[dict]) -> dict[str, list[str]]:
     """Return each task's nonempty refusal.settled fix sections in log order; pure
-    (docs/design/fab-qa.md, 2).
+    (docs/design/qa.md, 2).
     """
     found = {}
     for event in events:
@@ -102,7 +102,7 @@ def sections(events: Sequence[dict]) -> dict[str, list[str]]:
 def task(task_id: str, kind: str, part: str, body: str, answers: Sequence[str]) -> Task:
     """Return a specless fabrig repair task, appending answers under ## Answers.
 
-    No needs, files **, high effort, 20 minutes (docs/design/fab-qa.md, 2).
+    No needs, files **, high effort, 20 minutes (docs/design/qa.md, 2).
     """
     if answers:
         body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers) + "\n"

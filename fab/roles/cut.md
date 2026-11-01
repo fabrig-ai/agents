@@ -10,7 +10,7 @@ Prefer task boundaries and an order that keep this draft's early work off files 
 ## What you write
 
 `docs/plan/<draft>/plan.toml`, in the format of the plans this brief lists
-(`docs/design/fab-tick.md`, 2), and task specs for direct parts as below. Write
+(`docs/design/tick.md`, 2), and task specs for direct parts as below. Write
 nothing else unless a design must say where the draft's work goes:
 
 - **`draft`, `repo`, `sources`** (the draft's paths, as given) and
@@ -26,10 +26,10 @@ nothing else unless a design must say where the draft's work goes:
   true`. Only its readers need it; parts that touch no contract need none.
 - **Direct parts:** mark a part `mode = "direct"` when it is about 1-2
   tasks, one concept, with no shared contract and nothing another part
-  reads from it (`docs/design/fab-integration.md`, 2, "Direct mode"). Never mark
+  reads from it (`docs/design/integration.md`, 2, "Direct mode"). Never mark
   it `contract`. It skips the skeleton: write its task specs yourself
   in the plan's `tasks/`, in the format of the specs in this brief
-  (`docs/design/fab-tick.md`, 2). Keep them thin: what to build, the files
+  (`docs/design/tick.md`, 2). Keep them thin: what to build, the files
   each task may change, and the acceptance.
 - **The slices:** each `[[slice]]` the smallest work that runs a story end
   to end on main, with `id` (from 1), `story`, `parts` and `walk` (whether

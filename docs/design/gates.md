@@ -1,7 +1,7 @@
 # fab: gates and the structure review
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-gates.status.md`. Shared: the
+section numbers). Status: `docs/design/gates.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -39,7 +39,7 @@ and Claude reads the code's structure in batches, never on the landing path.
   `branch.rejected` with step `gate:<the first failed gate>`, log the
   digest's path, and `findings`, the findings as text; a tip whose Python
   does not parse is step `gate:parse`. The repair run's brief quotes the
-  findings (fab-landing.md 2). A gating that cannot run (git fails) is a failed
+  findings (landing.md 2). A gating that cannot run (git fails) is a failed
   action and the branch waits; it never lands ungated. The first gates read
   Python (this repository); fabrig's, over Rust and its public API, come
   later.
@@ -59,12 +59,12 @@ and Claude reads the code's structure in batches, never on the landing path.
   skeleton call's does. It never holds up a landing.
 - **A question from a call parks its subject:** a skeleton, answer or
   review call that ends with a question starts no further call for that
-  subject until `call.answered` names it (fab-channel.md 2), or a later call of the
+  subject until `call.answered` names it (channel.md 2), or a later call of the
   subject ends done. An answer call's subject is its draft.
 
 ## 3. Later
 
 - fabrig's api gate, the public API against the skeleton (rustdoc JSON);
-  names, docs and clones over Rust (fab-integration.md 2 has the minimal gates).
+  names, docs and clones over Rust (integration.md 2 has the minimal gates).
 - Gates on the calls' own branches (skeletons, reviews), which have no task
   `files` to check against.

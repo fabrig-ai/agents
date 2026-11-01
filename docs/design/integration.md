@@ -1,7 +1,7 @@
 # fab: plans on fabrig and integration trunks
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-integration.status.md`. Shared: the
+section numbers). Status: `docs/design/integration.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -19,9 +19,9 @@ weight go. The api gate (rustdoc JSON) is out of scope.
 
 - **A fabrig plan** is a plan directory inside a fabrig checkout, at any
   depth (`skein/docs/plan/<draft>`), with `repo = "fabrig"`, listed in
-  `FAB_HOME/plans` (fab-tick.md 5). Its checkout on hel8 is the dispatcher's fabrig
+  `FAB_HOME/plans` (tick.md 5). Its checkout on hel8 is the dispatcher's fabrig
   clone, `FAB_HOME/repos/fabrig`; the tick fetches it once, as any checkout.
-  Its tasks build in slots and are readied to fabrig's queue (fab-landing.md 2).
+  Its tasks build in slots and are readied to fabrig's queue (landing.md 2).
 - **Its calls land through fabrig's queue,** never `fab land`: a skeleton,
   contract, review, answer or retire call works in a worktree of the fabrig
   clone on hel8 and pushes `calls/<id>`; once its chain approves, the tick
@@ -48,14 +48,14 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   - `size` is a flag, not a gate: functions over 60 lines the branch adds
     or grows are listed in the digest.
   A failed gate logs `branch.rejected` with step `gate:<gate>` and
-  `findings`, as fab-gates.md 2, and the foreman's repair path takes it.
+  `findings`, as gates.md 2, and the foreman's repair path takes it.
 - **The Rust digest** (`fab/rust_digest.py`, `FAB_HOME/digests/<run>.md`):
   public items added and removed (`pub fn|struct|enum|trait|type|const|mod`
   by grep over changed `.rs` files, base against tip), changed lines split
   into production, tests (`tests/`, `#[cfg(test)]` modules, `*_tests.rs`)
   and docs (`.md`), functions over 60 lines added or grown, paths outside
   the task's files and the ratchet's deltas per tree. Deterministic Markdown
-  of at most 8,000 characters, as fab-gates.md 2's.
+  of at most 8,000 characters, as gates.md 2's.
 - **Optimistic start:** a part's tasks start once its skeleton call has
   ended done and its tip passes the checks (agents: `bin/fab test` and the
   gates; fabrig: `fab precheck` and the Rust gates), with the Codex review
@@ -64,7 +64,7 @@ weight go. The api gate (rustdoc JSON) is out of scope.
   skeleton has landed. A refusal becomes an amend call as now; when the
   amended skeleton lands, each started task's branch is rebased onto main
   by a rebase run before it lands. A chain that parks parks its tasks.
-- **Start wide:** the flow target (fab-tick.md 4) starts at the plan's places (the
+- **Start wide:** the flow target (tick.md 4) starts at the plan's places (the
   sum of its builders' `places`), not 2, and runs start up to the lesser of
   the target and the runnable tasks. A first-attempt landing with the window
   full grows it by one; a rejection or an `Infra:` outcome halves it
@@ -102,12 +102,12 @@ only as tweaks once a replay matches its run.
 - **The options** (`plan.toml`, read by `fab.plan.load_plan`); the
   defaults are the run's flow:
   - `landing`: `"integration"` (the default) or `"queue"` (each task
-    landed or readied, as in fab-landing.md 2);
+    landed or readied, as in landing.md 2);
   - `ready` (default true): an integration plan readies its checked
     branch for the queue once; false leaves it unlanded (an experiment, as
     the replay of codex-kit);
   - `reviews` (default false): true sends every call's chain to a review
-    run (fab-calls.md 2) and starts structure review calls (fab-gates.md 2). The code gates
+    run (calls.md 2) and starts structure review calls (gates.md 2). The code gates
     (files, ratchet) run either way;
   - `direct` (default true): every part must be `mode = "direct"`, a plan
     problem otherwise, so a cut that writes a skeleton part is caught
@@ -144,7 +144,7 @@ only as tweaks once a replay matches its run.
   scripts/old_forms.py --write` in that tree (17 of codex-kit's 24 merges
   met there). Any other conflict, or a recount that exits non-zero, aborts
   the merge and logs `branch.rejected` with step `merge` and the conflict as
-  `findings`, so a rebase run follows (fab-calls.md 2's refusal foreman first). Calls'
+  `findings`, so a rebase run follows (calls.md 2's refusal foreman first). Calls'
   branches (`calls/<id>`), answers (`answers/<run>`) and repair sections
   (`repairs/<run>`) are merged into the trunk the same way, never readied.
   Since a merged task counts as landed, its dependents become runnable and
@@ -368,7 +368,7 @@ only as tweaks once a replay matches its run.
     designers from shared binding calls; they write specs and notes only,
     and the cut checks and releases them batch by batch (the user, 10-31,
     after the playground replay's cut ran out of time with its four
-    designers in flight; the call's timeout is now 60 minutes, fab-reports.md 3). It is one call throughout: it never waits for, watches or
+    designers in flight; the call's timeout is now 60 minutes, reports.md 3). It is one call throughout: it never waits for, watches or
     reacts to a run, and hands its output over in pieces (the early release)
     only so fab can start them. It carries the plan and spec formats, and the brief leaves out
     the Designs, Plans and Inventory sections.
@@ -400,7 +400,7 @@ only as tweaks once a replay matches its run.
     report paragraph). The standing rules are the cut's notes, as the
     lead's `common.md` was. The spec's path is given relative to the
     repository.
-  - The `files` gate is gone (fab-gates.md 2 and section 2): a spec's `files`
+  - The `files` gate is gone (gates.md 2 and section 2): a spec's `files`
     say what a task owns, for the cut and the implementer, and nothing
     refuses a branch for a path outside them.
   - An integration plan answers a queued question at once (an answer call
@@ -409,7 +409,7 @@ only as tweaks once a replay matches its run.
 - **Retire waits for main.** An integration plan's parts are done when
   their tasks have merged, but its retire call starts only once the trunk
   has landed on main (`branch.landed` for task `<draft>/integration` from
-  the queue's record), and after its verdict after landing (fab-after-landing.md 2).
+  the queue's record), and after its verdict after landing (after-landing.md 2).
 - **Departures from the user's drafts, at the user's word** (10-31;
   `execution-modes.md`): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
@@ -480,7 +480,7 @@ anything.
     probe logs nothing, and an empty `files` after a non-empty one says the
     overlap cleared.
   - **Closing pairs that leave:** in a tick where every listed plan loaded
-    (fab-tick.md 5's rule), a pair whose last `trunks.overlap` has files and that
+    (tick.md 5's rule), a pair whose last `trunks.overlap` has files and that
     is not among this tick's pairs (a trunk landed, a plan retired or
     unlisted, `ready` turned off) gets a closing `trunks.overlap` with empty
     `files` and `reason` `gone`. This tick's pairs are those formed from the
@@ -500,15 +500,15 @@ anything.
 - **What it is for, for now: report only.** Nothing waits on an overlap
   and nothing is started by one: the trunk that lands second still meets
   the conflict at its catch-up and repairs it there (3). The status
-  page (fab-reports.md 4) shows each pair whose last `trunks.overlap` has files, in a
+  page (reports.md 4) shows each pair whose last `trunks.overlap` has files, in a
   panel after Drafts, from the snapshot key `overlaps` (a list of
   `{drafts, count}`, `count` being `len(files) + more`): the two drafts by
   their public labels (a draft not known from run starts shows as `other`,
-  as fab-reports.md 4's labels do) and that count, never a path (fab-reports.md 4: the page is
+  as reports.md 4's labels do) and that count, never a path (reports.md 4: the page is
   public, the repository private). Whether an overlap should also reorder
   work, or start an early repair, waits for the numbers: how often pairs overlap, and how often an
   overlap becomes a catch-up repair.
-- **The cut sees the drafts beside it.** A cut's brief (fab-calls.md 3, 3) gains
+- **The cut sees the drafts beside it.** A cut's brief (calls.md 3, 3) gains
   a section `Drafts beside this one`, after `Sources` (or `The user's
   drafts`). `fab call cut` builds it: it takes `fab.channel.plan_dirs(())`,
   loads each plan as the tick does without fetching (retired plans and

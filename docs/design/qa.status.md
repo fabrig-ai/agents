@@ -1,6 +1,6 @@
-# fab-qa status
+# qa status
 
-2026-11-01. Contract: `docs/design/fab-qa.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/qa.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 
@@ -38,7 +38,7 @@
   - **The page** (`fab/channel.py`): `finding` asks and their answers,
     `backlog:<draft>`, `## The ladder` with each rung's line and the
     backlog's count.
-  - **The landing report's QA figures** (fab-reports.md 2).
+  - **The landing report's QA figures** (reports.md 2).
 
 ## Gaps and departures
 

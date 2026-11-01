@@ -1,6 +1,6 @@
-# fab-machines status
+# machines status
 
-2026-11-01. Contract: `docs/design/fab-machines.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/machines.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 
@@ -13,7 +13,7 @@
   `fab.run`'s start moves a builder's `FAB_HOME/install` forward to the
   running dispatcher's commit under `install.lock`, skips a pinned install
   (`install.pinned`) and dispatcher hosts, and only notes stderr on
-  failure (docs/design/fab-tick.status.md). Tested with fake runners; the
+  failure (docs/design/tick.status.md). Tested with fake runners; the
   queue and after-landing services still move only with `bin/install.sh`.
 - **Logins:** `fab logins` (3): the shelf, capture, lend, return, swap,
   retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
@@ -24,7 +24,7 @@
   (11-01): its owner-run live stories are ignored, and since fabrig
   eb6c40aaf its live binaries have no harness unit tests; nextest exits 4,
   faulting every run and holding the cursor. It awaits the user's decision
-  on which ignored stories, if any, to run with `--run-ignored` (fab-after-landing.md 2, 3).
+  on which ignored stories, if any, to run with `--run-ignored` (after-landing.md 2, 3).
   Borrowing and its `chatgpt` / `claude-box` kinds remain tested with a
   test-only live table.
   `live-smith` was taken out 11-01 ~02:00Z (red on 831e86f27 and

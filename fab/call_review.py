@@ -1,4 +1,4 @@
-"""A Codex review of every Claude call's output before it lands (docs/design/fab-calls.md, 2).
+"""A Codex review of every Claude call's output before it lands (docs/design/calls.md, 2).
 
 Whoever designs a thing never accepts it. A skeleton, answer or structure review call that
 ends done leaves a branch; a read-only Codex run reviews it before the dispatcher lands it.

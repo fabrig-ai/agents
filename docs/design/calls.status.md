@@ -1,6 +1,6 @@
-# fab-calls status
+# calls status
 
-2026-11-01. Contract: `docs/design/fab-calls.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/calls.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 
@@ -13,7 +13,7 @@
   closes older parked asks for forge sync; legacy automatic parks settle when
   their plan next ticks. Tested with temporary homes, fake runners and log
   folds; not run live.
-- **Report-only calls** (2; fab-qa.md 2, plan findings-loop, retired
+- **Report-only calls** (2; qa.md 2, plan findings-loop, retired
   11-01): `fab.calls.start(report_only=True)` detaches a worktree at
   `origin/<base>`, logs no branch and pushes nothing; `settle` and the
   `triage` call (`fab call triage --plan PLAN_DIR`, `fab/triage.py`,
@@ -47,8 +47,8 @@
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
-  (fab-calls.md 3, fab-integration.md 4) landed before its cut (9842398),
-  so its brief quoted neither, and quoted fab-machines.md and fab-tick.md,
+  (calls.md 3, integration.md 4) landed before its cut (9842398),
+  so its brief quoted neither, and quoted machines.md and tick.md,
   which another session's builder-install work changed meanwhile. The
   retire call found its own designs from plan.toml's `design` fields.
   Code and design agree; the gap is with the role's "the designs this plan
@@ -66,7 +66,7 @@
 - **Subjects can share a task's id:** a skeleton call's subject
   `<draft>/<part>` equals the id of a task named after its part (`gates`).
   A `question.answered` that unparks the subject also makes that task
-  runnable in the fold, even after it has landed. fab-channel.md 2 names subjects
+  runnable in the fold, even after it has landed. channel.md 2 names subjects
   apart from tasks (`call.answered`); until `channel-tick` lands, a
   subject still unparks on a `question.answered` naming it, and call
   questions are answered that way by hand.

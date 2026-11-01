@@ -10,21 +10,21 @@ reason. The specs bind them.
    module, so it shares no file and starts at once.
 2. **Retire gathers its own quotes.** `retire_brief` gains `rev` and `sh`
    keywords and runs the git commands itself through a new public helper
-   beside `changed_designs` (fab-calls.md 3: "A helper gives the plan's
+   beside `changed_designs` (calls.md 3: "A helper gives the plan's
    start and the diffs"), so `_compile` passes the runner it already uses.
    `changed_designs`' signature and return are unchanged, and so is
    `fab/call_review.py`. The task is kind `interface`: it adds parameters
-   to a public function (`docs/design/fab-gates.md`, 2).
+   to a public function (`docs/design/gates.md`, 2).
 3. **The list lines are reserved up front.** The budget is `BRIEF_LIMIT`
    less every other section's compiled text less a list line for every
-   changed design, as if all were listed. That keeps fab-calls.md 3's
+   changed design, as if all were listed. That keeps calls.md 3's
    promise ("the brief passes the limit only if its other sections alone
    do") without a second pass, at the cost of at most a few hundred
    characters of budget.
 4. **A bad tree on real git is a planted cache entry**: a tree id of full
    hex length that is not in the object store, under the key the probe
    looks up, in the cache's first format. The pair's merge-tree then fails;
-   that is the failure fab-integration.md 4 means, as no real catch-up
+   that is the failure integration.md 4 means, as no real catch-up
    yields a bad tree.
 5. **The real-git test sits in `fab/tests/test_overlaps_git.py`**, not
    `fab/tests/test_overlaps.py`, so it shares no file with the two probe

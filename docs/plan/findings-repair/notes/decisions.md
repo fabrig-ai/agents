@@ -1,6 +1,6 @@
 # The cut's decisions
 
-What the request and `docs/design/fab-qa.md` 2 left to the cut, each
+What the request and `docs/design/qa.md` 2 left to the cut, each
 settled with its reason. The specs bind them.
 
 1. **Six tasks in five parts, all direct.** `fix` (fix-module), `kinds`
@@ -13,7 +13,7 @@ settled with its reason. The specs bind them.
    path) -> text: the design has `launch` number the run, and the brief
    names the run and its report, so the brief is made inside.
 3. **`fab.fix.sections(events)`** beside `answers`: a finding's repair
-   goes to the specless refusal foreman as a red's does (fab-qa.md 2), and
+   goes to the specless refusal foreman as a red's does (qa.md 2), and
    its refusal sections reach its body by the same scan red's
    `repair_tasks` does today; one copy for both kinds.
 4. **`fab.fixes.foremen(events)`** folds each finding's foreman run, tip,
@@ -27,7 +27,7 @@ settled with its reason. The specs bind them.
 6. **`finding.settled` joins `fab.wake.AGAIN`,** as `red.settled` is:
    the repair it makes should start on the next round, not the backstop.
 7. **The finding's foreman's tip** is `git rev-parse origin/main` in the
-   plan's checkout, read once per round by the tick (fab-qa.md 2: "main's
+   plan's checkout, read once per round by the tick (qa.md 2: "main's
    tip in the plan's checkout this tick").
 8. **The walk's report is cut at 15 KiB** (`fab.fixes.WALK_REPORT_BYTES`,
    the kit's cap) and marked, so one oversized report cannot swell a brief.
@@ -38,8 +38,8 @@ settled with its reason. The specs bind them.
 10. **No user questions.** The request settles what is built and where
     (hel8, the existing builders and calls); nothing in it is a budget, a
     machine or hard to reverse.
-11. **Status and design:** `docs/design/fab-qa.status.md` is the
-    designer's (the retire call brings it current); a task edits fab-qa.md
+11. **Status and design:** `docs/design/qa.status.md` is the
+    designer's (the retire call brings it current); a task edits qa.md
     2 and its status line only for a departure it must make.
 
 ## The critical path

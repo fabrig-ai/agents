@@ -1,6 +1,6 @@
-# fab-after-landing status
+# after-landing status
 
-2026-11-01. Contract: `docs/design/fab-after-landing.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/after-landing.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 
@@ -13,26 +13,26 @@
     unattributed, with key, state, error, rerun), `tiers.recovered` and
     `tiers.run`, each with `host`, deduplicated with the binary in the
     key; `fab after-landing run` wakes the tick after a new or unattributed
-    red or a recovery (2, fab-tick.md 6);
+    red or a recovery (2, tick.md 6);
   - `fab/tier_reds.py` and `fab/roles/foreman-red.md`: the reds' one-pass
     fold and states (`covered` and unfixed among them), openings by tip and
     suspects, closings (the absent rule among them), owners, the evidence
     file, the red tasks `<draft>/red-<n>`, the red foreman's brief, start,
-    remedy and settle (2, fab-calls.md 2);
+    remedy and settle (2, calls.md 2);
   - the tick: reds closed and opened each round (deferred after a failed
     load, never in a replay, against an empty owner map with no plan
     loaded), red foremen started and settled, `<draft>/red-<n>` tasks run
     from `origin/main` in both landing modes, sorted with the repairs and
     readied to the queue, `RED_RUNS`, answer calls listing them in both
-    modes; the specless refusal foreman, for fab-integration.md 3's repairs too; a fabrig
+    modes; the specless refusal foreman, for integration.md 3's repairs too; a fabrig
     plan's retire waiting for its verdict; `red.settled` and `red.closed`
     waking the tick again; the lost-event note counting after-landing
-    records as one entry (2, fab-calls.md 2, fab-tick.md 5, fab-tick.md 6, fab-tick.md 7, fab-integration.md 3);
-  - hand-pushed queue records imported as `queue.*` with `gate` (fab-landing.md 3), the
+    records as one entry (2, calls.md 2, tick.md 5, tick.md 6, tick.md 7, integration.md 3);
+  - hand-pushed queue records imported as `queue.*` with `gate` (landing.md 3), the
     page's `## Open signals` with its `queue:`, `red-` and `fault:` kinds,
-    its first line, `fab page clear` and its wake (fab-channel.md 2), and the landing
-    report's red figures and signal line (fab-reports.md 2); the queue's retire fix and
-    `rejected`'s `tests` (fab-landing.md 2, their own entry below).
+    its first line, `fab page clear` and its wake (channel.md 2), and the landing
+    report's red figures and signal line (reports.md 2); the queue's retire fix and
+    `rejected`'s `tests` (landing.md 2, their own entry below).
   Tests use fake runners, records and logs. Deployed (11-01) to hetzner8
   (the queue and after-landing units) and hel8 (the tick follows main).
   What is left (bisection, a second repair round, the owner's spec, the

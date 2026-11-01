@@ -1,4 +1,4 @@
-"""Routed findings' foremen, settlements and repair tasks (docs/design/fab-qa.md, 2)."""
+"""Routed findings' foremen, settlements and repair tasks (docs/design/qa.md, 2)."""
 
 from __future__ import annotations
 
@@ -19,14 +19,14 @@ WALK_REPORT_BYTES = 15 * 1024  # the walk kit's report cap
 
 
 def repair_id(finding: Finding) -> str:
-    """Return <draft>/<finding id> (docs/design/fab-qa.md, 2)."""
+    """Return <draft>/<finding id> (docs/design/qa.md, 2)."""
     return f"{finding.draft}/{finding.id}"
 
 
 @dataclass(frozen=True)
 class Foreman:
     """A finding's first foreman; outcome/report stay empty until collected
-    (docs/design/fab-qa.md, 2).
+    (docs/design/qa.md, 2).
     """
 
     finding: str
@@ -38,7 +38,7 @@ class Foreman:
 
 def foremen(events: Sequence[dict]) -> dict[str, Foreman]:
     """Return each finding's first foreman and first matching end, in log order;
-    pure. Only kind foreman at <draft>/<finding>/foreman counts (docs/design/fab-qa.md, 2).
+    pure. Only kind foreman at <draft>/<finding>/foreman counts (docs/design/qa.md, 2).
     """
     found, by_run, ended = {}, {}, set()
     for event in events:
@@ -82,7 +82,7 @@ def brief(finding: Finding, plan: Plan, *, run_id: str, report: str, tip: str,
     """Return role, finding facts, record and whole walk report; pure.
 
     briefs are repository paths for the rung's brief files. merged supplies sightings;
-    walk_report may contain an unreadable or truncated marker (docs/design/fab-qa.md, 2).
+    walk_report may contain an unreadable or truncated marker (docs/design/qa.md, 2).
     """
     facts = (f"- Run: {run_id}\n- Finding: {finding.id}\n- Draft: {plan.draft}\n"
              f"- Rung: {finding.rung}\n- Backend: {finding.backend}\n- Walk: {finding.walk}\n"
@@ -113,7 +113,7 @@ def start(finding: Finding, plan: Plan, plan_path: Path, host: Host, tip: str,
     """Launch the finding's read-only fabrig foreman at tip; return its run id.
 
     Read ROLE and FAB_HOME/walks/<walk>/report.md, fold sightings from events and name
-    plan_path/<brief> for every rung brief; role read errors propagate (docs/design/fab-qa.md, 2).
+    plan_path/<brief> for every rung brief; role read errors propagate (docs/design/qa.md, 2).
     """
     role, report_text = ROLE.read_text(), _walk_report(finding.walk)
     found = findings.findings(events)
@@ -130,7 +130,7 @@ def settle(finding: Finding, foreman: Foreman, report: str, *,
            log_path: Path | None = None) -> dict:
     """Parse the foreman report, log finding.settled and return its record.
 
-    A fix keeps a dated Repair section; left and none keep no section (docs/design/fab-qa.md, 2).
+    A fix keeps a dated Repair section; left and none keep no section (docs/design/qa.md, 2).
     """
     verdict, reason, lines, _ = fix.parse(report)
     return fix.settle(SETTLED, lambda day: dict(
@@ -188,7 +188,7 @@ def tasks(plan: Plan, events: Sequence[dict]) -> dict[str, Task]:
 
     A fix/none settlement or non-done foreman end creates a lasting task. Fold current
     sightings into its body, retain triage's reason, and append refusal sections and
-    user answers through fab.fix (docs/design/fab-qa.md, 2).
+    user answers through fab.fix (docs/design/qa.md, 2).
     """
     found = findings.findings(events)
     surveys = foremen(events)

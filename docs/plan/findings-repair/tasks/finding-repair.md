@@ -16,7 +16,7 @@ The request: "`fab/fixes.py` and `fab/roles/foreman-finding.md`: a routed
 finding's foreman, its brief, its settlement (`finding.settled`) and the
 `<draft>/finding-<n>` repair task folded from the log, with the Fix-mode
 acceptance (a test in the lowest world, red before and green after)".
-Design: `docs/design/fab-qa.md`, 2, "Its foreman", "Its report keeps the
+Design: `docs/design/qa.md`, 2, "Its foreman", "Its report keeps the
 form", "The repair is `<draft>/finding-<n>`" and "One repair per
 finding". Model every function on its red twin in `fab/tier_reds.py`.
 
@@ -73,7 +73,7 @@ code's. It changes nothing, builds nothing, pushes nothing.
   (finding-<n>)`; the rung, backend, walk, commit and edition; the area,
   owner and the triager's reason; `## The finding` (title, reproduction,
   expected, seen, and each merged finding's walk and reproduction); the
-  foreman's section; then `## Acceptance` as fab-qa.md 2 words it
+  foreman's section; then `## Acceptance` as qa.md 2 words it
   (reproduce first in the lowest world, a test red on main before the
   change and green after, naming the world and why it is the lowest; then
   fix; design text the change makes untrue changes in the same branch:

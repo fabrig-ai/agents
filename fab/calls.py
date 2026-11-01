@@ -47,7 +47,7 @@ TIMEOUT = 60 * 60  # seconds; 40 minutes until the playground replay's cut ran o
 @dataclass(frozen=True)
 class Usage:
     """A call's Claude usage, as claude_usage reads it from claude's stream and call.ended
-    carries it (docs/design/fab-reports.md, 3). Every count is in tokens."""
+    carries it (docs/design/reports.md, 3). Every count is in tokens."""
 
     input: int  # uncached input: claude's input_tokens, which excludes cache reads and writes
     cache_write: int  # cache_creation_input_tokens
@@ -122,7 +122,7 @@ def render_inventory(signatures: Iterable[Signature]) -> str:
 
 
 def design_text(root: Path, citation: str) -> str:
-    """The text a part's `design` cites, e.g. "docs/design/fab-landing.md, 2; fab.md, 4": the whole document
+    """The text a part's `design` cites, e.g. "docs/design/landing.md, 2; fab.md, 4": the whole document
     at the cited path (sections are not cut out); an unreadable path gives a one-line note."""
     path = citation.split(",", 1)[0].strip()
     try:
@@ -361,7 +361,7 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
 
 def review_brief(plan: Plan, tasks: dict[str, Task], events: list[dict], root: Path, *,
                  call_id: str, branch: str, report: str, plan_path: str | None = None) -> str:
-    """The structure reviewer's brief (docs/design/fab-gates.md, 2): its role text (ROLES["review"]);
+    """The structure reviewer's brief (docs/design/gates.md, 2): its role text (ROLES["review"]);
     the call's facts; "Plan parts and slices", the same table skeleton_brief writes (shared,
     not copied), statuses from fab.state.fold(tasks, events), and a line `Specs:
     docs/plan/<draft>/tasks/`; "Landed since the last review": per record of
@@ -460,7 +460,7 @@ def claude_argv(brief_path: Path, workdir: Path, *, model: str = MODEL, effort: 
     --dangerously-skip-permissions --add-dir=<workdir>`, the prompt being a one-line
     instruction to read and follow brief_path. The stream (one JSON event per line; claude
     needs --verbose for it under -p) carries every message's usage, so claude_usage finds the
-    call's peak context. No --max-turns: a call is measured, not capped (fab-reports.md 3). The prompt
+    call's peak context. No --max-turns: a call is measured, not capped (reports.md 3). The prompt
     comes first and --add-dir takes `=`: --add-dir accepts several directories and would
     otherwise take the prompt for one."""
     return ["claude", "-p", f"Read and follow the brief at {shlex.quote(str(brief_path))}.",
@@ -478,7 +478,7 @@ def start(role: str, subject: str, repo: Path, brief: str, *, sh: Runner = run,
     when base is not main (also for fabrig), or fetch origin and
     reset the supplied branch from origin/<branch> with worktree add -B. With report_only,
     fetch origin and detach at origin/<base>, log no branch and push nothing; return
-    branch "" (docs/design/fab-qa.md, 2). A supplied branch is a ValueError in this mode.
+    branch "" (docs/design/qa.md, 2). A supplied branch is a ValueError in this mode.
     Rebind Call facts and insert the subject's user answers after them, before the next
     # section or at the end, before saving brief.md so reviews quote them too. --brief-only prints the compiled
     brief before facts and answers are bound. Log call.started (including amends when

@@ -1,4 +1,4 @@
-"""Overlap decisions and the tick's probe (docs/design/fab-integration.md, 4).
+"""Overlap decisions and the tick's probe (docs/design/integration.md, 4).
 
 FAB_HOME/overlaps.json holds three JSON objects: trees, pairs and conflicts.
 Their keys are JSON lists of repository, checkout, main SHA, then one trunk tip
@@ -20,13 +20,13 @@ from fab import atomic, integration, log
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run
 
-FILES = 40  # conflicting paths retained in one trunks.overlap record (fab-integration.md 4)
+FILES = 40  # conflicting paths retained in one trunks.overlap record (integration.md 4)
 
 
 def probe_plans(plans: Sequence[Plan], events: Sequence[dict]) -> list[Plan]:
     """Ready, active integration plans whose trunks have not landed, by draft name.
 
-    The shell also checks that each trunk is on origin (docs/design/fab-integration.md, 4).
+    The shell also checks that each trunk is on origin (docs/design/integration.md, 4).
     """
     return sorted((plan for plan in plans if plan.landing == "integration" and plan.ready
                    and not plan.retired and not integration.trunk_landed(plan, events)),
@@ -34,7 +34,7 @@ def probe_plans(plans: Sequence[Plan], events: Sequence[dict]) -> list[Plan]:
 
 
 def pairs(plans: Sequence[Plan]) -> list[tuple[str, str]]:
-    """Every pair of probed drafts sharing a repo, in name order (docs/design/fab-integration.md, 4)."""
+    """Every pair of probed drafts sharing a repo, in name order (docs/design/integration.md, 4)."""
     ordered = sorted(plans, key=lambda plan: plan.draft)
     return [(a.draft, b.draft) for position, a in enumerate(ordered)
             for b in ordered[position + 1:] if a.repo == b.repo]
@@ -44,7 +44,7 @@ def parse_catch_up(code: int, stdout: str) -> tuple[str, str | None]:
     """Return (clean, tree), (conflict, None), or (failure, None) for a trunk merge.
 
     Exits 0 and 1 require a full hex object id on the first newline-separated
-    line; only exit 0 supplies a usable tree (docs/design/fab-integration.md, 4).
+    line; only exit 0 supplies a usable tree (docs/design/integration.md, 4).
     """
     tree = stdout.partition("\n")[0]
     if code not in (0, 1) or not _object_id(tree):
@@ -53,7 +53,7 @@ def parse_catch_up(code: int, stdout: str) -> tuple[str, str | None]:
 
 
 def parse_pair(code: int, stdout: str) -> tuple[list[str], int] | None:
-    """Return (files, more) for a pair merge, or None on failure (docs/design/fab-integration.md, 4).
+    """Return (files, more) for a pair merge, or None on failure (docs/design/integration.md, 4).
 
     Exit 0 is empty. Exit 1 requires a full hex object id as the first NUL
     field; subsequent nonempty fields are paths, kept in order up to FILES.
@@ -69,7 +69,7 @@ def parse_pair(code: int, stdout: str) -> tuple[list[str], int] | None:
 
 
 def well_formed(event: dict) -> bool:
-    """Whether an overlap record is safe to fold (docs/design/fab-integration.md, 4).
+    """Whether an overlap record is safe to fold (docs/design/integration.md, 4).
 
     drafts and tips are lists of two strings, files a list of strings, and
     more a non-negative int excluding bool. Other fields are unrestricted.
@@ -90,7 +90,7 @@ def is_news(pair: tuple[str, str], files: Sequence[str], more: int,
     """Whether (files, more) differs from the pair's last valid overlap, absent as empty.
 
     Compare paths in merge-tree order; tips and reason do not make news
-    (docs/design/fab-integration.md, 4).
+    (docs/design/integration.md, 4).
     """
     last = next((event for event in reversed(events)
                  if well_formed(event) and event["drafts"] == list(pair)), {})
@@ -98,7 +98,7 @@ def is_news(pair: tuple[str, str], files: Sequence[str], more: int,
 
 
 def open_pairs(events: Sequence[dict]) -> dict[tuple[str, str], dict]:
-    """Open pairs to their last overlap record, by name (docs/design/fab-integration.md, 4).
+    """Open pairs to their last overlap record, by name (docs/design/integration.md, 4).
 
     Open means the last well-formed record has files. Skip malformed records;
     log order, rather than timestamps, decides last.
@@ -111,7 +111,7 @@ def open_pairs(events: Sequence[dict]) -> dict[tuple[str, str], dict]:
 
 
 def gone_pairs(current: Sequence[tuple[str, str]], events: Sequence[dict]) -> list[dict]:
-    """Closing fields for open pairs absent this tick, by name (docs/design/fab-integration.md, 4).
+    """Closing fields for open pairs absent this tick, by name (docs/design/integration.md, 4).
 
     Keep their last tips, empty files and more, and reason gone. The shell
     calls this only when every listed plan loaded; skipped probes remain current.
@@ -122,7 +122,7 @@ def gone_pairs(current: Sequence[tuple[str, str]], events: Sequence[dict]) -> li
 
 
 def failure_prefix(drafts: Sequence[str]) -> str:
-    """The failure-note prefix for one trunk or a name-ordered pair (docs/design/fab-integration.md, 4)."""
+    """The failure-note prefix for one trunk or a name-ordered pair (docs/design/integration.md, 4)."""
     return f"trunks.overlap {' '.join(drafts)}: "
 
 
@@ -130,7 +130,7 @@ def failure_is_news(prefix: str, text: str, events: Sequence[dict]) -> bool:
     """Whether full failure text differs from the last note with prefix, absent as new.
 
     Ignore notes for other trunks or pairs and other event kinds
-    (docs/design/fab-integration.md, 4).
+    (docs/design/integration.md, 4).
     """
     last = next((event["text"] for event in reversed(events) if event.get("ev") == "note"
                  and isinstance(event.get("text"), str) and event["text"].startswith(prefix)), None)
@@ -142,19 +142,19 @@ def overlap_fields(pair: tuple[str, str], tips: Sequence[str], files: Sequence[s
     """Flat trunks.overlap fields with fresh lists, in the supplied pair's name order.
 
     tips follows pair order; parsed files and more already obey FILES. The shell
-    supplies ev and ts through log.append (docs/design/fab-integration.md, 4).
+    supplies ev and ts through log.append (docs/design/integration.md, 4).
     """
     return dict(drafts=list(pair), tips=list(tips), files=list(files), more=more, reason=reason)
 
 
 def _object_id(value: str) -> bool:
-    """A full SHA-1 or SHA-256 hex object id from merge-tree (docs/design/fab-integration.md, 4)."""
+    """A full SHA-1 or SHA-256 hex object id from merge-tree (docs/design/integration.md, 4)."""
     return len(value) in (40, 64) and all(char in "0123456789abcdefABCDEF" for char in value)
 
 
 def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Sequence[dict],
           all_loaded: bool, *, sh: Runner = run, log_path: Path | None = None) -> list[str]:
-    """Probe loaded trunks, log news and return printed lines (docs/design/fab-integration.md, 4).
+    """Probe loaded trunks, log news and return printed lines (docs/design/integration.md, 4).
 
     Use one checkout per repository, chosen by draft name, and cache successful
     merges. Conflicted or failed catch-ups keep their pairs current but unprobed.
@@ -210,7 +210,7 @@ def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Se
 def _catch_up_trees(plans: Sequence[Plan], tips: dict[str, str],
                     key_prefix: tuple[str, str, str], cache: dict, records: list[dict], *,
                     sh: Runner, log_path: Path | None) -> tuple[dict[str, str], dict[str, str], list[str]]:
-    """Return usable catch-up trees, cache keys and failure lines (docs/design/fab-integration.md, 4).
+    """Return usable catch-up trees, cache keys and failure lines (docs/design/integration.md, 4).
 
     key_prefix is (repository, checkout, main SHA). Update the shared cache
     and records so failures deduplicate across all merges in this probe.
@@ -243,7 +243,7 @@ def _catch_up_trees(plans: Sequence[Plan], tips: dict[str, str],
 def _pair_results(repo_pairs: Sequence[tuple[str, str]], tips: dict[str, str],
                   key_prefix: tuple[str, str, str], trees: dict[str, str], tree_keys: dict[str, str],
                   cache: dict, records: list[dict], *, sh: Runner, log_path: Path | None) -> list[str]:
-    """Return pair news and failure lines, updating shared records and cache (docs/design/fab-integration.md, 4).
+    """Return pair news and failure lines, updating shared records and cache (docs/design/integration.md, 4).
 
     key_prefix is (repository, checkout, main SHA). Skip unavailable trees;
     on pair failure evict its trees from the cache while retaining them for this tick.
@@ -299,13 +299,13 @@ def _read_cache(path: Path) -> dict:
 
 
 def _cache_lookup(cache: dict, kind: str, key: str) -> str | dict | bool | None:
-    """Look up and mark a result for pruning (docs/design/fab-integration.md, 4)."""
+    """Look up and mark a result for pruning (docs/design/integration.md, 4)."""
     cache["used"][kind].add(key)
     return cache[kind].get(key)
 
 
 def _write_cache(path: Path, cache: dict, previous: dict) -> None:
-    """Prune and write only changed results (docs/design/fab-integration.md, 4)."""
+    """Prune and write only changed results (docs/design/integration.md, 4)."""
     pruned = {kind: {key: answer for key, answer in cache[kind].items() if key in used}
               for kind, used in cache["used"].items()}
     if pruned != previous:

@@ -1,6 +1,6 @@
 # findings-repair
 
-The repair path of QA findings (`docs/design/fab-qa.md`, 2): the plan is
+The repair path of QA findings (`docs/design/qa.md`, 2): the plan is
 `plan.toml`, the task specs `tasks/`, the shared notes `notes/`, and the
 cut's decisions, critical path and overlaps `notes/decisions.md`.
 

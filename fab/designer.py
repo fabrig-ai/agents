@@ -1,9 +1,9 @@
 """The designer's calls: the cut, shared contracts, a probe's decision, retiring a plan
-(docs/design/fab-calls.md, 3).
+(docs/design/calls.md, 3).
 
 Each is a Claude call like any other (fab.calls.start): a fresh session on a brief compiled
 here, writing files on its own branch, which a Codex review run checks before the tick lands
-it (fab-calls.md 2). The cut writes a new plan. A contract call designs a part the plan marks as a
+it (calls.md 2). The cut writes a new plan. A contract call designs a part the plan marks as a
 shared contract, as a skeleton. A decision turns a probe's report into a design section.
 Retire brings a finished plan's status files current and marks the plan retired.
 """
@@ -26,11 +26,11 @@ from fab.sh import Failed, Runner, run
 ROLES = ("cut", "contract", "decision", "retire")  # the designer's call roles, in fab.calls.ROLES
 DESIGNS = "docs/design"  # a repository's designs; its draft/ holds the user's drafts
 PLANS = "docs/plan"  # plans live under this suffix, with any repository-relative prefix
-BESIDE_LINES = 200  # lines of other drafts in a cut brief, before the omitted count (fab-integration.md 4)
+BESIDE_LINES = 200  # lines of other drafts in a cut brief, before the omitted count (integration.md 4)
 
 
 def subject(draft: str, role: str, part: str | None = None) -> str:
-    """The subject a designer's call logs and parks under (docs/design/fab-gates.md, 2; fab-calls.md, 2):
+    """The subject a designer's call logs and parks under (docs/design/gates.md, 2; calls.md, 2):
     cut `<draft>/cut`, retire `<draft>/retire`, contract `<draft>/<part>` (as a skeleton
     call's, so either one designs the part), decision `<draft>/<part>/decision`. ValueError
     for a role not in ROLES, a part missing for contract or decision, or a part given for
@@ -52,7 +52,7 @@ def uncut(draft: str, repo: str, sources: Sequence[str] = (),
     tuple(sources), 1.0, 2.0, {}, ()), no parts, slices or questions, not retired. The cut's
     brief reads its sources through fab.calls.drafts_text; the tick of a plan directory
     being cut runs on it (fab.dispatch.tick). It inherits Plan's integration and ready defaults, without reviews and
-    with every part direct (fab-integration.md 3); parsed options replace them."""
+    with every part direct (integration.md 3); parsed options replace them."""
     return replace(Plan(draft, repo, tuple(sources), 1.0, 2.0, {}, ()), **(options or {}))
 
 
@@ -102,7 +102,7 @@ def design_index(root: Path) -> str:
 
 def plan_start(checkout: Path, draft: str, *, rev: str = "origin/main",
                sh: Runner = run, plan_path: str | None = None) -> str:
-    """Return the oldest commit adding the plan's plan.toml (docs/design/fab-calls.md, 3).
+    """Return the oldest commit adding the plan's plan.toml (docs/design/calls.md, 3).
 
     Read `git log --format=%H --diff-filter=A <rev> -- <plan_path>/plan.toml`,
     with check=True. plan_path defaults to <PLANS>/<draft>; ValueError naming the
@@ -119,7 +119,7 @@ def plan_start(checkout: Path, draft: str, *, rev: str = "origin/main",
 
 def design_diff(checkout: Path, start: str, design: str, *, rev: str = "origin/main",
                 sh: Runner = run) -> str:
-    """Return a design and its status file's diff since start (docs/design/fab-calls.md, 3).
+    """Return a design and its status file's diff since start (docs/design/calls.md, 3).
 
     Run `git diff <start>^ <rev> -- <design> <status>` with check=True. If start
     has no parent, diff against the empty tree, whose id comes from
@@ -193,7 +193,7 @@ def retire_due(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) ->
 
 
 def enlist(plan_dir: Path) -> bool:
-    """Start ticking a plan (docs/design/fab-tick.md, 5): add plan_dir, resolved, as one line
+    """Start ticking a plan (docs/design/tick.md, 5): add plan_dir, resolved, as one line
     of FAB_HOME/plans, unless a line already names it; return whether it was added. The
     file is created when missing and rewritten whole through fab.atomic.write, its lines
     kept in order with the new one last."""
@@ -211,7 +211,7 @@ def enlist(plan_dir: Path) -> bool:
 
 def drafts_beside(plan: Plan, plans: Sequence[tuple[Plan, Mapping[str, Task]]],
                   events: Sequence[dict]) -> str:
-    """Render the cut's other drafts in loaded plans' order (docs/design/fab-integration.md, 4).
+    """Render the cut's other drafts in loaded plans' order (docs/design/integration.md, 4).
 
     Keep the same repository, excluding this draft, retired plans and landed integration
     trunks. A latest cut call without an end marks its plan cut in flight and lists the
@@ -250,7 +250,7 @@ def drafts_beside(plan: Plan, plans: Sequence[tuple[Plan, Mapping[str, Task]]],
 
 def _cut_role_options(plan: Plan, parsed: Mapping[str, object],
                       plan_path: str) -> tuple[bool, str, list[tuple[str, str]]]:
-    """Return the effective cut role and option sections (docs/design/fab-calls.md, 3)."""
+    """Return the effective cut role and option sections (docs/design/calls.md, 3)."""
     direct = parsed.get("direct", plan.direct)
     run_role = direct and parsed.get("landing", plan.landing) == "integration"
     if run_role:
@@ -290,7 +290,7 @@ def cut_brief(plan: Plan, root: Path, *, call_id: str, branch: str, report: str,
     3. `The draft`: `- Draft: <draft>`, `- Repository: <repo>`, `- Plan: write
        \\`<PLANS>/<draft>/plan.toml\\``, `- Sources: \\`<source>\\`, ...` (comma-separated).
     4. `The user's drafts`: fab.calls.drafts_text(plan, root).
-    5. `Drafts beside this one`: beside, or `(none)` when empty; omitted for None (fab-integration.md 4).
+    5. `Drafts beside this one`: beside, or `(none)` when empty; omitted for None (integration.md 4).
     6. `Designs`: design_index(root).
     7. `Plans`: one line `- \\`<path>\\`` per `**/<PLANS>/*/plan.toml` under root, sorted;
        `(none)` when there is none. Their format is the cut's to follow.
@@ -423,7 +423,7 @@ def _retire_designs(quotes: Sequence[tuple[str, str]], budget: int) -> str:
 def retire_brief(plan: Plan, tasks: dict[str, Task], statuses: dict[str, str], root: Path,
                  changed: Sequence[str], *, call_id: str, branch: str, report: str,
                  plan_path: str | None = None, rev: str = "origin/main", sh: Runner = run) -> str:
-    """Retire's brief (docs/design/fab-calls.md, 3); changed is changed_designs' paths.
+    """Retire's brief (docs/design/calls.md, 3); changed is changed_designs' paths.
     Sections, through fab.calls._brief, in this order:
 
     1. `Role`: fab.calls.ROLES["retire"]'s text.
@@ -475,7 +475,7 @@ def main(argv: list[str]) -> int:
       relative path naming a file under the root. The plan is
       uncut(draft, repository(root), sources, parse_options(entries)); parse options
       before preparing the checkout. Ready cuts load the listed plans without fetching
-      for `Drafts beside this one` (fab-integration.md 4); loader messages go to stderr. An integration
+      for `Drafts beside this one` (integration.md 4); loader messages go to stderr. An integration
       cut requires root's upstream to be origin/<draft>/integration. Without --brief-only,
       enlist(PLAN_DIR) before the call;
       raw option entries are logged in call.started's options.

@@ -14,7 +14,7 @@ Read first: `docs/plan/paper-cuts/notes/common.md`,
 
 The request (2): "the overlap probe's cache (results only, catch-up
 conflicts included, pruned to this tick's keys, written only when
-changed)". Design: `docs/design/fab-integration.md`, 4, "The cache"
+changed)". Design: `docs/design/integration.md`, 4, "The cache"
 paragraph ("results are cached in `FAB_HOME/overlaps.json` ... Losing the
 file loses only time").
 

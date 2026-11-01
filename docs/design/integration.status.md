@@ -1,6 +1,6 @@
-# fab-integration status
+# integration status
 
-2026-11-01. Contract: `docs/design/fab-integration.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/integration.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 

@@ -1,7 +1,7 @@
 # Fix mode's names and records
 
 For every findings-repair task: what the tasks bind for one another
-(`docs/design/fab-qa.md`, 2).
+(`docs/design/qa.md`, 2).
 
 ## fab/fix.py (task fix-module)
 

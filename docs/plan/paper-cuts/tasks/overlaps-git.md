@@ -17,7 +17,7 @@ The request (3): "A test of the probe against real git
 (`fab.tests.support.git_pair()`): two trunks off main with one conflicting
 path containing a space, main moved ahead; the probe logs that path; a bad
 tree is a failure, not an overlap." Design:
-`docs/design/fab-integration.md`, 4, "The overlap probe" ("Each trunk as if
+`docs/design/integration.md`, 4, "The overlap probe" ("Each trunk as if
 caught up", "The pair's merge").
 
 ## What to build

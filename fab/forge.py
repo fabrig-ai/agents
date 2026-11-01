@@ -1,4 +1,4 @@
-"""The user's questions as forge issues (docs/design/fab-channel.md, 3)."""
+"""The user's questions as forge issues (docs/design/channel.md, 3)."""
 
 from __future__ import annotations
 

@@ -1,7 +1,7 @@
 # fab: the channel to the user
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-channel.status.md`. Shared: the
+section numbers). Status: `docs/design/channel.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -16,15 +16,15 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   are the user's, on one page the user reads; nothing else goes to the user.
 - **Whoever asks decides it is the user's,** never the page. Four things
   are (`fab.channel.asks`, folded from the plans and the log):
-  - a plan's `[[question]]` with no answer, the cut's (fab-calls.md 3);
-  - a call that ended `Question:` (fab-gates.md 2);
+  - a plan's `[[question]]` with no answer, the cut's (calls.md 3);
+  - a call that ended `Question:` (gates.md 2);
   - a call's chain referred by settle as `user: ...`, or parked because
-    settlement failed (fab-calls.md 2); an ordinary second refusal or failed
+    settlement failed (calls.md 2); an ordinary second refusal or failed
     amend goes to settle first. Amend and settle calls' own `Question:`
     reports open no ask. Older parked asks stay open until their chain
     settles; a later `chain.settled` for the subject closes its parked ask,
-    so its forge issue closes at the next `fab issues sync` (fab-channel.md 3);
-  - a QA finding's question from its triage call (fab-qa.md 2: a `user` or
+    so its forge issue closes at the next `fab issues sync` (channel.md 3);
+  - a QA finding's question from its triage call (qa.md 2: a `user` or
     `brief` decision, or a `path` line's `; user:`): Ask kind `finding`,
     subject `<draft>/triage/<finding>`, its text the question, what to read
     the walk's report; the page quotes the ask's text after the finding's
@@ -44,10 +44,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     (`fab.channel.signals(events)`, pure), oldest first, as a block
     `### <id>, <what>, since <ts>`, its facts, `- Read: ...` and, but for a
     fault, `- Clear: \`fab page clear <id> TEXT\``. Three kinds:
-    - `queue:<branch>`, a hand-pushed rejection (fab-landing.md 3): `- Tip`, `- Step`,
+    - `queue:<branch>`, a hand-pushed rejection (landing.md 3): `- Tip`, `- Step`,
       `- Tests` (the record's, `(see the log)` when []), `- Read:
       \`<gate>:<log>\``;
-    - `red-<n>`, an after-landing red no task owns (fab-after-landing.md 2): `- Tip`,
+    - `red-<n>`, an after-landing red no task owns (after-landing.md 2): `- Tip`,
       `- Why` (`no fab task among the suspects`, `no suspects`, `not the
       suspects': <the foreman's line>` or `unfixed: <draft>/red-<n> landed,
       still red at <tip>`), `- Tests` (at most 10, then `and <k> more`),
@@ -55,30 +55,30 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       and the foreman's report when there is one;
     - `fault:<profile>`, a pair that cannot run: `- Fault` (its text),
       `- Runs` (how many in a row), `- Read: \`<host>:<run log>\`` (the
-      run's `host`, fab-after-landing.md 2);
-    - `finding-<n>`, a QA finding its foreman left (fab-qa.md 2): `- Rung`,
+      run's `host`, after-landing.md 2);
+    - `finding-<n>`, a QA finding its foreman left (qa.md 2): `- Rung`,
       `- Why` (`not the code's: <the foreman's line>`), `- Title`, `- Read:`
       the walk's report and the foreman's report;
     - `backlog:<draft>`, a ladder's backlog branch rejected twice at one
-      render (fab-qa.md 2): `- Branch`, `- Step`, `- Read: \`<gate>:<log>\``;
-  - then, from each standing report's latest day (fab-reports.md 2), its path and
+      render (qa.md 2): `- Branch`, `- Step`, `- Read: \`<gate>:<log>\``;
+  - then, from each standing report's latest day (reports.md 2), its path and
     only the Signals lines whose owner is the user (the drafts' signal
     tables: targets, capacity, a usage limit, a budget the three questions
     could not settle); the rest of each report is the director's;
-  - then `## After landing` (fab-after-landing.md 2), then `## The ladder` for each
-    plan with rungs (fab-qa.md 2): `### <draft>`, one line per rung in plan
+  - then `## After landing` (after-landing.md 2), then `## The ladder` for each
+    plan with rungs (qa.md 2): `### <draft>`, one line per rung in plan
     order (its state: due, walking, waiting, holding or passed, with what
     it waits for), then `- Backlog: <n> findings in \`<backlog path>\``,
     then `## Unread`, as today. The ladder is not the user's: it is there
     so the session that walks by hand, and the director, read what is due
     where they read fab's other state, as `## After landing` is.
   The tick rewrites it at its end; `fab page show|write [PLAN_DIR...]`
-  makes it on demand. Its plans are those in `FAB_HOME/plans` (fab-tick.md 5) and
+  makes it on demand. Its plans are those in `FAB_HOME/plans` (tick.md 5) and
   those named. The drafts send the reports to the director, who passes the
   user what needs the user; the director reads the same page.
 - **Answers come back on the same path.** `fab page answer SUBJECT TEXT` on
   hel8 logs `call.answered` and rewrites the page. The subject's calls may
-  start again, and a parked chain's counts start afresh (fab-calls.md 2). Every later
+  start again, and a parked chain's counts start afresh (calls.md 2). Every later
   call of the subject, and every review run of its chain, carries the
   user's answers in its brief (`# The user's answers`). A plan's question
   is answered in its plan.toml, landed with `fab land`.
@@ -97,7 +97,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   a later `queue.rejected` or `queue.collateral` of it at another tip (a
   newer tip was tried; a newer rejection opens its own), or by hand;
   `red-<n>` opens when the red becomes a signal and clears when the red
-  closes (fab-after-landing.md 2) or by hand; `finding-<n>` opens at its
+  closes (after-landing.md 2) or by hand; `finding-<n>` opens at its
   `finding.settled` left and clears at its rung's next `rung.passed` (the
   rerun showed it was not the code's) or by hand, which drops the finding,
   the clear's text its reason; `backlog:<draft>` clears when the render
@@ -149,7 +149,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   reads what the question and report point to: code, designs, FAB_HOME
   runs and calls. It changes no repository file and pushes nothing. It
   runs through `calls.start` in the agents clone, with subject
-  `issues/<number>`, keeping the call's artifacts and usage (fab-reports.md 3).
+  `issues/<number>`, keeping the call's artifacts and usage (reports.md 3).
   No plan owns that subject; the tick reserves no capacity for reply calls
   and neither reviews, collects nor lands them. Their `call.ended done`
   cannot close the asking subject (2).
@@ -180,7 +180,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 ## 4. Later
 
 - The user's page published where the user reads it without hel8 (the
-  status page in fab-reports.md 4, a doc), once the user says where; a notification when a
+  status page in reports.md 4, a doc), once the user says where; a notification when a
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.

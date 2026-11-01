@@ -1,8 +1,8 @@
 landing = "queue"
 
 # The thin cut of paper-cuts: the three paper cuts the request lists, as
-# designed in docs/design/fab-calls.md 3 (retire's brief bounded) and
-# docs/design/fab-integration.md 4 (the overlap probe's cache and records,
+# designed in docs/design/calls.md 3 (retire's brief bounded) and
+# docs/design/integration.md 4 (the overlap probe's cache and records,
 # and a real-git test of it). Every part is direct; its task specs are in
 # tasks/, the shared notes in notes/, the cut's decisions and its critical
 # path in notes/decisions.md.
@@ -25,7 +25,7 @@ id = "bounded-retire"
 title = "Retire's brief bounded: each changed design as the shorter of its diff and its text, the rest listed"
 mode = "direct"
 needs = []
-design = "docs/design/fab-calls.md, 3"
+design = "docs/design/calls.md, 3"
 
 # Slice 2: the overlap probe's cache and records, tried on real git.
 
@@ -34,14 +34,14 @@ id = "probe-cuts"
 title = "The overlap probe's cache pruned, conflicts cached, written on change; malformed trunks.overlap records ignored"
 mode = "direct"
 needs = []
-design = "docs/design/fab-integration.md, 4"
+design = "docs/design/integration.md, 4"
 
 [[part]]
 id = "probe-git"
 title = "A test of the overlap probe against real git"
 mode = "direct"
 needs = []
-design = "docs/design/fab-integration.md, 4"
+design = "docs/design/integration.md, 4"
 
 [[slice]]
 id = 1

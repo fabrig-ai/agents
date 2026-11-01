@@ -1,4 +1,4 @@
-"""What each draft owns and what plans share in one tick (docs/design/fab-tick.md, 5)."""
+"""What each draft owns and what plans share in one tick (docs/design/tick.md, 5)."""
 
 import unittest
 from copy import deepcopy

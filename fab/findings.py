@@ -1,4 +1,4 @@
-"""QA findings and their repair states, folded in log order (docs/design/fab-qa.md, 2)."""
+"""QA findings and their repair states, folded in log order (docs/design/qa.md, 2)."""
 
 from __future__ import annotations
 
@@ -25,7 +25,7 @@ WALK_HOURS = 4  # the walk's wall cap plus an hour to report
 
 @dataclass(frozen=True)
 class Finding:
-    """A raised QA finding and its current disposition (docs/design/fab-qa.md, 2).
+    """A raised QA finding and its current disposition (docs/design/qa.md, 2).
 
     into is the direct merge target; sightings are ids merged into this finding.
     question and action are open user requests; answers retain all replies in log order.
@@ -63,7 +63,7 @@ class Finding:
 
     @property
     def holds(self) -> bool:
-        """Whether this finding holds its rung (docs/design/fab-qa.md, 2).
+        """Whether this finding holds its rung (docs/design/qa.md, 2).
 
         Blocking findings and failed or void walks hold while active or awaiting a
         user action. Left findings hold nothing, even if an action was requested.
@@ -116,7 +116,7 @@ def _valid(event: dict) -> bool:
 
 
 def findings(events: Iterable[dict]) -> dict[str, Finding]:
-    """Findings of ended walks, keyed by id in raise order; pure (docs/design/fab-qa.md, 2).
+    """Findings of ended walks, keyed by id in raise order; pure (docs/design/qa.md, 2).
 
     Only raises of ended walks participate, so interrupted intake has no visible
     findings or sightings. Intake merges retain their log positions; other changes
@@ -175,7 +175,7 @@ def findings(events: Iterable[dict]) -> dict[str, Finding]:
 
 
 def _answered(finding: Finding, event: dict, decision: str) -> Finding:
-    """Keep an answer, release its action and resolve an asked finding (docs/design/fab-qa.md, 2)."""
+    """Keep an answer, release its action and resolve an asked finding (docs/design/qa.md, 2)."""
     changes = {"answers": (*finding.answers, event["answer"]), "action": ""}
     if finding.state == "asked":
         brief = decision == "brief"
@@ -187,7 +187,7 @@ def _answered(finding: Finding, event: dict, decision: str) -> Finding:
 
 def _transition(finding: Finding, event: dict, found: dict[str, Finding],
                 asks: dict[str, str], foremen: dict[str, str]) -> None:
-    """Apply one validated event to a visible finding (docs/design/fab-qa.md, 2).
+    """Apply one validated event to a visible finding (docs/design/qa.md, 2).
 
     Update found in place, including recurrence targets; retain triage decisions
     in asks for answers and foreman run ids in foremen for matching completions.
@@ -263,7 +263,7 @@ def _merge(found: dict[str, Finding], event: dict) -> None:
 
 
 def target(found: Mapping[str, Finding], identifier: str) -> str:
-    """Follow direct merge targets; stop at a live, unknown or repeated id (docs/design/fab-qa.md, 2).
+    """Follow direct merge targets; stop at a live, unknown or repeated id (docs/design/qa.md, 2).
 
     A cycle returns the last id reached before following an already visited id.
     """
@@ -277,13 +277,13 @@ def target(found: Mapping[str, Finding], identifier: str) -> str:
 
 
 def mergeable(finding: Finding) -> bool:
-    """Whether a duplicate merges here rather than being filed again (docs/design/fab-qa.md, 2)."""
+    """Whether a duplicate merges here rather than being filed again (docs/design/qa.md, 2)."""
     return finding.state in ("new", "asked", "backlog", "foreman", "deciding", "decided", "repairing")
 
 
 @dataclass(frozen=True)
 class RungState:
-    """A rung's first applicable state and its display detail (docs/design/fab-qa.md, 2)."""
+    """A rung's first applicable state and its display detail (docs/design/qa.md, 2)."""
 
     rung: str
     backend: str
@@ -299,7 +299,7 @@ class RungState:
 
 
 def holders(found: Mapping[str, Finding], rung: str) -> tuple[Finding, ...]:
-    """Holding targets once, in their sightings' raise order (docs/design/fab-qa.md, 2).
+    """Holding targets once, in their sightings' raise order (docs/design/qa.md, 2).
 
     A merged sighting carries its own blocking/verdict test through the target's
     state and open action, even when the target's own walk would hold nothing.
@@ -369,7 +369,7 @@ def _plan_findings(plan: Plan, events: list[dict]) -> dict[str, Finding]:
 
 
 def rungs(plan: Plan, events: list[dict], editions: Mapping[str, str], now: str) -> list[RungState]:
-    """Each readable rung's first applicable state, in plan order (docs/design/fab-qa.md, 2).
+    """Each readable rung's first applicable state, in plan order (docs/design/qa.md, 2).
 
     An unended walk is in flight for less than WALK_HOURS, even if its brief changed.
     With several in flight, show the earliest start in log order. Repair recency
@@ -427,7 +427,7 @@ def rungs(plan: Plan, events: list[dict], editions: Mapping[str, str], now: str)
 
 
 def passes(plan: Plan, events: list[dict], editions: Mapping[str, str]) -> list[dict]:
-    """Unlogged rerun passes with satisfied lower rungs (docs/design/fab-qa.md, 2).
+    """Unlogged rerun passes with satisfied lower rungs (docs/design/qa.md, 2).
 
     Holders and existing lower passes are read at each walk's end. Same-commit
     passes close from the bottom up regardless of plan or completion order;
@@ -477,7 +477,7 @@ def passes(plan: Plan, events: list[dict], editions: Mapping[str, str]) -> list[
 
 
 def line(state: RungState) -> str:
-    """The shared command/page line for a rung's state (docs/design/fab-qa.md, 2)."""
+    """The shared command/page line for a rung's state (docs/design/qa.md, 2)."""
     prefix = f"{state.rung} ({state.backend}), edition {state.edition}: "
     if state.state == "passed":
         detail = f"passed at {state.commit[:12]} ({state.walk})"

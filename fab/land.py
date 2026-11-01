@@ -1,4 +1,4 @@
-"""`fab land`: land a branch of this repository on main (docs/design/fab-landing.md, 2)."""
+"""`fab land`: land a branch of this repository on main (docs/design/landing.md, 2)."""
 
 from __future__ import annotations
 

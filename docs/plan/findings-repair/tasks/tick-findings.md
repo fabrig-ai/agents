@@ -15,8 +15,8 @@ Read first: `docs/plan/findings-repair/notes/common.md`,
 The request: "the tick's steps: one examine/remedy action pair for reds
 and findings ..., the finding repairs joined to the plan's tasks,
 `FIX_KINDS` wherever the red wiring reads kind `red`". Design:
-`docs/design/fab-qa.md`, 2, "One action pair for both kinds", "Its
-foreman", "Everything fab-after-landing.md 2 gives kind `red` holds" and
+`docs/design/qa.md`, 2, "One action pair for both kinds", "Its
+foreman", "Everything after-landing.md 2 gives kind `red` holds" and
 "The tick, each round".
 
 ## What to build
@@ -48,7 +48,7 @@ In `fab/dispatch.py`, on `fix-pair`'s pair and `_fix_steps`:
 
 Tests in `fab/tests/test_dispatch.py`, through `tick(...)` with a ladder
 plan from `fab/tests/ladder_plans.py` and records from
-`fab/tests/qa_records.py`, as fab-qa.md 2's "Tests" words them:
+`fab/tests/qa_records.py`, as qa.md 2's "Tests" words them:
 - a path decision starts one foreman, and no second on the next tick;
 - its `Done: fix:` report, collected, settles `finding.settled` fix once
   and makes `<draft>/finding-<n>`, which starts an implement run from

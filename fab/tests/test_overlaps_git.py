@@ -1,4 +1,4 @@
-"""Probe real git's caught-up trees and failures (docs/design/fab-integration.md, 4)."""
+"""Probe real git's caught-up trees and failures (docs/design/integration.md, 4)."""
 
 import json
 import os

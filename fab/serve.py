@@ -1,4 +1,4 @@
-"""The public status page, live from the log (docs/design/fab-reports.md, 4)."""
+"""The public status page, live from the log (docs/design/reports.md, 4)."""
 
 from __future__ import annotations
 
@@ -202,7 +202,7 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime,
 
 
 def _public_overlaps(dated: list[tuple[dict, datetime]], known_drafts: Collection[str]) -> list[dict]:
-    """Open pairs as sorted public labels and file counts (docs/design/fab-integration.md, 4)."""
+    """Open pairs as sorted public labels and file counts (docs/design/integration.md, 4)."""
     pairs = []
     for pair, record in overlaps.open_pairs([event for event, _ in dated]).items():
         labels = sorted(name if name in known_drafts and DRAFT.fullmatch(name) else "other"
@@ -370,7 +370,7 @@ def _table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = 
 
 
 def _overlaps_panel(pairs: list[dict]) -> str:
-    """Render public overlap labels and counts after Drafts (docs/design/fab-integration.md, 4)."""
+    """Render public overlap labels and counts after Drafts (docs/design/integration.md, 4)."""
     body = (_table(("Drafts", "Files"), [(" · ".join(pair["drafts"]), pair["count"]) for pair in pairs])
             if pairs else '<p class="empty">No drafts overlap.</p>')
     return '<h2>Overlaps</h2><div class="panel">' + body + '</div>'
@@ -391,7 +391,7 @@ def _card(title: str, body: str) -> str:
 
 
 def _subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
-    """Render escaped subscriptions, custody and limits (docs/design/fab-reports.md, 4)."""
+    """Render escaped subscriptions, custody and limits (docs/design/reports.md, 4)."""
     if not subscriptions:
         return '<p class="empty">No login checked in the last 24 hours.</p>'
     rows = []
@@ -437,7 +437,7 @@ def _subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
 
 
 def _tiles(snapshot: dict) -> str:
-    """Render the overview tiles in status-page order (docs/design/fab-reports.md, 4)."""
+    """Render the overview tiles in status-page order (docs/design/reports.md, 4)."""
     runs, active_calls = snapshot["runs_in_flight"], snapshot["calls_in_flight"]
     waiting, weights = snapshot["waiting_on_user"], snapshot["weight_today"]
     subscriptions = snapshot["subscriptions"]
@@ -461,7 +461,7 @@ def _tiles(snapshot: dict) -> str:
 
 
 def _drafts_panel(draft_counts: dict) -> str:
-    """Render draft activity and its empty state (docs/design/fab-reports.md, 4)."""
+    """Render draft activity and its empty state (docs/design/reports.md, 4)."""
     drafts = []
     for name, counts in draft_counts.items():
         state = _badge("running", "info") if counts["runs_in_flight"] else _badge("idle", "neutral")

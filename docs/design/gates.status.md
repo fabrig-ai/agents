@@ -1,6 +1,6 @@
-# fab-gates status
+# gates status
 
-2026-11-01. Contract: `docs/design/fab-gates.md`. Split from `docs/design/fab.status.md`.
+2026-11-01. Contract: `docs/design/gates.md`. Split from `docs/design/fab.status.md`.
 
 ## Present
 

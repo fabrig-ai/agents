@@ -1,4 +1,4 @@
-"""QA log records with complete defaults (docs/design/fab.md, 3; fab-qa.md, 2)."""
+"""QA log records with complete defaults (docs/design/fab.md, 3; qa.md, 2)."""
 
 from fab import log
 

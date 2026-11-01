@@ -1,4 +1,4 @@
-"""Queue CPU reports, without CPU verdicts (docs/design/fab-landing.md, 2; fab-after-landing.md, 2).
+"""Queue CPU reports, without CPU verdicts (docs/design/landing.md, 2; after-landing.md, 2).
 
 The queue owns selection and heavy's lane. The shared collector owns measurement
 and timeout reconciliation; this adapter groups its verified tests by package.

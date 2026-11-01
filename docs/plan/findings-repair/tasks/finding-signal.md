@@ -14,9 +14,9 @@ Read first: `docs/plan/findings-repair/notes/common.md`,
 writes").
 
 The request: "the `finding-<n>` signal on the user's page for a finding
-its foreman left". Design: `docs/design/fab-channel.md`, 2 (`## Open
+its foreman left". Design: `docs/design/channel.md`, 2 (`## Open
 signals`' `finding-<n>` block, and "A signal opens and clears from the
-log"); `docs/design/fab-qa.md`, 2 ("left (the finding is a signal)").
+log"); `docs/design/qa.md`, 2 ("left (the finding is a signal)").
 
 ## What to build
 

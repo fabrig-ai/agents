@@ -1,7 +1,7 @@
 # fab: landing
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-landing.status.md`. Shared: the
+section numbers). Status: `docs/design/landing.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -31,7 +31,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   whoever hears it (a foreman, the user's page, 3) reads them without
   the log.
 - **Queue CPU, report only:** `fab/queue_cpu.py` runs the queue's `default`
-  and `fuzzy` steps through the shared `fab/cpu.py` collector (fab-after-landing.md 2),
+  and `fuzzy` steps through the shared `fab/cpu.py` collector (after-landing.md 2),
   keeping `check_steps`' package selection and `heavy --gate` lane. A static
   wrapper is built once per batch through heavy in that lane, only when a
   test step is reached. Each attempt has a nanosecond-stamped batch directory
@@ -182,18 +182,18 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     (`calls/`, `answers/`, `repairs/`, `ladder/`, `<draft>/integration`). A record of
     an unloaded plan's task is deferred, not relabelled: it imports as
     `branch.*` once its plan loads, from the plans' cursors as before.
-  - **The cursor:** the oldest of the loaded drafts' cursors (fab-tick.md 5), as
+  - **The cursor:** the oldest of the loaded drafts' cursors (tick.md 5), as
     before; with no loaded draft, the import resumes at the newest
     `queue_ts` of any kind in the log.
   - A `queue.rejected` opens the signal `queue:<branch>` on the user's page
-    (fab-channel.md 2), since its `queue_ts`: branch, tip, step, failing tests and the log on the gate. It
+    (channel.md 2), since its `queue_ts`: branch, tip, step, failing tests and the log on the gate. It
     clears when the branch lands, when a newer tip of it is tried, or by
     hand. Telling the session that readied it is left for later (4): a
     ready ref carries no pusher fab can read reliably.
   - A `collateral` alone is no signal: the branch goes again by itself, and
     the report already signals collateral reds. A red that stands after
     its collateral bound ends as a `rejected`, which is heard.
-  - The queue already wakes the tick on every `rejected` (fab-tick.md 6).
+  - The queue already wakes the tick on every `rejected` (tick.md 6).
   - Tests: a fake queue log with a rejected hand-pushed branch gives one
     `queue.rejected` and the page's signal; a later `landed`, or a
     `rejected` at another tip, clears it (the latter opening its own);

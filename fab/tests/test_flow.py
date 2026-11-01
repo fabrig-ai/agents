@@ -1,4 +1,4 @@
-"""The flow's event fold and builder measurements (docs/design/fab-tick.md, 4; fab.md, 4)."""
+"""The flow's event fold and builder measurements (docs/design/tick.md, 4; fab.md, 4)."""
 
 import unittest
 from copy import deepcopy

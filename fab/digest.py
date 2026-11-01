@@ -1,5 +1,5 @@
 """A branch's structure digest: what a reviewer needs without reading the code
-(docs/design/fab-gates.md, 2).
+(docs/design/gates.md, 2).
 
 The core reads two trees already on disk, the branch's base and its tip, each holding the
 package (PACKAGE/), and the changed paths with their line counts. It says which public items

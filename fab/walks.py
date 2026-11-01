@@ -1,4 +1,4 @@
-"""Hand walks, their brief editions and result intake (docs/design/fab-qa.md, 2)."""
+"""Hand walks, their brief editions and result intake (docs/design/qa.md, 2)."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class _Finding:
 
 @dataclass(frozen=True)
 class Result:
-    """A validated result.toml, without log or machine state (docs/design/fab-qa.md, 2)."""
+    """A validated result.toml, without log or machine state (docs/design/qa.md, 2)."""
 
     verdict: str
     reason: str
@@ -50,7 +50,7 @@ class Result:
 
 def edition(files: Sequence[tuple[str, str]]) -> str:
     """First 12 hex of SHA-256 over ordered UTF-8 paths and texts, each NUL-terminated.
-    Paths are spelled as in plan.toml. Pure; docs/design/fab-qa.md, 2.
+    Paths are spelled as in plan.toml. Pure; docs/design/qa.md, 2.
     """
     digest = hashlib.sha256()
     for path, text in files:
@@ -62,7 +62,7 @@ def edition(files: Sequence[tuple[str, str]]) -> str:
 def editions(plan: Plan, plan_dir: Path, *, sh: Runner = run) -> dict[str, str]:
     """Each rung's edition in plan order, reading briefs at the checkout's origin/main.
     Find the checkout with git rev-parse, then git show each checkout-relative brief.
-    Raise ValueError naming the rung and file when git show fails (docs/design/fab-qa.md, 2).
+    Raise ValueError naming the rung and file when git show fails (docs/design/qa.md, 2).
     """
     return {identifier: edition(files) for identifier, files in
             _briefs(plan_dir, plan.rungs.values(), sh=sh).items()}
@@ -91,7 +91,7 @@ def _briefs(plan_dir: Path, rungs: Iterable[Rung], *, sh: Runner) -> dict[str, l
 
 
 def parse(text: str) -> Result:
-    """Parse result.toml, refusing invalid fields and limits by name; pure (docs/design/fab-qa.md, 2).
+    """Parse result.toml, refusing invalid fields and limits by name; pure (docs/design/qa.md, 2).
 
     A pass cannot have a blocking finding; a fail must have a finding. The log-aware
     check that same names a finding of this plan belongs to result.
@@ -145,7 +145,7 @@ def _string(fields: dict, key: str, prefix: str = "") -> str:
 
 def brief_text(texts: Sequence[str], walk_dir: Path,
                open_findings: Iterable[findings.Finding]) -> str:
-    """Brief texts followed by reporting instructions and open findings; pure (docs/design/fab-qa.md, 2).
+    """Brief texts followed by reporting instructions and open findings; pure (docs/design/qa.md, 2).
 
     Reporting mechanics are outside the brief edition. Each finding occupies one line
     with its id, state, rung, area and title, so a walker can report same by id.
@@ -194,7 +194,7 @@ def _locked() -> Iterator[None]:
 
 def walk(plan_dir: Path, rung: str, commit: str, *, by: str = "session", sh: Runner = run,
          log_path: Path | None = None) -> tuple[str, Path]:
-    """Fetch and compile a main-branch brief, log its walk and return id and path (docs/design/fab-qa.md, 2).
+    """Fetch and compile a main-branch brief, log its walk and return id and path (docs/design/qa.md, 2).
 
     Refuse unknown rungs or a commit missing any landed repair of this rung, including
     targets of merged findings. Hold qa.lock from reading ids through walk.started.
@@ -231,7 +231,7 @@ def walk(plan_dir: Path, rung: str, commit: str, *, by: str = "session", sh: Run
 
 
 def result(walk_id: str, directory: Path | None = None, *, log_path: Path | None = None) -> list[dict]:
-    """Import a walk's artifacts; return newly appended records, ending with walk.ended (docs/design/fab-qa.md, 2).
+    """Import a walk's artifacts; return newly appended records, ending with walk.ended (docs/design/qa.md, 2).
 
     Validate everything before writing. Hold qa.lock across counting ids and appending;
     retry an interrupted intake by reusing raised indices and skipping logged merges.
@@ -293,7 +293,7 @@ def result(walk_id: str, directory: Path | None = None, *, log_path: Path | None
 
 
 def main(argv: list[str]) -> int:
-    """Start a hand walk, ingest its result or print each rung's state (docs/design/fab-qa.md, 2).
+    """Start a hand walk, ingest its result or print each rung's state (docs/design/qa.md, 2).
 
     fab qa walk PLAN_DIR RUNG --commit SHA [--by WHO]; fab qa result WALK [DIR];
     fab qa rungs [PLAN_DIR...]. A refusal prints its reason and returns 2.

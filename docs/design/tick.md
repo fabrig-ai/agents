@@ -1,7 +1,7 @@
 # fab: plans, runs and the tick
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
-section numbers). Status: `docs/design/fab-tick.status.md`. Shared: the
+section numbers). Status: `docs/design/tick.status.md`. Shared: the
 overview, the event log and the tests are `docs/design/fab.md`'s.
 
 ## 1. In one page
@@ -18,14 +18,14 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   and `high` (the ready-task band as multiples of implementer places). Each
   `[[part]]` has `id`, `title`, `mode` (feature, migration, fix or probe),
   `needs` (other parts), `design` (where its design is) and `contract` (a
-  shared contract, designed by the designer's contract call, fab-calls.md 3; default
+  shared contract, designed by the designer's contract call, calls.md 3; default
   false). Each `[[slice]]` has `id`, `story`, `parts` and `walk` (whether QA
   walks it). Each `[[question]]` is one of the user's, from the cut: `id`,
   `text`, `parts` (designed only once it is answered) and `answer`, written
   into plan.toml when the user gives it. `retired = true` ends the plan. No
   part is called `cut`, `retire`, `review` or `triage`: those name calls'
   subjects. A ladder plan names `[ladder]` and its `[[rung]]`s instead of
-  parts (fab-qa.md 2).
+  parts (qa.md 2).
 - **A task spec** is Markdown with a TOML header between `+++` lines: `id`,
   `part`, `kind` (feature, interface, migration, repair, rebase or docs),
   `repo`, `needs` (tasks that land first), `files` (globs it may change),
@@ -72,7 +72,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   never fails the start. A host with the `dispatcher` role is skipped: its
   tick already moves its install. Run worktrees, slots, PATH links and
   units are untouched; long-running services still need `bin/install.sh`
-  to move and restart them (docs/design/fab-machines.md, 2).
+  to move and restart them (docs/design/machines.md, 2).
 - **The brief is compiled, not gathered:** the role text
   (`fab/roles/implementer.md`), the task spec, and the paths it cites. Codex
   reads what the brief names in the checkout itself.
@@ -89,8 +89,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 
 - **Places are indicative.** A builder's `places` in `fab/hosts.toml` is a
   hint, not a cap: the dispatcher's own target for runs in flight starts at
-  the plan's places (fab-integration.md 2), grows by one with each task landed on its first
-  attempt, and halves with each rejection or infra outcome as in fab-integration.md 2, never below
+  the plan's places (integration.md 2), grows by one with each task landed on its first
+  attempt, and halves with each rejection or infra outcome as in integration.md 2, never below
   1; it may pass `places` while the builder's load and heavy's waits stay low
   (heavy and the disk wait still bound what actually builds).
 - **The target is a fold** (`fab.flow.target`) over the plan's events in the
@@ -128,15 +128,15 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   after it.
 - **A plan owns its draft's work:** its tasks' runs and their foreman runs,
   its calls (subject the draft or under it), and the review runs of those
-  calls; a ladder plan's walks and findings too (fab-qa.md 2). A plan collects only its own runs, and its call limits (one answer,
+  calls; a ladder plan's walks and findings too (qa.md 2). A plan collects only its own runs, and its call limits (one answer,
   review or amend call at a time) count only its own calls. Runs no ticked
   plan owns are collected after every plan has ticked.
 - **A plan that cannot load** (its plan.toml, a fetch, a second plan of the
   same draft) is printed and skipped; the others tick. It logs nothing,
   and `fab tick` exits 1. A retired plan is skipped.
 - **A tick with no loaded plan** (none listed or named, or none that
-  loads) imports the queue's unowned records (fab-landing.md 3) and the after-landing
-  records (fab-after-landing.md 2), closes reds, and, when no listed plan failed to
+  loads) imports the queue's unowned records (landing.md 3) and the after-landing
+  records (after-landing.md 2), closes reds, and, when no listed plan failed to
   load, opens new reds against an empty owner map, so each is a page
   signal; then it rewrites the page and starts nothing: no measurement of
   the builders, no decisions, no foremen and no strays collected. On 11-01
@@ -163,9 +163,9 @@ only the backstop.
   builder), a Claude call when it logs `call.ended`, the queue at the end of
   a cycle that recorded `landed` or `rejected` (one wake per cycle), the
   after-landing machine at the end of a run that recorded a red new or
-  unattributed or a recovery (one wake per run, fab-after-landing.md 2), `fab land`
+  unattributed or a recovery (one wake per run, after-landing.md 2), `fab land`
   when it lands or refuses, the user's answer or clear (`fab page
-  answer`, `fab page clear`), and a walk's result (`fab qa result`, fab-qa.md 2).
+  answer`, `fab page clear`), and a walk's result (`fab qa result`, qa.md 2).
   On hel8 a wake is one appended line; elsewhere it is one ssh to the host
   with the role dispatcher. A wake that fails is not retried: the backstop
   finds its work.
@@ -196,7 +196,7 @@ only the backstop.
   `refusal.settled`, `call.finished`, `call.parked`, `call.answered`,
   `red.settled`, which makes a red task, and `red.closed`, which may let a
   retire start; `red.opened` needs none, since the same round's plans take
-  it; `finding.settled`, which makes a finding's repair task, fab-qa.md 2;
+  it; `finding.settled`, which makes a finding's repair task, qa.md 2;
   `finding.triaged` and `rung.passed` need none, being logged before the
   same round's decisions), the tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
   row with no outside wake between them stop the chain with a note: a chain
@@ -227,7 +227,7 @@ things fab follows, whatever the clock says:
   - a repair or rebase is a task whose next run carries a refusal (a
     `branch.rejected` since its last run); a rerun after an `Infra:`
     outcome is not, and keeps its part's place;
-  - a red task (`<draft>/red-<n>`, kind `red`, fab-after-landing.md 2) sorts into the
+  - a red task (`<draft>/red-<n>`, kind `red`, after-landing.md 2) sorts into the
     repair group too, ahead of the plan's slice tasks, behind
     consolidations: a red reaches its owner at once;
   - within each group, tasks go by the first slice that holds their part,

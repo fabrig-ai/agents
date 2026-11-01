@@ -7,10 +7,10 @@ then your spec.
 ## Scope
 
 - The request (`docs/plan/paper-cuts/inputs/request.md`) builds three
-  paper cuts, as already designed: `docs/design/fab-calls.md`, 3, "retire";
-  `docs/design/fab-integration.md`, 4, "The overlap probe" (its cache and
+  paper cuts, as already designed: `docs/design/calls.md`, 3, "retire";
+  `docs/design/integration.md`, 4, "The overlap probe" (its cache and
   "A malformed record is ignored, never fatal"); and a real-git test of the
-  probe. Nothing past them: not the park of fab-calls.md 5 (Later), no
+  probe. Nothing past them: not the park of calls.md 5 (Later), no
   change to the probe's pairs, events or page beyond what your spec says.
 - Change only your spec's `files`. A file you must touch outside them is a
   `Question:`, unless your spec pre-approves it.
@@ -18,7 +18,7 @@ then your spec.
   binding: another task is written against them. Private helpers are yours
   to name.
 - Follow the design. Where the code shows the design cannot hold as
-  written, change its section (fab-calls.md 3 or fab-integration.md 4) in
+  written, change its section (calls.md 3 or integration.md 4) in
   the same branch, say so in your report, and keep the change to that
   point. Otherwise leave the designs and their status files alone: they
   are the designer's (retire brings the status files current).

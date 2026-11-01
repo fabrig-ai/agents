@@ -1,4 +1,4 @@
-"""Slots on a builder: claims, the sweep that bounds a slot, reclaim (docs/design/fab-machines.md, 2).
+"""Slots on a builder: claims, the sweep that bounds a slot, reclaim (docs/design/machines.md, 2).
 
 Runs on the builder itself; the dispatcher calls it over ssh (`bin/fab slot ...`).
 """

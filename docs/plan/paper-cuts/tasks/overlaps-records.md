@@ -15,7 +15,7 @@ Read first: `docs/plan/paper-cuts/notes/common.md`,
 
 The request (2): "**A malformed record is ignored, never fatal** (the
 probe's folds and `fab/serve.py`'s overlaps)". Design:
-`docs/design/fab-integration.md`, 4, "A malformed record is ignored, never
+`docs/design/integration.md`, 4, "A malformed record is ignored, never
 fatal".
 
 ## What to build

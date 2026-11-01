@@ -1,4 +1,4 @@
-"""Designer calls compile contracts from plans and history (docs/design/fab-calls.md, 3)."""
+"""Designer calls compile contracts from plans and history (docs/design/calls.md, 3)."""
 
 import io
 import unittest

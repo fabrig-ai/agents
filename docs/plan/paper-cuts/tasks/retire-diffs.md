@@ -17,7 +17,7 @@ its diff since the plan started and its text, fills its section only up to
 `BRIEF_LIMIT` less the other sections and lists the designs that do not
 fit (`fab.designer.retire_brief`, a new helper beside `changed_designs`,
 which keeps returning paths); the retire role text (`fab/roles/retire.md`)
-and `retire_brief`'s docstring say so." Design: `docs/design/fab-calls.md`,
+and `retire_brief`'s docstring say so." Design: `docs/design/calls.md`,
 3, "retire", all of it.
 
 ## What to build

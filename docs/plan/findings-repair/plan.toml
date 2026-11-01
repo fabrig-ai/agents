@@ -1,7 +1,7 @@
 landing = "queue"
 
 # The thin cut of findings-repair: the repair path of QA findings in fab
-# (docs/design/fab-qa.md, 2, "Built in this order", "After red-routing's tick
+# (docs/design/qa.md, 2, "Built in this order", "After red-routing's tick
 # wiring lands"), on top of findings-loop's fold, triage and tick steps. Every
 # part is direct; its task specs are in tasks/, the shared notes in notes/,
 # the cut's decisions and its critical path in notes/decisions.md. Walks run
@@ -24,7 +24,7 @@ id = "fix"
 title = "fab/fix.py: Fix mode's shared steps factored out of fab/tier_reds.py, red unchanged"
 mode = "direct"
 needs = []
-design = "docs/design/fab-qa.md, 2"
+design = "docs/design/qa.md, 2"
 
 # Slice 1: red's path runs through the shared steps and the renamed pair.
 
@@ -33,7 +33,7 @@ id = "kinds"
 title = "FIX_KINDS wherever the red wiring reads kind red, and the examine-fix/remedy-fix pair"
 mode = "direct"
 needs = ["fix"]
-design = "docs/design/fab-qa.md, 2; docs/design/fab-after-landing.md, 2"
+design = "docs/design/qa.md, 2; docs/design/after-landing.md, 2"
 
 # Slice 2: a routed finding is repaired, or left as a signal.
 
@@ -42,21 +42,21 @@ id = "foreman"
 title = "fab/fixes.py and the finding's foreman: its brief, its settlement and the finding-<n> repair task"
 mode = "direct"
 needs = ["fix"]
-design = "docs/design/fab-qa.md, 2"
+design = "docs/design/qa.md, 2"
 
 [[part]]
 id = "tick"
 title = "The tick's finding steps: finding_actions, the repairs joined to the plan's tasks"
 mode = "direct"
 needs = ["foreman", "kinds"]
-design = "docs/design/fab-qa.md, 2; docs/design/fab-tick.md, 6"
+design = "docs/design/qa.md, 2; docs/design/tick.md, 6"
 
 [[part]]
 id = "signal"
 title = "The finding-<n> signal on the user's page for a finding its foreman left"
 mode = "direct"
 needs = ["foreman"]
-design = "docs/design/fab-channel.md, 2; docs/design/fab-qa.md, 2"
+design = "docs/design/channel.md, 2; docs/design/qa.md, 2"
 
 [[slice]]
 id = 1

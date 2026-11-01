@@ -1,4 +1,4 @@
-"""fabrig's checks: which packages a change selects, and the steps that check them (docs/design/fab-landing.md, 2).
+"""fabrig's checks: which packages a change selects, and the steps that check them (docs/design/landing.md, 2).
 
 Shared by the queue (the gate lane, on the merge candidate) and precheck (the build lane, in an
 implementer's slot). Ported from fabrig's tools/queue/mq, whose selection rules it keeps.

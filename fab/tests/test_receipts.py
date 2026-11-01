@@ -1,4 +1,4 @@
-"""Precheck receipts carried to and reused at the gate (docs/design/fab-landing.md, 3)."""
+"""Precheck receipts carried to and reused at the gate (docs/design/landing.md, 3)."""
 
 import unittest
 from unittest.mock import patch

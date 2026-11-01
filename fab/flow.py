@@ -1,5 +1,5 @@
 """The flow: how many runs a plan keeps in flight, and when a builder may pass its places
-(docs/design/fab-tick.md, 4).
+(docs/design/tick.md, 4).
 
 `target` and `calm` are pure. `measure` asks each builder once over ssh. The dispatcher
 starts runs while the plan's runs in flight are below its target, on builders with a free

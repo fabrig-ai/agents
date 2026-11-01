@@ -1,4 +1,4 @@
-"""Brief editions use ordered main-branch bytes through the runner (docs/design/fab-qa.md, 2)."""
+"""Brief editions use ordered main-branch bytes through the runner (docs/design/qa.md, 2)."""
 
 import io
 import json

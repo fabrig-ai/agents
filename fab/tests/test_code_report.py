@@ -25,7 +25,7 @@ def landed(clock, task="demo/a"):
 
 
 def fixture():
-    parts = {name: Part(name, name.title(), "feature", (), "docs/design/fab-reports.md, 2")
+    parts = {name: Part(name, name.title(), "feature", (), "docs/design/reports.md, 2")
              for name in ("core", "ui", "empty")}
     plan = Plan("demo", "agents", (), 1.0, 2.0, parts, (),
                 landing="queue", reviews=True, direct=False)
