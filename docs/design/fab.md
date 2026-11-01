@@ -340,8 +340,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   tests; `fab tiers verify` checks the map against the workspace's listing.
 - **The tier set** is a list in the code: `exhaustive-skein`, `qa-skein`,
   `qa-smith`, `qa-jig`, `process-jig`, `browser-skein`, `browser-jig`,
-  `browser-temper`, `qa-temper`, in that order. Not the live pairs (real
-  providers, the user's sign-ins) nor `process-temper` (its owner's).
+  `browser-temper`, `qa-temper`, in that order. Not `process-temper` (its
+  owner's), nor by default the live pairs (real providers, the user's
+  sign-ins): `--live` adds those, on logins borrowed from the shelf (13.13).
 - **One tip at a time, the newest:** each cycle fetches main. A tip that is
   not the cursor (the last tip run without a fault) gets one run of the tier
   set. Its **suspects** are the first-parent commits since the cursor; a queue
@@ -1185,7 +1186,23 @@ login that still works reused across them before more are signed in.
   custody holds it, its machine is gone). `fab logins swap HOST ID` gives
   back the machine's login of that kind and lends ID; `fab logins list`
   names each role's missing logins (a dispatcher or builder needs both
-  kinds).
+  kinds). Lending a `claude` login to a machine also drops the account
+  Claude Code cached in `~/.claude.json`: it reports, and keeps, the
+  previous login's until none is cached (11-01: three swapped builders
+  said gmail until it was dropped).
+- **A run's logins:** `fab logins borrow KIND HOST --path P --holder RUN`
+  lends the free login of that kind with the lowest number and prints its
+  id. Builders reach the shelf by ssh to hel8 (the user, 11-01: custody
+  stays central). `fab after-landing run --live` adds the live pairs of
+  `fab.after_landing.LIVE`: `live-temper` (`TEMPER_LIVE_ACCOUNT`, a
+  `chatgpt` record; `TEMPER_LIVE_CLAUDE`, a `claude-box`) and `live-smith`
+  (`SMITH_LIVE_CLAUDE`). Each pair borrows its logins, lent to the builder
+  under its run directory for holder `after-landing/<tip>/<pair>`, runs
+  with the variables naming them, and returns them when it ends; a pair
+  short of a login faults, and a login that cannot be returned stays lent
+  to its run with an `error` record. `live-skein` joins once its tests
+  read a login's file or directory (the user, 11-01) instead of tokens in
+  their environment.
 - **Checks by the products themselves:** `fab logins check ID` asks Codex's
   app-server (`account/read`, `account/rateLimits/read`: the account, the
   plan, the weekly window's percent used) or `claude auth status`. A lent
@@ -1223,13 +1240,14 @@ login that still works reused across them before more are signed in.
   branches are suspects, CPU accounting against the tiers' budgets, and the
   landing report's after-landing figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
-- Logins (13.13), next: the live pairs (`live-temper`, `live-skein`, ...)
-  in after-landing, on the queue's machine as well as builders (the user,
-  10-31), each pair holding a `chatgpt` or `claude-box` login lent to its
-  run and returned when it ends; QA's six logins moved from hetzner6's
-  `tools/qa/logins` onto the shelf, and that tool retired. Then a new
-  builder lent its logins when it joins and returned when it goes, and
-  swaps proposed from `login.checked`'s weekly percent.
+- Logins (13.13), next: `live-skein` in `LIVE` once its tests read files,
+  with a Codex login's token refreshed before the pair (`fab logins
+  account codex --home DIR --validate`); after-landing `--live` run on the
+  queue's machine as well as builders (the user, 10-31); `tools/qa/logins`
+  retired (QA's six logins are on the shelf since 11-01, held there by
+  `fab/migrate`). Then a new builder lent its logins when it joins and
+  returned when it goes, and swaps proposed from `login.checked`'s weekly
+  percent.
 - The tick's event and backstop units kept by fleet, as the queue's will be;
   lost-event notes counted in the code report; a wake retried before the
   backstop, if those notes show wakes are lost.

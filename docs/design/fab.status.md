@@ -24,9 +24,11 @@
   paused ladder work's old claims.
 - **fabrig's landing:** `fab gate`, `fab queue`, `fab precheck` on main.
 - **Logins:** `fab logins` (13.13): the shelf, capture, lend, return, swap,
-  retire and check. Its live use starts with moving the machines' logins
-  and the old pool's working copies onto the shelf by hand; QA's logins
-  stay in hetzner6's `tools/qa/logins` until the live pairs use the shelf.
+  retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
+  machine's logins, the user's new sign-ins and QA's six (moved 11-01).
+  `fab after-landing --live` borrows them for `live-temper` and
+  `live-smith`; the after-landing unit runs without it. `live-skein` waits for
+  its tests to read a login's file.
 
 ## Gaps and departures
 

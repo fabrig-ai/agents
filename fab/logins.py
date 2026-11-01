@@ -58,6 +58,22 @@ digest() {
   fi
 }
 """
+# Drops the account Claude Code cached in ~/.claude.json (its settings, not the login), so the
+# next start fetches the account of the login just lent; the rest of the file is kept.
+FORGET_ACCOUNT = """
+import json, os
+path = os.path.expanduser("~/.claude.json")
+try:
+    settings = json.load(open(path))
+except FileNotFoundError:
+    raise SystemExit(0)
+if settings.pop("oauthAccount", None) is not None:
+    temporary = path + ".fab-new"
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(descriptor, "w") as out:
+        json.dump(settings, out, indent=2)
+    os.replace(temporary, path)
+"""
 SHA = re.compile(r"[0-9a-f]{64}")
 PRELUDE = "set -euo pipefail; umask 077; cd ~\n" + DIGEST
 
@@ -252,16 +268,32 @@ if [ -d "$tmp"/{shlex.quote(item)} ]; then mv -T "$tmp"/{shlex.quote(item)} "$de
         """Copy free login name to host at path (by default its kind's machine path, lent to the
         machine) for holder (a run's id; by default the machine)."""
         with self._lock():
-            login = self.login(name)
-            if not login.free:
-                raise Refused(f"{name} is not free: " + (f"retired ({login.retired})" if login.retired is not None
+            return self._lend(self.login(name), host, path, holder)
+
+    def borrow(self, kind: str, host: str, *, path: str, holder: str) -> Login:
+        """Lend the free login of kind with the lowest number to holder (a run) on host at path;
+        Refused when none is free. The builders' live pairs borrow this way over ssh."""
+        with self._lock():
+            free = [login for login in self.logins().values() if login.kind == kind and login.free]
+            if not free:
+                raise Refused(f"no free {kind} login")
+            first = min(free, key=lambda login: (len(login.id), login.id))
+            return self._lend(first, host, path, holder)
+
+    def _lend(self, login: Login, host: str, path: str | None, holder: str | None) -> Login:
+        if not login.free:
+            raise Refused(f"{login.id} is not free: " + (f"retired ({login.retired})" if login.retired is not None
                                                           else f"lent to {login.holder}"))
-            path = path or KINDS[login.kind].machine
-            if not path:
-                raise Refused(f"a {login.kind} login is lent to a run; name its --path")
-            self._push(login, host, path)
-            self._append("login.lent", id=name, holder=holder or host, host=host, at=path, sha=login.sha)
-            return self.login(name)
+        path = path or KINDS[login.kind].machine
+        if not path:
+            raise Refused(f"a {login.kind} login is lent to a run; name its --path")
+        self._push(login, host, path)
+        if login.kind == "claude" and path == KINDS["claude"].machine:
+            # Claude Code reports the account cached by the machine's previous login until it
+            # fetches its own, which it does only when none is cached (11-01, three swaps).
+            self._script(host, f"python3 -I -c {shlex.quote(FORGET_ACCOUNT)}")
+        self._append("login.lent", id=login.id, holder=holder or host, host=host, at=path, sha=login.sha)
+        return self.login(login.id)
 
     def give_back(self, name: str) -> Login:
         """Copy lent login name back from where it lies, then remove it there, if it has not
@@ -440,7 +472,8 @@ def table(logins: Iterable[Login]) -> list[str]:
 
 def main(argv: list[str]) -> int:
     """`fab logins list [--json]`, `capture HOST KIND [--path P] [--free]`, `lend ID HOST
-    [--path P] [--holder RUN]`, `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID...`
+    [--path P] [--holder RUN]`, `borrow KIND HOST --path P --holder RUN` (prints the id lent),
+    `return ID`, `swap HOST ID`, `retire ID REASON`, `check ID...`
     (on the shelf's machine); `account KIND [--home DIR] [--validate]` (on the login's)."""
     parser = argparse.ArgumentParser(prog="fab logins", description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -456,6 +489,11 @@ def main(argv: list[str]) -> int:
     lending.add_argument("host")
     lending.add_argument("--path")
     lending.add_argument("--holder")
+    borrowing = commands.add_parser("borrow")
+    borrowing.add_argument("kind", choices=sorted(KINDS))
+    borrowing.add_argument("host")
+    borrowing.add_argument("--path", required=True)
+    borrowing.add_argument("--holder", required=True)
     commands.add_parser("return").add_argument("id")
     swapping = commands.add_parser("swap")
     swapping.add_argument("host")
@@ -486,6 +524,9 @@ def main(argv: list[str]) -> int:
             done = shelf.capture(args.host, args.kind, path=args.path, free=args.free)
         elif args.command == "lend":
             done = shelf.lend(args.id, args.host, path=args.path, holder=args.holder)
+        elif args.command == "borrow":
+            print(shelf.borrow(args.kind, args.host, path=args.path, holder=args.holder).id)
+            return 0
         elif args.command == "return":
             done = shelf.give_back(args.id)
         elif args.command == "swap":

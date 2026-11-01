@@ -194,6 +194,35 @@ class LoginsTest(unittest.TestCase):
         with self.assertRaisesRegex(logins.Refused, "not free"):
             self.shelf.swap("b2", "codex-2")
 
+    def test_borrow_lends_the_lowest_free_login_of_a_kind_to_a_run(self):
+        for number in range(1, 4):
+            self.secret("b1", f"qa/record-{number}")
+            self.shelf.capture("b1", "chatgpt", path=f"qa/record-{number}", free=True)
+        self.shelf.lend("chatgpt-1", "b2", path="runs/r0/login", holder="r0")
+        login = self.shelf.borrow("chatgpt", "b2", path="runs/r1/login", holder="r1")
+        self.assertEqual((login.id, login.holder, login.path), ("chatgpt-2", "r1", "runs/r1/login"))
+        self.assertTrue(self.at("b2", "runs/r1/login").is_file())
+        for number in range(3, 4):
+            self.shelf.retire(f"chatgpt-{number}", "test")
+        with self.assertRaisesRegex(logins.Refused, "no free chatgpt login"):
+            self.shelf.borrow("chatgpt", "b2", path="runs/r2/login", holder="r2")
+        self.shelf.give_back("chatgpt-1")
+        self.assertEqual(self.shelf.borrow("chatgpt", "b2", path="runs/r2/login", holder="r2").id, "chatgpt-1")
+
+    def test_lending_a_claude_machine_login_forgets_the_account_its_predecessor_cached(self):
+        settings = self.at("b2", ".claude.json")
+        settings.write_text(json.dumps({"oauthAccount": {"emailAddress": "before@example.invalid"}, "theme": "dark"}))
+        self.secret("b1", ".claude/.credentials.json")
+        self.shelf.capture("b1", "claude")
+        self.shelf.give_back("claude-1")
+        self.shelf.lend("claude-1", "b2")
+        self.assertEqual(json.loads(settings.read_text()), {"theme": "dark"})
+        self.assertEqual(stat.S_IMODE(settings.stat().st_mode), 0o600)
+        self.shelf.give_back("claude-1")
+        settings.write_text(json.dumps({"oauthAccount": {"emailAddress": "kept@example.invalid"}}))
+        self.shelf.lend("claude-1", "b2", path="runs/r1/.credentials.json", holder="r1")
+        self.assertEqual(json.loads(settings.read_text()), {"oauthAccount": {"emailAddress": "kept@example.invalid"}})
+
     def test_a_directory_login_is_lent_to_a_run_and_returned_whole(self):
         self.secret("b1", "qa/claude", directory=True)
         login = self.shelf.capture("b1", "claude-box", path="qa/claude", free=True)

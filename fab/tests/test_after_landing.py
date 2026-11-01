@@ -4,6 +4,7 @@ import contextlib
 import io
 import json
 import os
+import shlex
 import tomllib
 import xml.etree.ElementTree as ET
 import unittest
@@ -11,6 +12,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fab import after_landing, atomic, hosts, log, nextest, slots, tiers
+from fab.hosts import Host
 from fab.after_landing import AfterLanding, Suspect, state, suspects, verdict
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
@@ -124,6 +126,7 @@ class AfterLandingTest(unittest.TestCase):
         self.sh.on(["git", "show"], lambda call: Result(0, self.subjects[call.argv[-1]]))
         self.responses = {}
         self.invocations = []
+        self.envs = []
         self.configured = {profile: tiers.Pair(profile, *profile.rsplit("-", 1), ("pkg",), ())
                            for profile in self.profiles}
         self.load = self.enterContext(patch.object(tiers, "load", return_value=self.configured))
@@ -146,11 +149,12 @@ class AfterLandingTest(unittest.TestCase):
         commits = self.timeline[self.timeline.index(previous) + 1:self.timeline.index(tip) + 1]
         return Result(0, "\n".join(commits))
 
-    def run_pair(self, repo, target, extra, path, *, sh):
+    def run_pair(self, repo, target, extra, path, *, sh, env=None):
         self.assertEqual(repo, self.repo)
         self.assertIs(sh, self.sh)
         self.assertIs(target, self.configured[target.profile])
         self.invocations.append((target.profile, extra, path))
+        self.envs.append(env)
         self.assertEqual(extra[0], "--config-file")
         overlay = Path(extra[1])
         data = tomllib.loads(overlay.read_text())
@@ -496,6 +500,61 @@ class AfterLandingTest(unittest.TestCase):
         with patch.object(self.runner, "cycle", side_effect=AssertionError("already stopped")):
             self.runner.run(stop=stop)
 
+    def live_runner(self, shelf):
+        """A --live runner on builder b1 whose `fab logins` calls to hel8 answer from shelf:
+        borrow KIND -> the next id of shelf[KIND] (none left: refused), return -> ok unless
+        the id is in shelf["stuck"]."""
+        machines = {"hel8": Host("hel8", "free@hel8", ("dispatcher",)), "b1": Host("b1", "free@b1", ("builder",))}
+        self.enterContext(patch.dict(os.environ, {"FAB_HOST": "b1"}))
+        self.configured.update({profile: tiers.Pair(profile, *profile.rsplit("-", 1), ("pkg",), ())
+                                for profile in after_landing.LIVE})
+        atomic.write(self.repo / tiers.NEXTEST_CONFIG, self.config + "".join(
+            f"[profile.{profile}]\nretries = 0\n" for profile in after_landing.LIVE))
+        self.calls = []
+
+        def shelf_call(call):
+            self.assertEqual(call.argv[:-1], ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=15", "free@hel8"])
+            argv = shlex.split(call.argv[-1])[2:]
+            argv = shlex.split(argv[0])[2:] if argv[0].startswith("fab ") else argv
+            self.calls.append(argv)
+            if argv[0] == "borrow":
+                left = shelf[argv[1]]
+                return Result(0, left.pop(0) + "\n") if left else Result(1, "", f"fab logins: no free {argv[1]} login\n")
+            return Result(1, "", "fab logins: changed\n") if argv[1] in shelf.get("stuck", ()) else Result(0)
+
+        self.sh.on(["ssh"], shelf_call)
+        return AfterLanding(1, sh=self.sh, tier_set=self.profiles, live=True, known=machines)
+
+    def test_live_pairs_borrow_their_logins_from_the_dispatcher_and_return_them(self):
+        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": ["claude-box-1", "claude-box-2"]})
+        self.assertEqual(runner.tier_set, ("qa-skein", "qa-jig", "live-temper", "live-smith"))
+        record = runner.check(self.tip)
+        self.assertEqual(record["verdict"], "green")
+        directory = Path(record["log"])
+        temper, smith = self.envs[2], self.envs[3]
+        self.assertEqual(self.envs[:2], [{}, {}])
+        self.assertEqual(temper, {"TEMPER_LIVE_ACCOUNT": str(directory / "logins/TEMPER_LIVE_ACCOUNT/login"),
+                                  "TEMPER_LIVE_CLAUDE": str(directory / "logins/TEMPER_LIVE_CLAUDE")})
+        self.assertEqual(smith, {"SMITH_LIVE_CLAUDE": str(directory / "logins/SMITH_LIVE_CLAUDE")})
+        holder = f"after-landing/{self.tip[:12]}/live-temper"
+        self.assertEqual(self.calls, [
+            ["borrow", "chatgpt", "b1", "--path", temper["TEMPER_LIVE_ACCOUNT"], "--holder", holder],
+            ["borrow", "claude-box", "b1", "--path", temper["TEMPER_LIVE_CLAUDE"], "--holder", holder],
+            ["return", "chatgpt-1"], ["return", "claude-box-1"],
+            ["borrow", "claude-box", "b1", "--path", smith["SMITH_LIVE_CLAUDE"], "--holder",
+             f"after-landing/{self.tip[:12]}/live-smith"],
+            ["return", "claude-box-2"]])
+
+    def test_a_live_pair_without_its_logins_faults_and_returns_what_it_borrowed(self):
+        runner = self.live_runner({"chatgpt": ["chatgpt-1"], "claude-box": [], "stuck": ["chatgpt-1"]})
+        record = runner.check(self.tip)
+        self.assertEqual(record["verdict"], "partial")
+        self.assertEqual(record["faults"], ["live-temper: logins: fab logins: no free claude-box login",
+                                            "live-smith: logins: fab logins: no free claude-box login"])
+        self.assertEqual([profile for profile, _, _ in self.invocations], ["qa-skein", "qa-jig"])
+        self.assertIn(["return", "chatgpt-1"], self.calls)
+        self.assertEqual(self.records("error")[0]["error"], "login chatgpt-1 not returned: fab logins: changed")
+
     def test_main_log_since_and_unclaimed_once(self):
         stamps = ["2026-10-29T00:00:00.000Z", "2026-10-30T00:00:00.000Z", "2026-10-31T00:00:00.000Z"]
         for stamp in stamps:
@@ -513,7 +572,7 @@ class AfterLandingTest(unittest.TestCase):
         with patch.object(after_landing, "AfterLanding", return_value=self.runner) as constructor, \
                 patch.object(self.runner, "cycle") as cycle, patch.object(self.runner, "run") as run_loop:
             self.assertEqual(after_landing.main(["once", "--slot", "1"]), 0)
-            constructor.assert_called_once_with(1)
+            constructor.assert_called_once_with(1, live=False)
             cycle.assert_called_once_with()
             self.assertEqual(after_landing.main(["run", "--slot", "1"]), 0)
             run_loop.assert_called_once_with(stop=self.runner.home / "after-landing.stop")

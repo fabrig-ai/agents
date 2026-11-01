@@ -20,13 +20,20 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import atomic, hosts, log, nextest, slots, tiers, units
-from fab.sh import Runner, run
+from fab import atomic, hosts, log, logins, nextest, slots, tiers, units
+from fab.sh import Runner, run, ssh
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
 # live pairs (real providers, the user's sign-ins) nor process-temper (its owner's).
 TIER_SET = ("exhaustive-skein", "qa-skein", "qa-smith", "qa-jig", "process-jig",
             "browser-skein", "browser-jig", "browser-temper", "qa-temper")
+# The live pairs `--live` adds: each variable its tests read, and the kind of login fab lends
+# for it, borrowed from the shelf on the dispatcher for the pair and returned after it
+# (docs/design/fab.md, 13.13). live-skein joins once its tests read a login's file.
+LIVE = {
+    "live-temper": (("TEMPER_LIVE_ACCOUNT", "chatgpt"), ("TEMPER_LIVE_CLAUDE", "claude-box")),
+    "live-smith": (("SMITH_LIVE_CLAUDE", "claude-box"),),
+}
 RUN = "after-landing"  # the claim's run and task: `fab slot claim N after-landing after-landing`
 RECORD = "after-landing.jsonl"  # under FAB_HOME
 STATE = "after-landing"  # FAB_HOME/after-landing/: state.json and one directory per run
@@ -97,12 +104,15 @@ def verdict(states: Iterable[str], faulted: bool) -> str:
 
 class AfterLanding:
     def __init__(self, slot: int, *, home: Path | None = None, sh: Runner = run,
-                 tier_set: tuple[str, ...] = TIER_SET):
+                 tier_set: tuple[str, ...] = TIER_SET, live: bool = False,
+                 known: dict[str, hosts.Host] | None = None):
         """slot: the number of a fab slot (fab.slots.slots_dir() / str(slot)); home: FAB_HOME
         (default fab.log.home()). Load state.json when it exists: {"cursor": the last tip run
         without a faulted pair, or null; "last": {"tip", "verdict"} of the last run, or null;
         "tests": {Case.key: {"result": "pass" or "red", "commit": tip}}}; otherwise start
-        from all three empty. ValueError when the slot does not exist or its claim
+        from all three empty. live adds LIVE's pairs to tier_set; known (default
+        fab.hosts.load()) names this machine and the dispatcher they borrow logins from.
+        ValueError when the slot does not exist or its claim
         (fab.slots.read_claim) is missing or not RUN's: the runner touches only its own slot."""
         self.repo = slots.slots_dir() / str(slot)
         if self.repo.is_symlink() or not self.repo.is_dir():
@@ -112,7 +122,8 @@ class AfterLanding:
             raise ValueError(f"slot {slot} is not claimed for {RUN}")
         self.home = log.home() if home is None else home
         self.sh = sh
-        self.tier_set = tier_set
+        self.tier_set = tier_set + tuple(profile for profile in LIVE if live and profile not in tier_set)
+        self.known = known
         self.log_path = self.home / RECORD
         self.state_path = self.home / STATE / "state.json"
         self.state = (json.loads(self.state_path.read_text(encoding="utf-8"))
@@ -151,12 +162,18 @@ class AfterLanding:
             started = time.monotonic()
             try:
                 code = tiers.run_pair(self.repo, target, ["--config-file", str(config), *extra],
-                                      directory / f"{name}.log", sh=self.sh)
+                                      directory / f"{name}.log", sh=self.sh, env=env)
             finally:
                 result["seconds"] += time.monotonic() - started
             return code, report
 
+        borrowed: list[str] = []
+        env: dict[str, str] = {}
         try:
+            if profile in LIVE:
+                stage = "logins"
+                env = self.borrow(profile, tip, directory, borrowed)
+                stage = "junit"
             config_text = (self.repo / tiers.NEXTEST_CONFIG).read_text(encoding="utf-8")
             configured = tiers.load(self.repo)
             if profile not in configured:
@@ -194,11 +211,54 @@ class AfterLanding:
                     rerun_log = str(directory / f"{name}.log")
                 classified.append((case, state(case.result, rerun,
                                                self.state["tests"].get(case.key)), rerun_log))
-        except (ValueError, OSError) as error:
+        except (ValueError, OSError, logins.Refused) as error:
             result["reason"] = f"{stage}: {error}"
             return result
+        finally:
+            self.give_back(borrowed)
         result.update(status="ran", cases=classified)
         return result
+
+    def _shelf(self, argv: list[str]) -> str:
+        """Run `fab logins ARGV...` on the dispatcher, where the shelf is (here, when this
+        machine is it); its stdout, or Refused with its last error line."""
+        machines = hosts.load() if self.known is None else self.known
+        dispatcher = next((host for host in machines.values() if "dispatcher" in host.roles), None)
+        if dispatcher is None:
+            raise logins.Refused("hosts.toml names no dispatcher")
+        command = ["fab", "logins", *argv]
+        here = hosts.this(machines)
+        done = self.sh(command if here is dispatcher else ssh(dispatcher.ssh, command), timeout=600)
+        if not done.ok:
+            raise logins.Refused((done.err.strip().splitlines() or [f"exit {done.code}"])[-1])
+        return done.out.strip()
+
+    def borrow(self, profile: str, tip: str, directory: Path, borrowed: list[str]) -> dict[str, str]:
+        """Borrow a login for each of LIVE[profile]'s variables, lent to this machine at
+        directory/logins/<variable> (a directory login there, a file login inside it under its
+        kind's name) for holder after-landing/<tip[:12]>/<profile>; append each id to borrowed
+        as it is lent; return the variables. Refused when one cannot be borrowed."""
+        machines = hosts.load() if self.known is None else self.known
+        here = hosts.this(machines)
+        if here is None:
+            raise logins.Refused("this machine is not in hosts.toml")
+        env = {}
+        for variable, kind in LIVE[profile]:
+            place = directory / "logins" / variable
+            path = place if logins.KINDS[kind].directory else place / logins.KINDS[kind].item
+            borrowed.append(self._shelf(["borrow", kind, here.name, "--path", str(path),
+                                         "--holder", f"{RUN}/{tip[:12]}/{profile}"]))
+            env[variable] = str(path)
+        return env
+
+    def give_back(self, borrowed: list[str]) -> None:
+        """Return each borrowed login; one that cannot be returned stays lent to its run (custody
+        says where it is) and is recorded as an `error` record for a person."""
+        for name in borrowed:
+            try:
+                self._shelf(["return", name])
+            except logins.Refused as error:
+                log.append("error", path=self.log_path, error=f"login {name} not returned: {error}")
 
     def check(self, tip: str) -> dict:
         """One run of the tier set at tip, recorded, the state saved; return the run record.
@@ -327,7 +387,7 @@ def install(*, sh: Runner = run, directory: Path | None = None, checkout: Path |
 
 
 def main(argv: list[str]) -> int:
-    """`fab after-landing run|once --slot N` (run stops at FAB_HOME/after-landing.stop),
+    """`fab after-landing run|once --slot N [--live]` (run stops at FAB_HOME/after-landing.stop),
     `fab after-landing log [--since TS]` (RECORD's records at or after TS, one JSON object per
     line, as `fab queue log` prints) and `fab after-landing install` (install() at a deploy,
     printing its line). Exit 0; 1 with `fab after-landing: <error>` on stderr for an OSError,
@@ -335,7 +395,9 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="fab after-landing")
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "once"):
-        commands.add_parser(command).add_argument("--slot", type=int, required=True)
+        running = commands.add_parser(command)
+        running.add_argument("--slot", type=int, required=True)
+        running.add_argument("--live", action="store_true", help="also LIVE's pairs, on logins from the shelf")
     commands.add_parser("log").add_argument("--since")
     commands.add_parser("install")
     try:
@@ -350,7 +412,7 @@ def main(argv: list[str]) -> int:
                 if args.since is None or entry["ts"] >= args.since:
                     print(json.dumps(entry, ensure_ascii=False))
         else:
-            runner = AfterLanding(args.slot)
+            runner = AfterLanding(args.slot, live=args.live)
             if args.command == "once":
                 runner.cycle()
             else:

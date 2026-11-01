@@ -14,6 +14,7 @@ import os
 import re
 import sys
 import tomllib
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -181,11 +182,13 @@ def target_directory(repo: Path, *, sh: Runner = run) -> Path:
         raise TierError(f"tiers: {repo}: cargo metadata target_directory: {error}") from error
 
 
-def steps(repo: Path, target_pair: Pair, extra: list[str], target: Path | None) -> list[Step]:
+def steps(repo: Path, target_pair: Pair, extra: list[str], target: Path | None,
+          env: Mapping[str, str] | None = None) -> list[Step]:
     """The commands that run a pair, in order, each a fab.gate.Step run in repo.
 
     Every argv starts `env NEXTEST_DOUBLE_SPAWN=0`, then the bundle variable (when the pair
-    has a bundle) and each binary's env, as VAR=<absolute path>, then the command. With a
+    has a bundle) and each binary's env, as VAR=<absolute path>, then env's (a live pair's
+    logins, fab.after_landing.LIVE) as VAR=<value>, then the command. With a
     bundle: `wasm module` (heavy cargo build --target WASM <features> -p <package>), `bundle
     tool` (heavy cargo build -p skein-ui-bundle), `browser bundle` (<target>/debug/skein-ui-bundle
     --module <target>/WASM/debug/<package with - as _>.wasm --name <that name> --prefix /bundle/
@@ -202,6 +205,7 @@ def steps(repo: Path, target_pair: Pair, extra: list[str], target: Path | None) 
         prefix.append(f"{browser.variable}={target / browser.out}")
     prefix.extend(f"{binary.env}={target / 'debug' / binary.bin}"
                   for binary in target_pair.binaries if binary.env is not None)
+    prefix.extend(f"{name}={value}" for name, value in (env or {}).items())
     commands = []
 
     def add(name: str, *argv: str):
@@ -225,9 +229,10 @@ def steps(repo: Path, target_pair: Pair, extra: list[str], target: Path | None) 
     return commands
 
 
-def run_pair(repo: Path, target_pair: Pair, extra: list[str], log: Path, *, sh: Runner = run) -> int:
+def run_pair(repo: Path, target_pair: Pair, extra: list[str], log: Path, *, sh: Runner = run,
+             env: Mapping[str, str] | None = None) -> int:
     """Run a pair in the checkout at repo: target_directory when the pair has a bundle or a
-    binary with env, then steps through fab.gate.run_steps into log (which stops at the first
+    binary with env, then steps (with env) through fab.gate.run_steps into log (which stops at the first
     red). Return the nextest step's exit code when every earlier step passed; REFUSED when a
     prerequisite failed, or when target_directory failed (its error appended to log)."""
     log.parent.mkdir(parents=True, exist_ok=True)
@@ -238,7 +243,7 @@ def run_pair(repo: Path, target_pair: Pair, extra: list[str], log: Path, *, sh: 
         except TierError as error:
             atomic.extend(log, f"{error}\n")
             return REFUSED
-    outcomes = run_steps(steps(repo, target_pair, extra, target), log, sh=sh)
+    outcomes = run_steps(steps(repo, target_pair, extra, target, env), log, sh=sh)
     return outcomes[-1].code if outcomes[-1].name == "nextest" else REFUSED
 
 
