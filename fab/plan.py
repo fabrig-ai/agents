@@ -8,7 +8,7 @@ from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fab import log
+from fab import findings, log
 
 LANDINGS = ("queue", "integration")
 OPTIONS = ("landing", "ready", "reviews", "direct", "early")
@@ -405,6 +405,8 @@ def _ladder_problems(plan: Plan, plan_dir: Path | None) -> list[str]:
         if rung.id in seen_rungs:
             issues.append(f"rung {rung.id} is used twice")
         seen_rungs.add(rung.id)
+        if rung.backend not in findings.BACKENDS:
+            issues.append(f"rung {rung.id} names unknown backend {rung.backend}")
         for need in rung.after:
             if need not in plan.rungs:
                 issues.append(f"rung {rung.id} after names unknown rung {need}")

@@ -475,13 +475,15 @@ class LadderPlanTest(unittest.TestCase):
                                             "docs/design/debt/ladder.md"))
         self.assertEqual(problems(plan, tasks, self.directory), [])
 
-    def test_rung_after_defaults_to_none_and_backend_is_not_checked_here(self):
+    def test_rung_after_defaults_to_none_and_unknown_backend_is_a_problem(self):
         text = self.text.replace('after = ["b0"]', '').replace('backend = "claude-forgejo"',
                                                                          'backend = "future-backend"')
         atomic.write(self.path, text)
         plan = load_plan(self.path)
         self.assertEqual(plan.rungs["b1"].after, ())
-        self.assertEqual(problems(plan, {}, self.directory), [])
+        self.assertEqual(problems(plan, {}, self.directory),
+                         ["rung b0 names unknown backend future-backend",
+                          "rung b1 names unknown backend future-backend"])
 
     def test_fixture_custom_order_and_brief_text(self):
         directory = write_ladder(self.directory, "ordered",

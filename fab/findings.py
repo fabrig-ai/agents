@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from fab.plan import Plan
 
 BACKENDS: dict[str, tuple[str, ...]] = {  # login kinds borrowed by each walk backend
     "chatgpt-forgejo": ("chatgpt",),
@@ -274,3 +279,216 @@ def target(found: Mapping[str, Finding], identifier: str) -> str:
 def mergeable(finding: Finding) -> bool:
     """Whether a duplicate merges here rather than being filed again (docs/design/fab.md, 13.15)."""
     return finding.state in ("new", "asked", "backlog", "foreman", "deciding", "decided", "repairing")
+
+
+@dataclass(frozen=True)
+class RungState:
+    """A rung's first applicable state and its display detail (docs/design/fab.md, 13.15)."""
+
+    rung: str
+    backend: str
+    edition: str
+    state: str
+    walk: str = ""
+    since: str = ""
+    waits: tuple[str, ...] = ()
+    holders: tuple[tuple[str, str], ...] = ()
+    due: str = ""
+    at: str = ""
+    commit: str = ""
+
+
+def holders(found: Mapping[str, Finding], rung: str) -> tuple[Finding, ...]:
+    """Holding targets once, in their sightings' raise order (docs/design/fab.md, 13.15).
+
+    A merged sighting carries its own blocking/verdict test through the target's
+    state and open action, even when the target's own walk would hold nothing.
+    """
+    holding: dict[str, Finding] = {}
+    for finding in found.values():
+        if finding.rung != rung:
+            continue
+        destination = found.get(target(found, finding.id))
+        if destination is None or destination.state == "merged":
+            continue
+        if replace(finding, state=destination.state, action=destination.action).holds:
+            holding.setdefault(destination.id, destination)
+    return tuple(holding.values())
+
+
+@dataclass(frozen=True)
+class _Walk:
+    """A validated start and its first following end's log position and verdict."""
+
+    started: dict
+    end: int = -1
+    verdict: str = ""
+
+
+def _walks(plan: Plan, events: list[dict]) -> list[_Walk]:
+    """This plan's walks, retaining first starts and ends in log order."""
+    walks: dict[str, _Walk] = {}
+    for position, event in enumerate(events):
+        if event.get("ev") == "walk.started":
+            fields = "ts walk draft rung backend edition commit by".split()
+            if not all(isinstance(event.get(field), str) for field in fields):
+                continue
+            if (event["draft"] == plan.draft and event["rung"] in plan.rungs
+                    and event["backend"] in BACKENDS):
+                walks.setdefault(event["walk"], _Walk(event))
+        elif event.get("ev") == "walk.ended" and _valid(event):
+            walk = walks.get(event["walk"])
+            if walk is not None and walk.end < 0:
+                walks[event["walk"]] = replace(walk, end=position, verdict=event["verdict"])
+    return list(walks.values())
+
+
+def _passed_at(plan: Plan, events: list[dict], editions: Mapping[str, str],
+               walks: list[_Walk], end: int) -> list[dict]:
+    """Logged passes still standing at a log position, ignoring other drafts and editions."""
+    failed = {}
+    for walk in walks:
+        if walk.verdict == "fail" and walk.end <= end:
+            rung = walk.started["rung"]
+            failed[rung] = max(failed.get(rung, -1), walk.end)
+    passed = []
+    for position, event in enumerate(events[:end + 1]):
+        if (event.get("ev") == "rung.passed" and _valid(event)
+                and event["draft"] == plan.draft and event["rung"] in plan.rungs
+                and event["rung"] in editions
+                and event["edition"] == editions[event["rung"]]
+                and position > failed.get(event["rung"], -1)):
+            passed.append(event)
+    return passed
+
+
+def _plan_findings(plan: Plan, events: list[dict]) -> dict[str, Finding]:
+    """Keep this draft's findings, including targets raised on another rung."""
+    return {identifier: finding for identifier, finding in findings(events).items()
+            if finding.draft == plan.draft}
+
+
+def rungs(plan: Plan, events: list[dict], editions: Mapping[str, str], now: str) -> list[RungState]:
+    """Each readable rung's first applicable state, in plan order (docs/design/fab.md, 13.15).
+
+    An unended walk is in flight for less than WALK_HOURS, even if its brief changed.
+    With several in flight, show the earliest start in log order. Repair recency
+    likewise follows the log, including repairs reached through merged sightings.
+    """
+    walks = _walks(plan, events)
+    current = [w for w in walks if w.started["edition"] == editions.get(w.started["rung"])]
+    passed = {event["rung"]: event
+              for event in _passed_at(plan, events, editions, current, len(events) - 1)}
+    found = _plan_findings(plan, events)
+    states = []
+    for rung in plan.rungs.values():
+        if rung.id not in editions:
+            continue
+        state = RungState(rung.id, rung.backend, editions[rung.id], "due")
+        if rung.id in passed:
+            event = passed[rung.id]
+            states.append(replace(state, state="passed", walk=event["walk"], commit=event["commit"]))
+            continue
+        own = [walk for walk in walks if walk.started["rung"] == rung.id]
+        walking = None
+        for walk in own:
+            if walk.end >= 0:
+                continue
+            try:
+                age = datetime.fromisoformat(now) - datetime.fromisoformat(walk.started["ts"])
+            except (ValueError, TypeError):
+                continue
+            if timedelta() <= age < timedelta(hours=WALK_HOURS):
+                walking = walk.started
+                break
+        waits = tuple(need for need in rung.after if need not in passed)
+        holding = holders(found, rung.id)
+        if walking is not None:
+            state = replace(state, state="walking", walk=walking["walk"], since=walking["ts"])
+        elif waits:
+            state = replace(state, state="waiting", waits=waits)
+        elif holding:
+            state = replace(state, state="holding", holders=tuple((f.id, f.state) for f in holding))
+        else:
+            targets = {target(found, f.id) for f in found.values() if f.rung == rung.id}
+            repairs = {f"{found[key].draft}/{key}": found[key].landed
+                       for key in targets if key in found and found[key].landed}
+            at = ""
+            for event in events:
+                if (event.get("ev") == "branch.landed" and _valid(event)
+                        and repairs.get(event["task"]) == event["main"]):
+                    at = event["main"]
+            rerun = any(w.verdict in ("pass", "fail") and w.started["edition"] == state.edition
+                        for w in own)
+            due = "rerun" if rerun else "first walk"
+            state = replace(state, due=due, at=at)
+        states.append(state)
+    return states
+
+
+def passes(plan: Plan, events: list[dict], editions: Mapping[str, str]) -> list[dict]:
+    """Unlogged rerun passes with satisfied lower rungs (docs/design/fab.md, 13.15).
+
+    Holders and existing lower passes are read at each walk's end. Same-commit
+    passes close from the bottom up regardless of plan or completion order;
+    unsupported cycles never qualify. Later failures disqualify earlier walks.
+    """
+    walks = [w for w in _walks(plan, events)
+             if w.started["edition"] == editions.get(w.started["rung"])]
+    ended = sorted((walk for walk in walks if walk.end >= 0), key=lambda walk: walk.end)
+    failed = {walk.started["rung"]: walk.end for walk in ended if walk.verdict == "fail"}
+    seen = set()
+    candidates = []
+    for walk in ended:
+        rung = walk.started["rung"]
+        if (walk.verdict == "pass" and rung in seen and failed.get(rung, -1) < walk.end
+                and not holders(_plan_findings(plan, events[:walk.end + 1]), rung)):
+            candidates.append(walk)
+        if walk.verdict in ("pass", "fail"):
+            seen.add(rung)
+    current = {(event["rung"], event["commit"])
+               for event in _passed_at(plan, events, editions, walks, len(events) - 1)}
+    at_end = {walk.end: {event["rung"]
+                        for event in _passed_at(plan, events, editions, walks, walk.end)}
+              for walk in candidates}
+    accepted: list[_Walk] = []
+    pending = list(candidates)
+    while pending:
+        remaining = []
+        for walk in pending:
+            start = walk.started
+            if all(need in at_end[walk.end]
+                   or (need, start["commit"]) in current
+                   or any(lower.started["rung"] == need
+                          and lower.started["commit"] == start["commit"] for lower in accepted)
+                   for need in plan.rungs[start["rung"]].after):
+                accepted.append(walk)
+            else:
+                remaining.append(walk)
+        if len(remaining) == len(pending):
+            break
+        pending = remaining
+    logged = {event["walk"] for event in events
+              if (event.get("ev") == "rung.passed" and _valid(event)
+                  and event["draft"] == plan.draft and event["rung"] in plan.rungs
+                  and event["rung"] in editions and event["edition"] == editions[event["rung"]])}
+    return [{field: walk.started[field] for field in ("draft", "rung", "walk", "edition", "commit")}
+            for walk in accepted if walk.started["walk"] not in logged]
+
+
+def line(state: RungState) -> str:
+    """The shared command/page line for a rung's state (docs/design/fab.md, 13.15)."""
+    prefix = f"{state.rung} ({state.backend}), edition {state.edition}: "
+    if state.state == "passed":
+        detail = f"passed at {state.commit[:12]} ({state.walk})"
+    elif state.state == "walking":
+        detail = f"walking: {state.walk} since {state.since}"
+    elif state.state == "waiting":
+        detail = "waiting for " + ", ".join(state.waits)
+    elif state.state == "holding":
+        detail = "holding: " + ", ".join(f"{identifier} {status}" for identifier, status in state.holders)
+    else:
+        detail = "due: " + state.due
+        if state.due == "rerun" and state.at:
+            detail += f" at a main containing {state.at[:12]}"
+    return prefix + detail
