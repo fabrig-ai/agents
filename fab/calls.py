@@ -350,8 +350,8 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
         foreman_line = f"- Foreman: `{question['foreman']}`\n" if question.get("foreman") else ""
         sections.append((f"Question: {task.id} ({run_id})",
                          f"- Task: {task.id}\n- Run: {run_id}\n- Report: `{report_path}`\n{foreman_line}\n"
-                         f"{question['text']}\n\n## Task spec ({label})\n\n"
-                         f"{(root / path).read_text(encoding='utf-8')}"))
+                         f"{question['text']}\n\n## Task spec ({label if task.path else 'none: its body'})\n\n"
+                         f"{(root / path).read_text(encoding='utf-8') if task.path else task.body}"))
     sections.append(("Inventory", render_inventory(inventory(root))))
     return _brief(sections)
 

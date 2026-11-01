@@ -244,6 +244,8 @@
   then hit the call's 40-minute limit before they ended; the limit is now
   60 minutes); a park at the run limit goes to the answerer, never the
   foreman, and its answer grants fresh runs (the playground replay's loop);
+  a repair's question queues and its logged answer folds into its body (an
+  answer call cannot yet record one);
   a run may leave what is not its own (13.12: the implementer's allowed
   edits and `## Left`, the foreman's `Accept:`, the cut's contracts note;
   not run live yet);

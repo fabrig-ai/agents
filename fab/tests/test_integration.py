@@ -55,6 +55,16 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(integration.repair_tasks(replace(PLAN, landing="queue"), events, reports), {})
         self.assertEqual(len(integration.repair_tasks(PLAN, events, {})), 2)
 
+    def test_a_repairs_answers_fold_into_its_body(self):
+        events = [merged()] + checked(1, "failed")
+        events += [dict(ev="question.answered", task="demo/repair-1", answer="Update the journeys."),
+                   dict(ev="question.answered", task="demo/repair-1"),
+                   dict(ev="question.answered", task="demo/other", answer="Not this one.")]
+        body = integration.repair_tasks(PLAN, events, {})["demo/repair-1"].body
+        self.assertTrue(body.endswith("## Answers\n\n- Update the journeys.\n"))
+        self.assertNotIn("Not this one", body)
+        self.assertNotIn("## Answers", integration.repair_tasks(PLAN, events[:-3], {})["demo/repair-1"].body)
+
     def test_a_check_before_any_task_merged_is_ignored(self):
         cut = merged("cut-tip", task="calls/cut-1")
         self.assertIsNone(integration.next_step(PLAN, {}, [cut]))

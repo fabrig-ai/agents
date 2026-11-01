@@ -60,6 +60,8 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str])
 
     Repairs have no spec file and may change any file. Their acceptance requires the
     failed step green on the trunk with the change, running the narrowest checks first.
+    An answer to a repair's question (a question.answered with `answer`) has no spec to go
+    into, so it is folded into the body's Answers section, in log order.
     """
     if plan.landing != "integration":
         return {}
@@ -74,6 +76,10 @@ def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str])
                 f"{report}\n\n## Acceptance\n\n"
                 "The failing step must be green on the trunk with this change. "
                 "Run the narrowest checks first, then the failing step itself.\n")
+        answers = [event["answer"] for event in events if event.get("ev") == "question.answered"
+                   and event.get("task") == identifier and event.get("answer")]
+        if answers:
+            body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers) + "\n"
         tasks[identifier] = Task(identifier, "integration", "repair", plan.repo, (),
                                  ("**",), "high", 20, body, "")
     return tasks

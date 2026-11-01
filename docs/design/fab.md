@@ -1173,6 +1173,12 @@ only as tweaks once a replay matches its run.
     and the trunk is checked again. A third red parks the plan with a
     question.
   - A check run counts as the draft's run in flight and takes a place.
+  - A repair has no spec file, so its question skips the foreman (no
+    options to settle by) and queues, and an answer logged with `answer`
+    is folded into the repair's body under Answers, which its next run
+    reads (the playground replay, 11-01: a repair's question crashed the
+    foreman on its empty spec path, every tick). An answer call cannot yet
+    record a repair's answer: it writes answers into spec files.
 - **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan options
   that differ from the defaults (`ready=false` for a replay) to the cut: its brief says to write them into plan.toml verbatim, and its
   `call.started` carries them (`options`), so the tick reads `landing` and

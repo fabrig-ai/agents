@@ -93,7 +93,8 @@ def questions(tasks: Mapping[str, Task], events: Iterable[dict]) -> list[Questio
                 asked.append((position, event))
         elif kind == "question.answered" and "task" in event:
             answered[event["task"]] = position
-    return [_question(event, position, starts, ends, foremen, reports)
+    # A task with no spec file (an integration repair) has no options to settle by: it queues.
+    return [_question(event, position, starts, ends, foremen, reports, specless=not tasks[event["task"]].path)
             for position, event in asked if answered.get(event["task"], -1) < position]
 
 
@@ -227,12 +228,12 @@ def commit(question: Question, task: Task, text: str, checkout: Path, *, run_id:
 
 
 def _question(event: dict, position: int, starts: dict, ends: dict, foremen: dict,
-              reports: dict) -> Question:
+              reports: dict, specless: bool = False) -> Question:
     """Resolve one question against the run indexes without comparing timestamps."""
     task, run_id, stamp = event["task"], event["run"], event["ts"]
     state, since, foreman, report = "queued", stamp, None, ""
     started, ended = starts.get(run_id), ends.get(run_id)
-    if (not event.get("park") and started is not None and ended is not None and started[0] < position
+    if (not event.get("park") and not specless and started is not None and ended is not None and started[0] < position
             and ended[0] < position and started[1]["kind"] in ASKING
             and ended[1]["outcome"] == "question"):
         state = "foreman"

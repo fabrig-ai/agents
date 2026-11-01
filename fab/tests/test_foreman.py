@@ -74,6 +74,10 @@ class QuestionsTest(unittest.TestCase):
                                          text=QUESTION.text, park=True)]
         self.assertEqual(self.question(events), replace(QUESTION, state="queued"))
 
+    def test_a_task_without_a_spec_file_queues(self):
+        specless = replace(TASK, path="")
+        self.assertEqual(foreman.questions({TASK.id: specless}, _asking())[0].state, "queued")
+
     def test_review_question_queues_since_asked(self):
         self.assertEqual(self.question(_asking("review")), replace(QUESTION, state="queued"))
 
