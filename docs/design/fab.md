@@ -1212,6 +1212,10 @@ login that still works reused across them before more are signed in.
   `logins/skein-live`). They read the access token and never refresh it,
   so fab refreshes each first where it was lent (`fab logins account KIND
   --home DIR --validate`); one that does not refresh faults the pair.
+  The after-landing unit runs `--live` (the user, 11-01), on the cheapest
+  models: temper's and smith's live tests pick `gpt-6-luna` and
+  `claude-haiku-5-5` themselves, and `fab.after_landing.CHEAP` sets
+  skein's `SKEIN_TEST_LIVE_*_MODEL` to the same.
 - **Checks by the products themselves:** `fab logins check ID` asks Codex's
   app-server (`account/read`, `account/rateLimits/read`: the account, the
   plan, the weekly window's percent used) or `claude auth status`. A lent

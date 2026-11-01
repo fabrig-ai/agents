@@ -35,6 +35,12 @@ LIVE = {
     "live-smith": (("SMITH_LIVE_CLAUDE", "claude-box"),),
     "live-skein": (("SKEIN_TEST_LIVE_OPENAI_AUTH", "codex"), ("SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS", "claude")),
 }
+# The cheapest models, for live pairs whose tests take theirs from the environment (the
+# user, 11-01: cheap models such as luna). temper's and smith's live tests pick gpt-6-luna and
+# claude-haiku-5-5 themselves.
+CHEAP = {
+    "live-skein": {"SKEIN_TEST_LIVE_OPENAI_MODEL": "gpt-6-luna", "SKEIN_TEST_LIVE_ANTHROPIC_MODEL": "claude-haiku-5-5"},
+}
 # Kinds whose tests read the access token and never refresh it: fab refreshes it first.
 REFRESHED = ("codex", "claude")
 RUN = "after-landing"  # the claim's run and task: `fab slot claim N after-landing after-landing`
@@ -263,7 +269,7 @@ class AfterLanding:
                 if "error" in found:
                     raise logins.Refused(f"{borrowed[-1]} did not refresh: {found['error']}")
             env[variable] = str(path)
-        return env
+        return {**env, **CHEAP.get(profile, {})}
 
     def give_back(self, borrowed: list[str]) -> None:
         """Return each borrowed login; one that cannot be returned stays lent to its run (custody
@@ -388,9 +394,10 @@ def imported(entry: dict) -> dict | None:
 
 
 def service(slot: int) -> units.Service:
-    """UNIT, which runs `fab after-landing run --slot <slot>` and drains for up to DRAIN."""
+    """UNIT, which runs `fab after-landing run --slot <slot> --live` (the live pairs too, the
+    user 11-01) and drains for up to DRAIN."""
     return units.Service(UNIT, "fabrig's slow tiers on each new main", ROLE,
-                         (RUN, "run", "--slot", str(slot)), "after-landing.stop", DRAIN)
+                         (RUN, "run", "--slot", str(slot), "--live"), "after-landing.stop", DRAIN)
 
 
 def install(*, sh: Runner = run, directory: Path | None = None, checkout: Path | None = None,

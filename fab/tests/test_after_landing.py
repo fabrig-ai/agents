@@ -548,7 +548,9 @@ class AfterLandingTest(unittest.TestCase):
         openai, anthropic = directory / "logins/SKEIN_TEST_LIVE_OPENAI_AUTH", \
             directory / "logins/SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS"
         self.assertEqual(skein, {"SKEIN_TEST_LIVE_OPENAI_AUTH": str(openai / "auth.json"),
-                                 "SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS": str(anthropic / ".credentials.json")})
+                                 "SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS": str(anthropic / ".credentials.json"),
+                                 "SKEIN_TEST_LIVE_OPENAI_MODEL": "gpt-6-luna",
+                                 "SKEIN_TEST_LIVE_ANTHROPIC_MODEL": "claude-haiku-5-5"})
         self.assertEqual(self.refreshes, [["codex", "--home", str(openai), "--validate"],
                                           ["claude", "--home", str(anthropic), "--validate"]])
         holder = f"after-landing/{self.tip[:12]}/live-temper"
@@ -636,7 +638,7 @@ class InstallTest(unittest.TestCase):
         self.assertTrue(line.endswith("fab-after-landing.service enabled and restarting"))
         self.assertEqual(slots.read_claim(7).run, after_landing.RUN)
         text = (self.directory / after_landing.UNIT).read_text()
-        self.assertIn('ExecStart=/usr/bin/bash -lc "exec /i/bin/fab after-landing run --slot 7"', text)
+        self.assertIn('ExecStart=/usr/bin/bash -lc "exec /i/bin/fab after-landing run --slot 7 --live"', text)
         self.assertIn("TimeoutStopSec=2h\n", text)
         self.assertIn("after-landing.stop", text)
         self.install()  # the claim it already holds is kept

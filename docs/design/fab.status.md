@@ -27,8 +27,8 @@
   retire, check and borrow; live on hel8 since 10-31 23:3xZ, holding every
   machine's logins, the user's new sign-ins and QA's six (moved 11-01).
   `fab after-landing --live` borrows them for `live-temper`, `live-smith`
-  and `live-skein` (whose tests read logins' files once fabrig's
-  `ready/logins/skein-live` lands); the after-landing unit runs without it.
+  and `live-skein` (whose tests read logins' files since fabrig 978e17e);
+  the after-landing unit on hetzner10 runs with it, on the cheapest models.
 
 ## Gaps and departures
 
