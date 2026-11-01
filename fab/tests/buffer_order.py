@@ -1,4 +1,4 @@
-"""The vocabulary of the buffer's order tests (docs/design/fab.md, 13.10): plans with slices
+"""The vocabulary of the buffer's order tests (docs/design/fab-tick.md, 7): plans with slices
 and contract parts, specs that may be consolidations, and an assertion on the order.
 
 test_buffer.py and the dispatcher's order tests speak in these; add a builder here rather

@@ -1,4 +1,4 @@
-"""Test helpers: a fake runner, a temporary home and a git fixture (docs/design/fab.md, 8)."""
+"""Test helpers: a fake runner, a temporary home and a git fixture (docs/design/fab.md, 4)."""
 
 from __future__ import annotations
 
@@ -119,7 +119,7 @@ def git_pair(directory: Path) -> tuple[Path, Path]:
     return origin, clone
 
 
-# Several plans in one tick (docs/design/fab.md, 13.4): plans on disk and the log's records.
+# Several plans in one tick (docs/design/fab-tick.md, 5): plans on disk and the log's records.
 
 def write_plan(directory: Path, draft: str, parts: Mapping[str, Sequence[str]] | None = None, *,
                contracts: Sequence[str] = (), tasks: Sequence[str] = (), repo: str = "agents") -> Path:

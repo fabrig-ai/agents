@@ -1,4 +1,4 @@
-"""Accounting: what Claude and Codex spend, folded from the log (docs/design/fab.md, 13.5).
+"""Accounting: what Claude and Codex spend, folded from the log (docs/design/fab-reports.md, 3).
 
 The producers record it: a call's call.ended carries Claude's usage (`fab.calls.claude_usage`),
 a run's run.ended carries Codex's tokens (`fab.codex.tokens_field`). This module only reads
@@ -171,7 +171,7 @@ def call_rows(draft: str, events: list[dict], window: Window) -> list[tuple]:
 
 def hand_usage(draft: str, *, home: Path | None = None,
                projects: Path | None = None) -> tuple[dict[str, Figure], list[str]]:
-    """Read the draft's whole hand sessions, apart from windowed calls (13.11).
+    """Read the draft's whole hand sessions, apart from windowed calls (fab-integration.md 2).
 
     home defaults to FAB_HOME, projects to ~/.claude/projects. No matching sessions
     gives no figures. Return input (including both caches), output and Claude weight M,

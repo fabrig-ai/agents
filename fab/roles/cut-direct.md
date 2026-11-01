@@ -39,7 +39,7 @@ come before the ones above where they differ.
 - **A task's kind:** `interface` when it changes or removes the signature
   of an existing public item (a parameter added to a public function
   counts), since the shape gate refuses that in any other kind
-  (`docs/design/fab.md`, 12); `feature` when it only adds. Two of the
+  (`docs/design/fab-gates.md`, 2); `feature` when it only adds. Two of the
   findings-loop cut's tasks were refused for it (11-01).
 - **Shared notes** go once in the plan's `notes/`: `common.md` (the
   standing rules every implementer follows: scope, the checks, the code

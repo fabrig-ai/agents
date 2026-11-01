@@ -1,4 +1,4 @@
-"""The landing report: the merge queue's metrics from its record (docs/design/fab.md, 10).
+"""The landing report: the merge queue's metrics from its record (docs/design/fab-reports.md, 2).
 
 The metrics are the landing draft's (docs/design/draft/landing-pipeline.md, 3) that the
 queue's record holds: its `batch`, `landed` and `rejected` records (fab.queue.Queue.attempt),
@@ -263,7 +263,7 @@ def _red_figures(events: list[dict], window: Window) -> dict[str, Figure]:
 
 
 def _qa_figures(events: list[dict], window: Window) -> dict[str, Figure]:
-    """Count raw QA records by ts in the window (docs/design/fab.md, 10).
+    """Count raw QA records by ts in the window (docs/design/fab-reports.md, 2).
 
     Join failed walk endings to their starts' draft and rung, then to that rung's
     next pass in log order. Include failures before the window for passes within it;
@@ -351,7 +351,7 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
       landing, over those rejected at least once; None when none.
     - lane_wait, disk_wait: fab.report.heavy_waits over the hosts with role gate.
     - after-landing and hand-pushed decisions: _red_figures; raw QA counts and failed-walk
-      hours to the next rung pass: _qa_figures (docs/design/fab.md, 10).
+      hours to the next rung pass: _qa_figures (docs/design/fab-reports.md, 2).
     Counts are ints; minutes, hours, rates and percentages are floats."""
     records = within(sources.queue, window)
     all_batches = [record for record in records if record.get("ev") == "batch"]

@@ -1,4 +1,4 @@
-"""Rust branch digests and crate inventories (docs/design/fab.md, 13.11).
+"""Rust branch digests and crate inventories (docs/design/fab-integration.md, 2).
 
 Text scans are deliberately smaller than a Rust parser. Git and the old-forms
 ratchet run only through the runner; build reads two already materialized trees.

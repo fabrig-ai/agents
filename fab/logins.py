@@ -1,4 +1,4 @@
-"""Logins: the machines' Claude and Codex sign-ins and QA's held logins (docs/design/fab.md, 13.13).
+"""Logins: the machines' Claude and Codex sign-ins and QA's held logins (docs/design/fab-machines.md, 3).
 
 Every login rests in one shelf on the dispatcher's machine and is lent out: to a machine, at the
 path its tools use, or to a run, at a path of the run's. Custody is the event log's `login.*`

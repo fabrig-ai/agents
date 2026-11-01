@@ -1,4 +1,4 @@
-"""QA finding lifecycle over built records (docs/design/fab.md, 8 and 13.15)."""
+"""QA finding lifecycle over built records (docs/design/fab.md, 4; fab-qa.md, 2)."""
 
 import copy
 import unittest

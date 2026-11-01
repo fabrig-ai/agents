@@ -1,4 +1,4 @@
-"""Selection rules and command seams (docs/design/fab.md, 6 and 8)."""
+"""Selection rules and command seams (docs/design/fab-landing.md, 2; fab.md, 4)."""
 
 import json
 import unittest

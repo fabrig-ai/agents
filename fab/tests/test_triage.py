@@ -1,4 +1,4 @@
-"""Pure triage rules over temporary-home log fixtures (docs/design/fab.md, 8 and 13.15)."""
+"""Pure triage rules over temporary-home log fixtures (docs/design/fab.md, 4; fab-qa.md, 2)."""
 
 import copy
 import unittest

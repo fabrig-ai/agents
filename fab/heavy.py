@@ -1,4 +1,4 @@
-"""heavy: every build through admission (docs/design/fab.md, 7).
+"""heavy: every build through admission (docs/design/fab-machines.md, 2).
 
 `heavy [--gate] [--] COMMAND...` waits for its lane and for disk, then runs COMMAND in a
 systemd scope with its lane's CPU weight, passing its output and exit code through.

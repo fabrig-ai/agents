@@ -1,4 +1,4 @@
-"""A task spec changed on a branch of the plan's repository, for the tick to land (13.1).
+"""A task spec changed on a branch of the plan's repository, for the tick to land (fab-calls.md 2).
 
 The foreman's answers (fab.foreman) and its repair and rebase sections (fab.repairs) are
 written into task specs the same way: a worktree of the plan's checkout at origin/<trunk>, the

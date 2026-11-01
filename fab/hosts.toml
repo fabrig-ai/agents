@@ -1,5 +1,5 @@
-# The machines fab uses (docs/design/fab.md, 2 and 7).
-# places: Codex runs at once, a hint a calm builder may pass (docs/design/fab.md, 13.2);
+# The machines fab uses (docs/design/fab.md, 2; fab-machines.md, 2).
+# places: Codex runs at once, a hint a calm builder may pass (docs/design/fab-tick.md, 4);
 # builds: builds heavy admits at once.
 # Disk figures in GB: the builder's budget is kache_gb + slots x slot_bound_gb + headroom_gb.
 
@@ -36,7 +36,7 @@ builds = 4
 ssh = "free@2.29.110.236"
 hostname = "debian-16gb-hel1-8"
 roles = ["gate", "builder", "after-landing"]
-after_landing_slot = 7  # claimed for fab after-landing for good (docs/design/fab.md, 11)
+after_landing_slot = 7  # claimed for fab after-landing for good (docs/design/fab-after-landing.md, 2)
 disk_gb = 305
 places = 4
 slots = 7

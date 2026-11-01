@@ -1,4 +1,4 @@
-"""The integration trunk's end check and repairs (docs/design/fab.md, 13.12)."""
+"""The integration trunk's end check and repairs (docs/design/fab-integration.md, 3)."""
 
 from __future__ import annotations
 
@@ -28,7 +28,7 @@ class Step:
     detail: str
 
 
-MID_EVERY = 10  # task merges since the last check that call for a check along the way (13.12)
+MID_EVERY = 10  # task merges since the last check that call for a check along the way (fab-integration.md 3)
 MID_AFTER = 45  # minutes since the last check (or the first merge) that call for one, with a merge since
 CATCH_AFTER = 30  # minutes since the last catch-up (or first task merge) before catching up again
 MID_WITHOUT = ("fuzzy",)  # a check along the way runs the end check's steps but these
@@ -38,7 +38,7 @@ def trunk_landed(plan: Plan, events: Sequence[dict]) -> bool:
     """Whether the queue logged this draft's integration trunk landed on main.
 
     Only branch.landed for <draft>/integration carrying queue_ts counts; merges
-    into the trunk and its landed tasks do not (docs/design/fab.md, 13.17).
+    into the trunk and its landed tasks do not (docs/design/fab-integration.md, 4).
     """
     return any(event.get("ev") == "branch.landed"
                and event.get("task") == f"{plan.draft}/integration" and "queue_ts" in event
@@ -245,7 +245,7 @@ def _mid_step(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.T
               events: Sequence[dict], tip: str, checks: Sequence[dict], *,
               main: str | None = None) -> Step | None:
     """Catch up first when main moved and CATCH_AFTER elapsed since the last catch-up (or
-    first merge). Otherwise check along the way (13.12) once MID_EVERY task merges came since
+    first merge). Otherwise check along the way (fab-integration.md 3) once MID_EVERY task merges came since
     the last check, or MID_AFTER minutes passed since it (or since the first merge) with one
     merge since; never while a repair is open or for a tip already checked. Its reds never count
     toward the three that stop a plan. Now is the last event's time. Pure."""

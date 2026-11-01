@@ -1,4 +1,4 @@
-"""Ladder plans on disk for findings-loop tests (docs/design/fab.md, 13.15)."""
+"""Ladder plans on disk for findings-loop tests (docs/design/fab-qa.md, 2)."""
 
 import json
 from collections.abc import Mapping, Sequence

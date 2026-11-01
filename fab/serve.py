@@ -1,4 +1,4 @@
-"""The public status page, live from the log (docs/design/fab.md, 13.14)."""
+"""The public status page, live from the log (docs/design/fab-reports.md, 4)."""
 
 from __future__ import annotations
 
@@ -193,7 +193,7 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime,
 
 
 def _public_overlaps(dated: list[tuple[dict, datetime]], known_drafts: Collection[str]) -> list[dict]:
-    """Open pairs as sorted public labels and file counts (docs/design/fab.md, 13.17)."""
+    """Open pairs as sorted public labels and file counts (docs/design/fab-integration.md, 4)."""
     pairs = []
     for pair, record in overlaps.open_pairs([event for event, _ in dated]).items():
         labels = sorted(name if name in known_drafts and DRAFT.fullmatch(name) else "other"
@@ -361,7 +361,7 @@ def _table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = 
 
 
 def _overlaps_panel(pairs: list[dict]) -> str:
-    """Render public overlap labels and counts after Drafts (docs/design/fab.md, 13.17)."""
+    """Render public overlap labels and counts after Drafts (docs/design/fab-integration.md, 4)."""
     body = (_table(("Drafts", "Files"), [(" · ".join(pair["drafts"]), pair["count"]) for pair in pairs])
             if pairs else '<p class="empty">No drafts overlap.</p>')
     return '<h2>Overlaps</h2><div class="panel">' + body + '</div>'

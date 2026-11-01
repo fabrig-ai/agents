@@ -1,4 +1,4 @@
-"""Minimal Rust old-form gates (docs/design/fab.md, 13.11).
+"""Minimal Rust old-form gates (docs/design/fab-integration.md, 2).
 
 Size remains a digest flag. A command or count failure raises so the branch waits.
 """

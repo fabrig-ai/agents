@@ -1,11 +1,11 @@
 """Several plans in one tick: what each draft owns, and what the plans share
-(docs/design/fab.md, 13.4).
+(docs/design/fab-tick.md, 5).
 
 The tick takes every listed plan in turn. Each plan's draft owns its tasks' runs, its
 calls (their subject is the draft or under it) and those calls' review runs; it collects,
 counts and limits only those. Builders' places and the one calm extra place per builder
 are shared: the plans decide in order on the log as the plans before them left it.
-A plan's design calls run in parallel up to its flow target (13.2). Every function here
+A plan's design calls run in parallel up to its flow target (fab-tick.md 4). Every function here
 is pure: it reads only its arguments.
 """
 

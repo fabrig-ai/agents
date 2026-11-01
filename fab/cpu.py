@@ -1,4 +1,4 @@
-"""Reuse the checkout's CPU collector (docs/design/fab.md, 11).
+"""Reuse the checkout's CPU collector (docs/design/fab-after-landing.md, 2).
 
 collect accepts any nextest command/profile/package selection, including the queue
 command. The worker isolates collector cwd and stdout and stays behind fab's runner seam.

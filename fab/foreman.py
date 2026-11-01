@@ -1,4 +1,4 @@
-"""The foreman: questions the task's own options settle never reach the answerer (docs/design/fab.md, 13.1).
+"""The foreman: questions the task's own options settle never reach the answerer (docs/design/fab-calls.md, 2).
 
 A run that ends with a question parks its task. Before the question queues for the
 answerer, a read-only Codex run, the foreman, reads it beside the task spec. When the spec's

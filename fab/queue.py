@@ -1,11 +1,11 @@
-"""fabrig's merge queue (docs/design/fab.md, 6). Runs on the gate machine.
+"""fabrig's merge queue (docs/design/fab-landing.md, 2). Runs on the gate machine.
 
 Ready refs `ready/<draft>/<task>` are taken oldest first, merged on main as one batch, checked
 in the gate lane, and pushed to main; a red batch is bisected. State is re-derived from git
 on every cycle, except the tips already tried and the collateral reds each tip has had, kept in
 FAB_HOME/queue-state.json. Every outcome is recorded in FAB_HOME/queue.jsonl, which the
 dispatcher reads. A batch of one may land on its precheck receipt (fab.receipts), and a red is
-classed before anyone hears it (fab.reds; docs/design/fab.md, 13.8).
+classed before anyone hears it (fab.reds; docs/design/fab-landing.md, 3).
 """
 
 from __future__ import annotations
@@ -234,7 +234,7 @@ class Queue:
         green, red, conflict or error, log), `landed` (branch, tip, main), `rejected` (branch,
         tip, step, tests, log). The checkout is left clean and detached.
 
-        A receipt (docs/design/fab.md, 13.8): when exactly one branch merged, the batch is not a
+        A receipt (docs/design/fab-landing.md, 3): when exactly one branch merged, the batch is not a
         full one (not forced, and batches_since_full + 1 < full_every) and
         fab.receipts.reusable(fab.receipts.load(home, tip), tip, parent) holds, the checks are the
         ratchet steps with --write and their baseline commit as always, then only the `fmt` steps
@@ -259,7 +259,7 @@ class Queue:
         branch landed or rejected loses its state["collateral"] entry.
 
         Whatever the outcome, the attempt ends by bounding the gate's target as a slot's is
-        (docs/design/fab.md, 7): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
+        (docs/design/fab-machines.md, 2): fab.slots.remove(fab.slots.sweep_plan(repo / "target",
         <the attempt's start in ns>)), the bytes freed going into the batch record as freed.
         last_outcome is then the batch record's outcome."""
         return self._attempt(branches)

@@ -1,4 +1,4 @@
-"""The code report: a plan's code-producing metrics from the log (docs/design/fab.md, 10).
+"""The code report: a plan's code-producing metrics from the log (docs/design/fab-reports.md, 2).
 
 The metrics are the code-producing draft's (docs/design/draft/code-producing-pipeline.md,
 3) that the log records: flow, task size in runs and minutes, questions, repairs, waits and
@@ -339,7 +339,7 @@ def part_rows(plan: Plan, tasks: Mapping[str, Task], events: list[dict],
 
 
 def part_times(plan: Plan, tasks: Mapping[str, Task], events: list[dict]) -> list[tuple]:
-    """Finished parts' six minute intervals over the whole log (13.11), in plan order.
+    """Finished parts' six minute intervals over the whole log (fab-integration.md 2), in plan order.
 
     Draft start to skeleton landed and spec landed to first run are part boundaries.
     Run durations and the final run's landing waits per task are summed; a missing

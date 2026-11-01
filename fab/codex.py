@@ -1,4 +1,4 @@
-"""Codex runs as user units on a builder (docs/design/fab.md, 5). Replaces fabrig's codex-run.
+"""Codex runs as user units on a builder (docs/design/fab-tick.md, 3). Replaces fabrig's codex-run.
 
 `fab codex start BRIEF DIR REPORT [--effort E] [--read-only] [--model M]` starts the unit and
 prints `<id> <state>`, as codex-run did, so `fab.run` reads it the same way. The unit runs
@@ -114,7 +114,7 @@ def tokens(events: Sequence[dict]) -> dict[str, int]:
 
 
 def tokens_field(result: str) -> str | None:
-    """run.ended's tokens field (docs/design/fab.md, 13.5) from the text of a run's
+    """run.ended's tokens field (docs/design/fab-reports.md, 3) from the text of a run's
     result.json, as execute writes it: `<input>/<cached>/<output>` from its `tokens` object's
     input_tokens, cached_input_tokens and output_tokens (a key missing or not a non-negative
     int counts 0; Codex's input holds its cached tokens). None when the text is not a JSON

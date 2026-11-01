@@ -1,4 +1,4 @@
-"""The digest core reads small trees, without git (docs/design/fab.md, 8 and 12)."""
+"""The digest core reads small trees, without git (docs/design/fab.md, 4; fab-gates.md, 2)."""
 
 from __future__ import annotations
 

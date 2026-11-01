@@ -1,4 +1,4 @@
-"""Precheck: the queue's checks on a branch merged with a trunk, in its implementer's slot (docs/design/fab.md, 6)."""
+"""Precheck: the queue's checks on a branch merged with a trunk, in its implementer's slot (docs/design/fab-landing.md, 2)."""
 
 from __future__ import annotations
 

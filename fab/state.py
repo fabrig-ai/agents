@@ -1,4 +1,4 @@
-"""A plan's tasks and their status, folded from the specs and the log (docs/design/fab.md, 3-4)."""
+"""A plan's tasks and their status, folded from the specs and the log (docs/design/fab.md, 3; fab-tick.md, 2)."""
 
 from __future__ import annotations
 
@@ -110,7 +110,7 @@ def runnable(views: Mapping[str, TaskView]) -> list[str]:
 
 
 def part_statuses(plan: Plan, tasks: Mapping[str, Task], statuses: Mapping[str, str]) -> dict[str, str]:
-    """Each part's status (PART_STATUSES), keyed by id in the plan's order (docs/design/fab.md, 4):
+    """Each part's status (PART_STATUSES), keyed by id in the plan's order (docs/design/fab-tick.md, 2):
     done when the plan marks the part done or it has task specs that all have status landed;
     designed when it has task specs; else not designed. statuses maps task ids to fold's
     statuses; a task missing from it is not landed. fab.calls' parts table, fab.dispatch.decide's

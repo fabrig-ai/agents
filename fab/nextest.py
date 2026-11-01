@@ -1,5 +1,5 @@
 """What fab reads and writes of nextest: its JUnit, exact filters, a config overlay
-(docs/design/fab.md, 11).
+(docs/design/fab-after-landing.md, 2).
 
 Pure functions over text and files; nothing here runs nextest.
 """

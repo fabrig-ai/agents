@@ -1,4 +1,4 @@
-"""Calls use compiled briefs and a fake Claude (docs/design/fab.md, 8 and 10)."""
+"""Calls use compiled briefs and a fake Claude (docs/design/fab.md, 4; fab-reports.md, 2)."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Reds classed before anyone hears them (docs/design/fab.md, 13.8).
+"""Reds classed before anyone hears them (docs/design/fab-landing.md, 3).
 
 The queue's test steps write nextest's JUnit (`with_junit`). When one is red, each failed test
 that passed in the precheck of every branch of the batch runs once more alone, in the gate lane,

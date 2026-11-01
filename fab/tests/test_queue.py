@@ -1,4 +1,4 @@
-"""Queue landing rules against disposable git remotes (docs/design/fab.md, 6 and 8)."""
+"""Queue landing rules against disposable git remotes (docs/design/fab-landing.md, 2; fab.md, 4)."""
 
 import contextlib
 import io

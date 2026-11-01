@@ -1,5 +1,5 @@
 """fab's own long-running user units, written at a deploy on the machines whose role in
-fab/hosts.toml wants them (docs/design/fab.md, 6 and 11): the queue on the gate, after landing
+fab/hosts.toml wants them (docs/design/fab-landing.md, 2; fab-after-landing.md, 2): the queue on the gate, after landing
 on its builder.
 
 A deploy runs each unit's install on every machine. A machine with the role gets the unit and

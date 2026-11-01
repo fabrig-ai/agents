@@ -1,4 +1,4 @@
-"""The user's channel: the user's questions and the daily reports on one page (docs/design/fab.md, 13.6).
+"""The user's channel: the user's questions and the daily reports on one page (docs/design/fab-channel.md, 2).
 
 What is the user's is decided by whoever asks, never here: a plan's `[[question]]` without
 an answer (the cut's), a call that ended `Question:`, and a call's chain parked after its
@@ -23,7 +23,7 @@ from fab.plan import Plan
 from fab.report import LANDING
 
 PAGE = "user.md"  # the page, under FAB_HOME
-PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (13.4)
+PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (fab-tick.md 5)
 KINDS = ("plan", "call", "parked")  # what asked: a plan's question, a call, a parked chain
 QUESTION_LINES = 12  # lines of an asking report the page quotes
 ANSWERED = "call.answered"  # the user's answer to a subject's call or parked chain
@@ -48,7 +48,7 @@ class Ask:
 
 @dataclass(frozen=True)
 class Signal:
-    """An open signal's page block, folded from the log (docs/design/fab.md, 13.6)."""
+    """An open signal's page block, folded from the log (docs/design/fab-channel.md, 2)."""
 
     id: str
     what: str
@@ -99,7 +99,7 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
 
 
 def signals(events: Iterable[dict], *, folded: Sequence[tier_reds.Red] | None = None) -> list[Signal]:
-    """Open signals, oldest first, from the log alone (docs/design/fab.md, 13.6).
+    """Open signals, oldest first, from the log alone (docs/design/fab-channel.md, 2).
 
     Queue rejections open queue:<branch>; a landing, a rejection or collateral at another
     tip, or signal.cleared closes the prior rejection. A rejection after a clear opens
@@ -454,7 +454,7 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
     parked, `parked: <its text>`. ValueError, logging nothing, when text is blank,
     or when no such ask is open: the message names the subject and the open subjects in
     order, comma-separated, or `none`. A plan's question is not answered here: its answer is
-    written in its plan.toml (13.3)."""
+    written in its plan.toml (fab-calls.md 3)."""
     text = text.strip()
     opened = asks((), events)
     subjects = ", ".join(dict.fromkeys(ask.subject for ask in opened)) or "none"
@@ -478,7 +478,7 @@ def clear(identifier: str, text: str, events: Sequence[dict], *, by: str = "user
 
     Store signal, by and stripped text beside log_path. Blank text, an unknown or closed
     signal, or a signal that cannot be cleared raises ValueError without logging or waking.
-    The command rewrites the page after this record (docs/design/fab.md, 13.6).
+    The command rewrites the page after this record (docs/design/fab-channel.md, 2).
     """
     text = text.strip()
     opened = signals(events)

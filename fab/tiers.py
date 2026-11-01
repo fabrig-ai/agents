@@ -1,4 +1,4 @@
-"""fabrig's slow tiers: one tree's tier with its prerequisites (docs/design/fab.md, 11).
+"""fabrig's slow tiers: one tree's tier with its prerequisites (docs/design/fab-after-landing.md, 2).
 
 Ported from fabrig's tools/tiers/run. A pair is a nextest profile `<tier>-<tree>` of the
 checkout's `.config/nextest.toml`; the package map names the packages that hold its tests and

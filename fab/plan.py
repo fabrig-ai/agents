@@ -1,4 +1,4 @@
-"""Plans and task specs, read from a draft's `docs/plan/<draft>/` (docs/design/fab.md, 4)."""
+"""Plans and task specs, read from a draft's `docs/plan/<draft>/` (docs/design/fab-tick.md, 2)."""
 
 from __future__ import annotations
 
@@ -30,7 +30,7 @@ class Part:
     needs: tuple[str, ...]
     design: str
     done: bool = False  # built without task specs (by hand); counts as landed for its readers
-    contract: bool = False  # a shared contract: the designer's contract call designs it (13.3)
+    contract: bool = False  # a shared contract: the designer's contract call designs it (fab-calls.md 3)
     needs_landed: tuple[str, ...] = ()
 
 
@@ -54,7 +54,7 @@ class Slice:
 
 @dataclass(frozen=True)
 class Rung:
-    """One backend's ordered brief files and the rungs below it (docs/design/fab.md, 13.15)."""
+    """One backend's ordered brief files and the rungs below it (docs/design/fab-qa.md, 2)."""
 
     id: str
     backend: str
@@ -64,7 +64,7 @@ class Rung:
 
 @dataclass(frozen=True)
 class Ladder:
-    """The happy-path citation and repository backlog path (docs/design/fab.md, 13.15)."""
+    """The happy-path citation and repository backlog path (docs/design/fab-qa.md, 2)."""
 
     happy_path: str
     backlog: str
@@ -73,7 +73,7 @@ class Ladder:
 @dataclass(frozen=True)
 class Plan:
     """A plan defaults to integration landing, ready, without reviews, with every part direct
-    (docs/design/fab.md, 13.12). load_plan and fab.designer.uncut inherit these defaults."""
+    (docs/design/fab-integration.md, 3). load_plan and fab.designer.uncut inherit these defaults."""
 
     draft: str
     repo: str
@@ -88,14 +88,14 @@ class Plan:
     ready: bool = True
     reviews: bool = False
     direct: bool = True
-    early: bool = True  # an integration plan's tasks may start early (docs/design/fab.md, 13.12)
+    early: bool = True  # an integration plan's tasks may start early (docs/design/fab-integration.md, 3)
 
     rungs: dict[str, Rung] = field(default_factory=dict, kw_only=True)
     ladder: Ladder | None = field(default=None, kw_only=True)
 
     @property
     def trunk(self) -> str:
-        """The branch from which this plan's calls and tasks start (13.12)."""
+        """The branch from which this plan's calls and tasks start (fab-integration.md 3)."""
         return f"{self.draft}/integration" if self.landing == "integration" else "main"
 
 
@@ -113,7 +113,7 @@ class Task:
     minutes: int
     body: str
     path: str
-    consolidation: bool = False  # written by a structure review; heads the buffer (13.10)
+    consolidation: bool = False  # written by a structure review; heads the buffer (fab-tick.md 7)
 
     @property
     def draft(self) -> str:
@@ -138,10 +138,10 @@ def load(plan_dir: Path) -> tuple[Plan, dict[str, Task]]:
 def load_plan(path: Path) -> Plan:
     """Read plan.toml: required keys draft, repo; defaults sources=(), buffer low=1.0 high=2.0,
     retired=false; the Plan defaults supply landing="integration", ready=true, reviews=false,
-    direct=true (docs/design/fab.md, 13.12).
+    direct=true (docs/design/fab-integration.md, 3).
     Parts default to none; a part's contract defaults to false and needs_landed to ().
     A ladder has string happy_path and backlog; each rung requires id, backend and brief
-    (paths as strings), with after defaulting to () (docs/design/fab.md, 13.15).
+    (paths as strings), with after defaulting to () (docs/design/fab-qa.md, 2).
     Each `[[question]]` table requires id, text and parts (strings) and defaults answer="".
 
     Raises PlanError for a missing key, a wrong type, an unknown mode or landing,
@@ -346,7 +346,7 @@ def problems(plan: Plan, tasks: dict[str, Task], plan_dir: Path | None = None) -
     naming a part outside its needs; a non-direct part in a direct plan. A plan needs
     parts or rungs; rungs need unique [a-z0-9-]+ ids, known acyclic after references,
     a ladder and queue landing; a ladder needs rungs. With plan_dir, every brief must
-    name a file under it (docs/design/fab.md, 4 and 13.15).
+    name a file under it (docs/design/fab-tick.md, 2; fab-qa.md, 2).
     """
     issues = _ladder_problems(plan, plan_dir)
     included = {part for item in plan.slices for part in item.parts}
@@ -388,7 +388,7 @@ def problems(plan: Plan, tasks: dict[str, Task], plan_dir: Path | None = None) -
 
 
 def _ladder_problems(plan: Plan, plan_dir: Path | None) -> list[str]:
-    """Ladder/rung diagnostics, checking local briefs only with plan_dir (13.15)."""
+    """Ladder/rung diagnostics, checking local briefs only with plan_dir (fab-qa.md 2)."""
     issues = []
     if not plan.parts and not plan.rungs:
         issues.append("plan has neither parts nor rungs")

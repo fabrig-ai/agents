@@ -19,7 +19,7 @@ Only these, and only where they would cost a run or a landing:
   the roles, who does what, the granularity and the order. Name the departure,
   the drafts' words and the fix. For a cut, also check each direct part's
   task specs against the part and the drafts: the part meets the direct
-  mode conditions (`docs/design/fab.md`, 13.11), and its specs cover the
+  mode conditions (`docs/design/fab-integration.md`, 2), and its specs cover the
   work, files and acceptance.
 - **Contradictions with the design:** a docstring, a task spec or a design
   edit that says other than the cited design, or a design change without its

@@ -1,4 +1,4 @@
-"""Integration decisions over events and the builder command through fakes (fab.md, 8)."""
+"""Integration decisions over events and the builder command through fakes (fab.md, 4)."""
 
 import io
 import json

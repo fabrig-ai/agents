@@ -1,4 +1,4 @@
-"""After-landing reds, their foremen and repairs (docs/design/fab.md, 11 and 13.1).
+"""After-landing reds, their foremen and repairs (docs/design/fab-after-landing.md, 2; fab-calls.md, 2).
 
 The dispatcher closes before opening, then acts on each plan's folded reds. Decisions
 here use log order, including when timestamps tie. Only open_reds, close_reds, tasks,
@@ -477,7 +477,7 @@ def repair_tasks(plan: Plan, events: Sequence[dict], evidence_texts: Mapping[str
     A fix/none settlement or non-done foreman end creates a task. Closing before the
     first task run drops it; a started task stays even after closure or an unfixed signal.
     kind red, part after-landing, repo fabrig, no needs, files **, high, 20 minutes,
-    no path. Quote evidence, owner and section, then section 11's acceptance. Append
+    no path. Quote evidence, owner and section, then fab-after-landing.md 2's acceptance. Append
     question.answered answers under ## Answers, in log order, scanning events once for
     all answers. Missing evidence is marked. folded may be reds(events), reused for
     this same events snapshot, to avoid folding again.

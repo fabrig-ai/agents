@@ -1,4 +1,4 @@
-"""`fab test`: every test, in one process, within the budget (docs/design/fab.md, 8)."""
+"""`fab test`: every test, in one process, within the budget (docs/design/fab.md, 4)."""
 
 from __future__ import annotations
 
@@ -50,6 +50,6 @@ def main(argv: list[str]) -> int:
     if not result.wasSuccessful():
         return 1
     if elapsed > BUDGET_SECONDS and not args.patterns:
-        print("fab test: over budget: make the slow tests faster (docs/design/fab.md, 8)", file=sys.stderr)
+        print("fab test: over budget: make the slow tests faster (docs/design/fab.md, 4)", file=sys.stderr)
         return 1
     return 0

@@ -1,4 +1,4 @@
-"""Rust digest scans use hand-written trees; commands use the fake runner (fab.md, 8)."""
+"""Rust digest scans use hand-written trees; commands use the fake runner (fab.md, 4)."""
 
 from __future__ import annotations
 

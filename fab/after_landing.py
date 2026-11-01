@@ -1,5 +1,5 @@
 """After landing: fabrig's slow tiers on each new main, reds confirmed and recorded
-(docs/design/fab.md, 11).
+(docs/design/fab-after-landing.md, 2).
 
 Runs on a builder in one slot claimed for it. Each cycle fetches main; a new tip gets one run
 of the tier set, each failed test is run again alone, and every test that is not plainly
@@ -31,7 +31,7 @@ from fab.sh import Runner, run, ssh
 TIER_SET = ("browser-jig", "browser-temper", "browser-skein", "process-temper")
 # The live pairs `--live` adds: each variable its tests read, and the kind of login fab lends
 # for it, borrowed from the shelf on the dispatcher for the pair and returned after it
-# (docs/design/fab.md, 13.13). Not live-smith: its tests need `SMITH_LIVE`, a whole live root
+# (docs/design/fab-machines.md, 3). Not live-smith: its tests need `SMITH_LIVE`, a whole live root
 # (smith's configuration, host id, a ChatGPT record of smith's own signed in by `smith login
 # chatgpt`, and programs/claude), which no shelf kind holds yet (11-01, red on hetzner8).
 # Not live-temper: all its live stories are owner-run and ignored; since fabrig eb6c40aaf
@@ -326,7 +326,7 @@ class AfterLanding:
     def check(self, tip: str) -> dict:
         """Check out tip, run the set, record CPU/states, save conclusive history.
 
-        Records are scalar/list fields (docs/design/fab.md, 11): pair diagnostics,
+        Records are scalar/list fields (docs/design/fab-after-landing.md, 2): pair diagnostics,
         every selected test's result and CPU, then the run's totals, optional budget
         and verdict. Starved and unobserved tests preserve history. A fault keeps
         the cursor; a crash before saving causes a whole new run on the next cycle.

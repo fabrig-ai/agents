@@ -1,0 +1,184 @@
+# fab: builders, slots, disk and logins
+
+2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
+section numbers). Status: `docs/design/fab-machines.status.md`. Shared: the
+overview, the event log and the tests are `docs/design/fab.md`'s.
+
+## 1. In one page
+
+- **Builders own their disk:** slots are claimed, swept and reclaimed so no implementer stops for disk.
+- **Logins live on a shelf** (`fab logins`): captured, lent, returned and swapped across machines, and checked for their limits.
+
+## 2. Slots and disk
+
+- **Measured (hetzner6, 10-30 20:00Z):** eight slots of 5-39 GB each; cargo's
+  incremental data is 50-90% of every slot, stale test executables up to
+  14 GB, everything else 2-4 GB.
+- **The sweep ends every task:** when a slot's run ends, `fab slot sweep`
+  removes its incremental data and the test executables the run did not
+  write. The next task's base differs anyway, so little is lost: the edited
+  crates compile once without incremental help. A swept slot holds about
+  4 GB. The slot bound is 25 GB: a whole-workspace clippy and test build
+  from a swept slot peaked at 25 GB, 19 GB of it test executables and 3 GB
+  incremental data (hetzner6, 10-30 20:18Z, kache warm).
+- **The builder's budget:** disk = kache cap + slots x slot bound + headroom
+  (5-10 GB), and one slot bound more on a gate for the queue's target, which
+  each batch sweeps as a slot's is. hetzner6: 50 + 8 x 25 + 10 = 260 of 305
+  GB, the rest for QA boxes, archives and the system. `fab hosts check`
+  computes it from `fab/hosts.toml`.
+- **Live overrides, by hand:** `FAB_HOME/hosts.local.toml`, never in git,
+  holds tables named after hosts of `fab/hosts.toml` with the keys to change
+  (`roles`, `places`, `builds`, `slots`, the disk figures; never `ssh` or
+  `hostname`). Every reader of the machines applies the file of the machine
+  it runs on: the dispatcher's on hel8 (`places`, `roles`: from the next
+  tick), heavy's on a builder (`builds`, `headroom_gb`: from its next
+  command), `fab queue install`'s at a deploy (`roles`). Scaling hetzner8's
+  builds down for the queue is `[hetzner8]` with `places` on hel8 and
+  `builds` on hetzner8; the running work drains. A bad file fails the tick
+  and `fab hosts check` (which lists the overrides in force), and heavy
+  reports it and builds on the file as it is. A lasting change goes into
+  `fab/hosts.toml`.
+- **Claims are the builder's:** `slots/<n>.claim` is created exclusively and
+  holds the run, task and time. `fab slot claim` and `fab slot release` run on
+  the builder (over ssh from the dispatcher). A claim whose run unit is gone is
+  stale, and the dispatcher releases it.
+- **Admission waits, it does not refuse:** before a build, `heavy` needs the
+  headroom plus a build allowance free. Short of it, it reclaims and waits
+  (checking every 30 s, reclaiming again) up to 20 minutes, then exits 75. A
+  run that exits 75 reports `Infra: disk`, and the dispatcher requeues it.
+- **Reclaim takes from idle slots only:** unclaimed slots, least recently
+  released first; first their incremental data and stale executables, then
+  the whole target (kache refills it). A claimed slot is touched only by its
+  own run's sweep.
+- **Lanes are flocks:** the build lane is `builds` lock files, the gate lane
+  one; a holder that dies frees its place, so heavy needs no ledger or
+  reconciler. The command runs in a systemd user scope with its lane's CPU
+  weight (gate 10000, build 1000). Each command appends its lane and disk
+  waits to `FAB_HOME/heavy.jsonl` on its machine, the metrics' source.
+- **One floor:** the headroom. The current tools' separate floors (45, 40 and
+  80 GB) go when `heavy` moves here.
+
+## 3. Logins
+
+Replaces the agents repository's `tools/qa/logins` (QA's held logins) and
+the unlanded `agents-logins` of `deploy/logins-pool-1b` (the machines'
+sign-ins, director decisions 0015 and 0017). The user, 10-31: one custody
+for both, recorded in the log; 4 Claude and 3 Codex subscriptions, every
+login that still works reused across them before more are signed in.
+
+- **One shelf, on hel8:** `~/src/fabrig/logins/shelf/<id>/` (0700), one
+  entry per login, holding it under its kind's name. The kinds are `codex`
+  (`~/.codex/auth.json`) and `claude` (`~/.claude/.credentials.json`), lent
+  to a machine at that path, and QA's `chatgpt` (temper's ChatGPT record,
+  a live run's `TEMPER_LIVE_ACCOUNT`), `claude-box` (a Claude Code
+  directory, `TEMPER_LIVE_CLAUDE`) and `github` (temper's GitHub
+  conformance fixtures, `TEMPER_LIVE_GITHUB_FIXTURES`: the probe App's
+  `app.json` and `app.pem` and a `person-<owner>.token` per owner, none
+  of which refreshes), lent to a run at a path of its own. An id is
+  `<kind>-<n>`.
+- **Custody is the log:** `login.added` (id, kind, origin, sha),
+  `login.lent` (id, holder, host, at, sha), `login.returned` (id, sha),
+  `login.checked` (id, email, plan, used, resets, error, limit_names,
+  limit_used, limit_resets) and
+  `login.retired` (id, reason). `fab.logins.fold` derives each login's
+  holder; the dispatcher's machine is the only writer, under the shelf's
+  flock.
+- **Copied out, copied back:** both products refresh their tokens, so the
+  copy last used is the true one. A lent login's shelf copy is a
+  placeholder until `fab logins return` copies the lent copy back, checks
+  its digest on both ends, and removes it where it was only if it has not
+  changed meanwhile (its user must have stopped). Lending checks the shelf
+  copy against the last returned digest, installs it only where nothing
+  is, and checks it again there. tar, ssh and sha256sum move and hash the
+  bytes; Python never holds them and nothing prints them.
+- **A machine's logins:** `fab logins capture HOST KIND` takes a machine's
+  current sign-in onto the shelf, still lent to it (decision 0017's
+  "bound"); `--free --path P` takes one whose source is used no more (QA's
+  custody holds it, its machine is gone). `fab logins swap HOST ID` gives
+  back the machine's login of that kind and lends ID; `fab logins list`
+  names each role's missing logins (a dispatcher or builder needs both
+  kinds). Lending a `claude` login to a machine also drops the account
+  Claude Code cached in `~/.claude.json`: it reports, and keeps, the
+  previous login's until none is cached (11-01: three swapped builders
+  said gmail until it was dropped).
+- **A run's logins:** `fab logins borrow KIND HOST --path P --holder RUN`
+  lends the free login of that kind with the lowest number and prints its
+  id. Builders reach the shelf by ssh to hel8 (the user, 11-01: custody
+  stays central). `fab after-landing run --live` adds the live pairs of
+  `fab.after_landing.LIVE`: only `live-skein`. `live-temper` is out (11-01):
+  all its live stories are ignored owner-run sittings, and since fabrig
+  eb6c40aaf those binaries have no harness unit tests; nextest exits 4
+  (no tests to run), faulting the pair and holding the cursor (fab-after-landing.md 2). It comes
+  back only once the user decides which ignored stories, if any, should run
+  with `--run-ignored`. Borrowing and the `chatgpt` record / `claude-box`
+  directory kinds remain supported and tested. `live-smith` is
+  out (11-01: all 17 of its tests red at once on hetzner8): besides
+  `SMITH_LIVE_CLAUDE` its tests need `SMITH_LIVE`, a whole live root
+  (`config/smith/config.toml`, `host-id`, `tokens/chatgpt`, a ChatGPT
+  record of smith's own made by `smith login chatgpt`, and
+  `programs/claude`), which no kind holds yet; it comes back as a
+  directory kind once the user signs one in. Each pair borrows its logins, lent to the builder
+  under its run directory for holder `after-landing/<tip>/<pair>`, runs
+  with the variables naming them, and returns them when it ends; a pair
+  short of a login faults, and a login that cannot be returned stays lent
+  to its run with an `error` record. `live-skein` borrows a `codex` and a
+  `claude` login (`SKEIN_TEST_LIVE_OPENAI_AUTH`,
+  `SKEIN_TEST_LIVE_ANTHROPIC_CREDENTIALS`: its tests read a login's file
+  instead of tokens in their environment, the user, 11-01, fabrig
+  `logins/skein-live`). They read the access token and never refresh it,
+  so fab refreshes each first where it was lent (`fab logins account KIND
+  --home DIR --validate`); one that does not refresh faults the pair.
+  The after-landing unit runs `--live` (the user, 11-01), on the cheapest
+  models: temper's and smith's live tests pick `gpt-6-luna` and
+  `claude-haiku-5-5` themselves, and `fab.after_landing.CHEAP` sets
+  skein's `SKEIN_TEST_LIVE_*_MODEL` to the same.
+- **Checks by the products themselves:** `fab logins check ID` asks Codex's
+  app-server (`account/read`, `account/rateLimits/read`: the account, the
+  plan and every limit) or `claude auth status` followed by local `/usage`. A lent
+  machine login is checked in place, on its machine; a free one is lent to
+  hel8 in a private directory and returned. Every check makes a real
+  request (a Claude call of a few tokens; Codex refreshes its token), so an
+  expired login says so and a swapped Claude login does not report the
+  account its predecessor left cached (11-01: three swapped builders said
+  gmail until their first call). The weekly percent is the signal for a swap.
+  `account()` returns `limits`, dictionaries of `name`, `used` (percent) and
+  `resets` (Unix seconds or null). Codex reads every bucket in
+  `rateLimitsByLimitId`, sorted by key, or `rateLimits` alone, and each
+  bucket's primary and secondary windows. Duration labels are `5 h` (300
+  minutes), `week` (10080), otherwise whole days, whole hours or minutes;
+  an unknown duration is `?`. A bucket whose `limitId` is not `codex`
+  prefixes `other `, never its backend display name. The shelf's existing
+  `used` and `resets` remain Codex's weekly window (the primary window for
+  older responses without a labelled week).
+  Claude runs `claude -p /usage --output-format json --no-session-persistence
+  --strict-mcp-config --tools "" --model claude-haiku-5-5 --settings
+  '{"disableAllHooks": true}'` with `TZ=UTC`. It accepts only a local
+  `usage` command with zero turns and zero cost. `Current` lines yield each
+  limit; `session` becomes `5 h`, `week (all models)` becomes `week`, other
+  names stay as written, and Fable lines are dropped. English resets with
+  an optional month/day and UTC suffix use the next matching date/time,
+  allowing the previous hour as the old renderer did. A failed or
+  model-answered `/usage` leaves limits empty and keeps the account.
+  `Shelf.check` records limits as three parallel scalar lists:
+  `limit_names`, `limit_used` and `limit_resets`, of equal length and order;
+  unknown use or reset is null. It never puts dictionaries in log fields.
+- **Check the shelf:** `fab logins check --all` checks each login whose kind
+  has a check, sequentially. Custody refusals (including a run's login and
+  retired logins) print `skipped`; account failures record `login.checked`
+  with `error` and do not stop the remaining checks. Bulk checking exits 0;
+  explicit ids retain their failure exit status. A 30-minute timer on hel8
+  is deployed by hand, outside this change.
+- **Left out:** the old tools' pending journals and backups, QA's waiting
+  queue, reservations and admission caps (the dispatcher decides who gets a
+  login, as it does places), and checks of `chatgpt` records, which only a
+  temper box can read: their live runs show whether they work.
+
+## 4. Later
+
+- Elastic builders from `fab hosts check`'s numbers.
+- Logins (3), next: after-landing `--live` run on the
+  queue's machine as well as builders (the user, 10-31); `tools/qa/logins`
+  retired (QA's six logins are on the shelf since 11-01, held there by
+  `fab/migrate`). Then a new builder lent its logins when it joins and
+  returned when it goes, and swaps proposed from `login.checked`'s weekly
+  percent.

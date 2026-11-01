@@ -1,4 +1,4 @@
-"""The dispatcher's decisions and shell, isolated from machine state (docs/design/fab.md, 8)."""
+"""The dispatcher's decisions and shell, isolated from machine state (docs/design/fab.md, 4)."""
 
 import fcntl
 import io
@@ -652,7 +652,7 @@ class CallActionsTest(unittest.TestCase):
                       ts=self.now, outcome="question")]
         self.assertEqual(self.actions(asked, ["core", "next"]),
                          [Action("call", task="next", run_kind="skeleton")])
-        answered = asked + [dict(ev=channel.ANSWERED, subject="draft/core", by="user", answer="see fab.md 12")]
+        answered = asked + [dict(ev=channel.ANSWERED, subject="draft/core", by="user", answer="see fab-gates.md, 2")]
         self.assertEqual(self.actions(answered, ["core", "next"]),
                          [Action("call", task="core", run_kind="skeleton"),
                           Action("call", task="next", run_kind="skeleton")])
@@ -5062,7 +5062,7 @@ class ReplayFindingsTest(unittest.TestCase):
 
 
 class EarlyStartTest(unittest.TestCase):
-    """Early starts (docs/design/fab.md 13.12): a task may start from the pushed work of a need
+    """Early starts (docs/design/fab-integration.md, 3): a task may start from the pushed work of a need
     that is still running, one level deep, and merges only after its needs have."""
 
     PLAN = plan.Plan("draft", "fabrig", (), 1, 2, {}, (), landing="integration")

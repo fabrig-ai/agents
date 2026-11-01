@@ -1,4 +1,4 @@
-"""Minimal Rust gates are pure; screen uses fake git and ratchet services (fab.md, 8)."""
+"""Minimal Rust gates are pure; screen uses fake git and ratchet services (fab.md, 4)."""
 
 from __future__ import annotations
 

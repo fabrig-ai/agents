@@ -1,4 +1,4 @@
-"""Usage accounting over plain log records (docs/design/fab.md, 13.5)."""
+"""Usage accounting over plain log records (docs/design/fab-reports.md, 3)."""
 
 import unittest
 from unittest.mock import patch

@@ -1,4 +1,4 @@
-"""Standing reports, computed from records alone (docs/design/fab.md, 10).
+"""Standing reports, computed from records alone (docs/design/fab-reports.md, 2).
 
 Two reports: the code report of a plan (`fab.code_report`) and the landing report
 (`fab.landing_report`). This module holds what both share: the day's window, the records

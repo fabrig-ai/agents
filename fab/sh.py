@@ -1,4 +1,4 @@
-"""The runner seam: every command fab runs goes through a runner (docs/design/fab.md, 8).
+"""The runner seam: every command fab runs goes through a runner (docs/design/fab.md, 4).
 
 Functions that run commands take `sh`, a callable with `run`'s signature, and
 default to `run`. Tests pass `fab.tests.support.FakeRunner` instead.

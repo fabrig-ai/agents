@@ -21,7 +21,7 @@ task names, and nothing unrelated.
 ## Tests
 
 - Follow the repository's test rules (this repository: `docs/design/fab.md`,
-  section 8): pure functions tested directly, commands through the fake
+  section 4): pure functions tested directly, commands through the fake
   runner, real git only where git's behaviour is the point, temporary HOME.
 - The whole suite must stay within its budget: `bin/fab test` passes, and
   prints its time. A test slower than half a second needs a reason.

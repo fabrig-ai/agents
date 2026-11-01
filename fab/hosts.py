@@ -1,4 +1,4 @@
-"""The machines and their disk budget (docs/design/fab.md, 2 and 7)."""
+"""The machines and their disk budget (docs/design/fab.md, 2; fab-machines.md, 2)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,7 @@ from fab import log
 
 DEFAULT = Path(__file__).resolve().parent / "hosts.toml"
 ROLES = {"dispatcher", "builder", "gate", "after-landing"}
-LOCAL = "hosts.local.toml"  # FAB_HOME's live overrides of this file, never in git (docs/design/fab.md, 7)
+LOCAL = "hosts.local.toml"  # FAB_HOME's live overrides of this file, never in git (docs/design/fab-machines.md, 2)
 OVERRIDES = frozenset({"roles", "disk_gb", "places", "slots", "slot_bound_gb", "kache_gb",
                        "headroom_gb", "builds", "after_landing_slot"})  # what an override may change: not a host's identity
 

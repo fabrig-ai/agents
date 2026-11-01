@@ -24,7 +24,7 @@ id = "core"
 title = "Core files"
 mode = "feature"
 needs = []
-design = "docs/design/fab.md, 4"
+design = "docs/design/fab-tick.md, 2"
 [[slice]]
 id = 1
 story = "A task runs"
@@ -76,14 +76,14 @@ class PlanTest(unittest.TestCase):
 
     def test_full_plan(self):
         expected = Plan("draft", "repo", ("design.md", "another source"), 0.5, 3.0,
-                        {"core": Part("core", "Core files", "feature", (), "docs/design/fab.md, 4")},
+                        {"core": Part("core", "Core files", "feature", (), "docs/design/fab-tick.md, 2")},
                         (Slice(1, "A task runs", ("core",), True),),
                         landing="queue", reviews=True, direct=False)
         self.assertEqual(self.read(FULL), expected)
         self.assertIs(type(self.read(FULL).high), float)
 
     def test_a_part_may_be_marked_done(self):
-        text = FULL.replace('design = "docs/design/fab.md, 4"', 'design = "docs/design/fab.md, 4"\ndone = true')
+        text = FULL.replace('design = "docs/design/fab-tick.md, 2"', 'design = "docs/design/fab-tick.md, 2"\ndone = true')
         self.assertTrue(self.read(text).parts["core"].done)
         self.assertFalse(self.read(FULL).parts["core"].done)
 
@@ -149,7 +149,7 @@ class PlanTest(unittest.TestCase):
     def test_missing_keys_name_the_file(self):
         for line in ('draft = "draft"\n', 'repo = "repo"\n', 'id = "core"\n',
                      'title = "Core files"\n', 'mode = "feature"\n', 'needs = []\n',
-                     'design = "docs/design/fab.md, 4"\n', 'id = 1\n',
+                     'design = "docs/design/fab-tick.md, 2"\n', 'id = 1\n',
                      'story = "A task runs"\n', 'parts = ["core"]\n', 'walk = true\n'):
             with self.subTest(line=line), self.assertRaisesRegex(PlanError, r"plan\.toml: missing"):
                 self.read(FULL.replace(line, ""))
@@ -165,7 +165,7 @@ class PlanTest(unittest.TestCase):
             ('id = "core"', 'id = 1'), ('title = "Core files"', 'title = []'),
             ('mode = "feature"', 'mode = 1'), ('needs = []', 'needs = "core"'),
             ('needs = []', 'needs = [1]'),
-            ('design = "docs/design/fab.md, 4"', 'design = false'),
+            ('design = "docs/design/fab-tick.md, 2"', 'design = false'),
             ('id = 1', 'id = "1"'), ('id = 1', 'id = true'),
             ('story = "A task runs"', 'story = 1'), ('parts = ["core"]', 'parts = "core"'),
             ('parts = ["core"]', 'parts = [1]'), ('walk = true', 'walk = "yes"'),
