@@ -86,29 +86,39 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       chain, as fabrig's queue rejections do (integration.md 2;
       `_fold_review` already counts a `branch.rejected` carrying the chain's
       branch and a step): the first since the chain's reset is amended, the
-      next holds it for settle, under the chain's one amend count. Code
-      takes the mechanical cases first, so an amend call starts only for
-      what needs judgement (the user, 11-01):
-      - **`fetch` or `push`:** no amend call. The tick tries the finish
-        again at its next round, up to `LAND_TRIES` (3) refusals at that
-        step for that tip; the third parks the chain (`call.parked`, reason
-        `fab land refused at <step> 3 times`), which reaches the page
-        (channel.md 2): a failing fetch or push is the machines', the
-        user's. These refusals do not count toward the amend.
-      - **`test`:** before the amend call starts, the tick rebases the
-        call's branch onto `origin/main` in a worktree of its own (the same
-        rebase `fab land` made, which went through), pushes it with
-        `--force-with-lease`, and the amend brief says so; the amender only
-        reproduces and fixes what the log names. A rebase that conflicts
-        (main moved) is aborted and the brief says the branch is not rebased.
+      next holds it for settle, under the chain's one amend count. Two
+      exceptions end the chain instead: a finish whose branch a
+      `branch.landed` already names (landed by hand) logs `call.finished`
+      done, and a `fetch` refusal whose branch is gone from origin logs
+      `call.finished` failed, since no amend could start on it. Code takes
+      the mechanical cases first, so an amend call starts only for what
+      needs judgement (the user, 11-01):
+      - **`fetch` or `push`:** no amend call, and these refusals do not
+        count toward the amend. The tick tries the finish again, each try
+        `LAND_AFTER` (10) minutes after the chain's last refusal at that
+        step, up to `LAND_TRIES` (3) refusals at that step counted per
+        chain: `fab land` refusals (no `queue_ts`) at that step for the
+        chain's branch since the later of its latest call's `call.ended`
+        and its last reset (a `call.answered` for its subject or a
+        `chain.settled` amend), never by the rejection's `tip` (a rebase
+        makes a new sha each try). The third parks the chain
+        (`call.parked` with the subject, the root as call, reason `fab
+        land refused at <step> 3 times`, report the refusal's log), which
+        reaches the page (channel.md 2): a failing fetch or push is the
+        machines', the user's; its answer resets the count.
+      - **`test`:** `fab call amend` (`calls._chain_call`), before it
+        compiles the brief, when the chain's last refusal is a `fab land`
+        `test` refusal, rebases `origin/calls/<root>` onto `origin/main` in
+        a detached worktree of its own (the same rebase `fab land` made,
+        which went through) and pushes it with
+        `--force-with-lease=refs/heads/calls/<root>:<the tip it fetched>`,
+        once per amend start; it passes the outcome to `amend_brief`
+        (rebased, or not after an aborted conflict when main moved), whose
+        refusal section says which. The amender then only reproduces and
+        fixes what the log names.
       - **`rebase`:** `fab land`'s own rebase is code and it conflicted, so
         the amend call resolves the conflicts (judgement), as below.
       - **`paths`:** the amend call, as below.
-      Two exceptions end the chain
-      instead: a finish whose branch a `branch.landed` already names (landed
-      by hand) logs `call.finished` done, and a `fetch` refusal whose branch
-      is gone from origin logs `call.finished` failed, since no amend could
-      start on it.
     - The amend brief carries the refusal's `log` (the last 20 lines of
       `fab land`'s output, whose `CONFLICT` lines name the paths), under a
       heading naming `fab land`'s refusal, not a queue rejection. For
@@ -117,9 +127,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
       (main's side is others' landed work) and pushes with
       `--force-with-lease` (its worktree tracks `origin/calls/<root>`); its
       "one commit" and `git push origin HEAD` rules give way for this case.
-      For `test`, it finds the branch already rebased by the tick (above)
-      and fixes what the log names; when the brief says the tick's rebase
-      conflicted, it rebases first as at `rebase`.
+      For `test`, it finds the branch already rebased by `fab call amend`
+      (above) and fixes what the log names; when the brief says that
+      rebase conflicted, it rebases first as at `rebase`.
       A Claude amend rather than the Codex foreman (execution-modes.md's
       rebases) because the conflict is in text the call wrote and the amend
       chain already exists. For a retire, the brief also lists the designs
@@ -375,12 +385,27 @@ before it lands (2).
   plan.toml. **`retired = true` is code's** (the user, 11-01: an LLM for
   judgement, code for mechanisms): when the tick finishes a retire call
   that ended done, it first commits `retired = true` into the plan's
-  plan.toml on the call's branch (`fab.spec_edit.commit_path`, author
-  fab, message `<draft>: retired`), pushes it, and delivers that tip as it
+  plan.toml on the call's branch, and then delivers that tip as it
   delivers any call's (`fab land`, fabrig's queue, or, for an integration
   plan, as integration.md 3 says), so the status wording and the retire
-  land as one. A branch whose plan.toml already says it gets no commit; a
-  commit or push that fails is a note, and the next tick tries again.
+  land as one. The commit is `fab.spec_edit.commit_path(path, checkout,
+  edit, branch=<the call's branch>, trunk=<the call's branch>,
+  worktree=FAB_HOME/retire/<root>)`, path the plan directory's
+  plan.toml relative to the checkout (as `_check_call` finds it), author
+  fab, message `<draft>: retired`; the edit replaces a `retired = false`
+  line or inserts `retired = true` before the first table line. It is
+  made only when the plan.toml does not already say it (`tomllib`'s
+  `retired` is True), no `branch.landed` names the branch and
+  `origin/<branch>` exists; otherwise the delivery takes its path as
+  today (done if landed by hand, failed at fetch if gone). A commit or
+  push that fails logs a note and leaves the finish open: no
+  `call.finished` is recorded for a failure before the delivery runs, and
+  the next tick tries again. The commit comes before the delivery in the
+  same finish, so a queue plan's `_queue_branch` readies the committed
+  tip; a branch readied before this landed, without `retired`, is
+  re-readied when origin's tip differs from its last `branch.ready`'s
+  `tip`. The consistency pass does not check `retired`: code sets it at
+  the finish.
   The Codex consistency pass is its chain's review run, with its own role
   text (`fab/roles/consistency.md`) and the list of changed designs; a
   refusal goes back once as an amend call. Once it lands, the tick skips the

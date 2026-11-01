@@ -385,16 +385,28 @@ only as tweaks once a replay matches its run.
     which the tick logs as that question's `answer`.
 - **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan
   options that differ from the defaults (`ready=false` for a replay). Code
-  writes them, not the cut (the user, 11-01): before the cut call starts,
-  `fab call cut` commits a plan.toml holding only those keys, one per
-  line as `parse_options` read them, under a comment `# Plan options,
-  written by fab call cut --set; keep them`, on the call's branch in its
-  worktree; the brief's `Plan options` says the file exists and the cut
-  writes the rest of the plan below those lines, leaving them as they are.
-  Before each delivery of the cut's branch (its early releases too), the
-  tick compares the options in the branch's plan.toml with the
-  call.started's; a key missing or changed is written back by code (a
-  commit `<draft>: plan options restored`, pushed) before the delivery. Its
+  writes them, not the cut (the user, 11-01). `fab.calls.start` takes a
+  `seed` (repository path to text), written and committed (author fab,
+  `<draft>: plan options`) after its `worktree add` and before
+  `call.started`; for a cut it is a plan.toml holding `draft`, `repo` and
+  `sources` (from `designer.uncut`), then, under a comment `# Plan
+  options, written by fab call cut --set; keep them`, each option as
+  `<key> = <json.dumps(value)>`. The brief's `Plan options` section and
+  the cut's role texts (`cut.md`, `cut-run.md`) say the file exists and
+  the cut writes the tables below those lines, never repeating or
+  changing them. The tick restores them where code may write: for an
+  integration plan, every merge of the cut's branch (`_merge_branch`, its
+  early releases and its last merge) restores the options in the trunk,
+  never on the cut's branch: after a clean merge and before the push, the
+  tick rewrites plan.toml's option lines from the root cut's
+  `call.started` `options` (parsed with `parse_options`) and commits
+  `<draft>: plan options restored` on the trunk; for a queue plan, the
+  restore is a commit on the cut's branch before `_deliver`, the call
+  having ended by then. Code never writes a branch while a call on it is
+  in flight. Options compare by parsed value (a different spelling of the
+  same value makes no commit); a restore removes every top-level line
+  assigning one of the keys and writes them under the comment; a branch
+  with no plan.toml gets none. Its
   `call.started` carries them (`options`), so the tick reads `landing` and
   `reviews` for the cut's own chain before plan.toml exists. For a replay
   the operator gives the cut the manual run's inputs as `--source`: the
