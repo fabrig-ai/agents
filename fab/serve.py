@@ -169,6 +169,16 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
     return sorted(subscriptions, key=lambda subscription: (subscription["kind"], subscription["subscription"]))
 
 
+def _public_overlaps(dated: list[tuple[dict, datetime]], known_drafts: Collection[str]) -> list[dict]:
+    """Open pairs as sorted public labels and file counts (docs/design/fab.md, 13.17)."""
+    pairs = []
+    for pair, record in overlaps.open_pairs([event for event, _ in dated]).items():
+        labels = sorted(name if name in known_drafts and DRAFT.fullmatch(name) else "other"
+                        for name in pair)
+        pairs.append({"drafts": labels, "count": len(record["files"]) + record["more"]})
+    return sorted(pairs, key=lambda pair: pair["drafts"])
+
+
 def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     """Public counts and ages at now, in UTC, with only known hosts, call roles and safe
     draft names. Skip invalid timestamps and future events; pair ids across the log,
@@ -242,7 +252,6 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                 count_draft(event, "merged_today" if "into" in event else "landed_today")
         elif kind == "branch.rejected" and stamp >= today:
             rejected += 1
-
     for run_id, event in runs.items():
         if run_id in runs_ended:
             continue
@@ -257,11 +266,6 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     asks = channel.asks((), [event for event, _ in dated])
     by_kind = Counter(ask.kind for ask in asks)
     waiting_since = [_stamp(ask.since) for ask in asks]
-    public_overlaps = []
-    for pair, record in overlaps.open_pairs([event for event, _ in dated]).items():
-        labels = sorted(name if name in known_drafts and DRAFT.fullmatch(name) else "other"
-                        for name in pair)
-        public_overlaps.append({"drafts": labels, "count": len(record["files"]) + record["more"]})
     return {
         "updated": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "log": "ok",
@@ -280,7 +284,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                          "claude_m": round(claude / accounting.MILLION, 1),
                          "ratio": round(codex / claude, 1) if claude else None},
         "drafts": dict(sorted(drafts.items())),
-        "overlaps": sorted(public_overlaps, key=lambda pair: pair["drafts"]),
+        "overlaps": _public_overlaps(dated, known_drafts),
         "subscriptions": _subscriptions(dated, now),
     }
 
@@ -305,40 +309,53 @@ def _duration(seconds: float) -> str:
     return f"{minutes} min"
 
 
+def _text(value: object) -> str:
+    """Escape a snapshot value for HTML text or attributes."""
+    return html.escape(str(value))
+
+
+def _badge(label: str, state: str) -> str:
+    """Render an escaped state badge."""
+    return f'<span class="badge {_text(state)}"><i></i>{_text(label)}</span>'
+
+
+def _table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = None) -> str:
+    """Render escaped rows with numeric columns and optional first-column badges."""
+    headings = []
+    for index, label in enumerate(labels):
+        headings.append(f'<th class="num">{_text(label)}</th>' if index else f"<th>{_text(label)}</th>")
+    rows = []
+    for values in figures:
+        cells = []
+        for index, value in enumerate(values):
+            cell = _badge(value, badges[value]) if index == 0 and badges else _text(value)
+            if index == 0 and labels == ("Kind", "Open"):
+                cell = f'<a href="{_text(ISSUES)}">{cell}</a>'
+            cells.append(f'<td class="num">{cell}</td>' if index else f"<td>{cell}</td>")
+        rows.append("<tr>" + "".join(cells) + "</tr>")
+    return ('<div class="scroll"><table><thead><tr>' + "".join(headings) + '</tr></thead><tbody>'
+            + "".join(rows) + '</tbody></table></div>')
+
+
+def _overlaps_panel(pairs: list[dict]) -> str:
+    """Render public overlap labels and counts after Drafts (docs/design/fab.md, 13.17)."""
+    body = (_table(("Drafts", "Files"), [(" · ".join(pair["drafts"]), pair["count"]) for pair in pairs])
+            if pairs else '<p class="empty">No drafts overlap.</p>')
+    return '<h2>Overlaps</h2><div class="panel">' + body + '</div>'
+
+
 def render(snapshot: dict) -> str:
     """One escaped, self-refreshing HTML document of public counts and subscription limits,
     readable at phone width in light and dark; a fixed message when the log is unreadable."""
-    def text(value: object) -> str:
-        return html.escape(str(value))
-
-    def badge(label: str, state: str) -> str:
-        return f'<span class="badge {text(state)}"><i></i>{text(label)}</span>'
-
     def tile(label: str, value: object, sub: str = "") -> str:
         tag = "a" if label == "Waiting on the user" else "div"
-        href = f' href="{text(ISSUES)}"' if tag == "a" else ""
-        return (f'<{tag} class="tile"{href}><div class="label">{text(label)}</div>'
-                f'<div class="value">{text(value)}</div>'
-                + (f'<div class="sub">{text(sub)}</div>' if sub else "") + f"</{tag}>")
-
-    def table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = None) -> str:
-        headings = []
-        for index, label in enumerate(labels):
-            headings.append(f'<th class="num">{text(label)}</th>' if index else f"<th>{text(label)}</th>")
-        rows = []
-        for values in figures:
-            cells = []
-            for index, value in enumerate(values):
-                cell = badge(value, badges[value]) if index == 0 and badges else text(value)
-                if index == 0 and labels == ("Kind", "Open"):
-                    cell = f'<a href="{text(ISSUES)}">{cell}</a>'
-                cells.append(f'<td class="num">{cell}</td>' if index else f"<td>{cell}</td>")
-            rows.append("<tr>" + "".join(cells) + "</tr>")
-        return ('<div class="scroll"><table><thead><tr>' + "".join(headings) + '</tr></thead><tbody>'
-                + "".join(rows) + '</tbody></table></div>')
+        href = f' href="{_text(ISSUES)}"' if tag == "a" else ""
+        return (f'<{tag} class="tile"{href}><div class="label">{_text(label)}</div>'
+                f'<div class="value">{_text(value)}</div>'
+                + (f'<div class="sub">{_text(sub)}</div>' if sub else "") + f"</{tag}>")
 
     def card(title: str, body: str) -> str:
-        return f'<div class="card"><h3>{text(title)}</h3>{body}</div>'
+        return f'<div class="card"><h3>{_text(title)}</h3>{body}</div>'
 
     def subscriptions_table(subscriptions: list[dict], now: datetime) -> str:
         if not subscriptions:
@@ -372,8 +389,8 @@ def render(snapshot: dict) -> str:
                     pace = "full in " + _duration(limit["full_at"] - now.timestamp())
                 elif limit.get("at_reset") is not None:
                     pace = f'lasts, {limit["at_reset"]:g}% at reset'
-                cells = (text(label) if index == 0 else "", text(limit.get("name", "–")), use,
-                         reset, f"{rate:.1f}%/h" if rate is not None else "–", text(pace))
+                cells = (_text(label) if index == 0 else "", _text(limit.get("name", "–")), use,
+                         reset, f"{rate:.1f}%/h" if rate is not None else "–", _text(pace))
                 rows.append("<tr>" + "".join(f"<td>{cell}</td>" for cell in cells) + "</tr>")
         headings = ("Subscription", "Limit", "Used", "Resets", "Rate", "At this pace")
         return ('<div class="scroll"><table><thead><tr>'
@@ -385,7 +402,7 @@ def render(snapshot: dict) -> str:
     age = snapshot.get("last_event_age_s")
     last_event = f"last event {_age(age)} ago" if age is not None else "no events yet"
     header = ('<header><h1>Fabrig status</h1><span class="meta">'
-              + text(f"Updated {clock} · {last_event}") + '</span></header>')
+              + _text(f"Updated {clock} · {last_event}") + '</span></header>')
     content = '<p class="empty">The event log is unreadable.</p>'
     if snapshot.get("log") == "ok":
         runs, active_calls = snapshot["runs_in_flight"], snapshot["calls_in_flight"]
@@ -410,47 +427,44 @@ def render(snapshot: dict) -> str:
             tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} subscriptions"),
         ]) + '</div>'
         content += ('<h2>Waiting on the user</h2><div class="panel">'
-                    + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
-                                             ("Parked chains", waiting["by_kind"]["parked"])])
-                    + f'<p class="facts">{text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
-                    + f'<p><a href="{text(ISSUES)}">Open the questions</a></p></div>')
+                    + _table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
+                                              ("Parked chains", waiting["by_kind"]["parked"])])
+                    + f'<p class="facts">{_text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
+                    + f'<p><a href="{_text(ISSUES)}">Open the questions</a></p></div>')
         content += ('<h2>Subscriptions</h2><div class="panel">'
                     + subscriptions_table(subscriptions, updated) + '</div>')
         drafts = []
         for name, counts in snapshot["drafts"].items():
-            state = badge("running", "info") if counts["runs_in_flight"] else badge("idle", "neutral")
-            drafts.append(f'<tr><td>{text(name)}</td><td>{state}</td>'
-                          f'<td class="num">{text(counts["runs_in_flight"])}</td>'
-                          f'<td class="num">{text(counts["merged_today"])}</td>'
-                          f'<td class="num">{text(counts["landed_today"])}</td></tr>')
+            state = _badge("running", "info") if counts["runs_in_flight"] else _badge("idle", "neutral")
+            drafts.append(f'<tr><td>{_text(name)}</td><td>{state}</td>'
+                          f'<td class="num">{_text(counts["runs_in_flight"])}</td>'
+                          f'<td class="num">{_text(counts["merged_today"])}</td>'
+                          f'<td class="num">{_text(counts["landed_today"])}</td></tr>')
         draft_table = ('<div class="scroll"><table><thead><tr><th>Draft</th><th>State</th>'
                        '<th class="num">Runs in flight</th><th class="num">Merged today</th>'
                        '<th class="num">Landed today</th></tr></thead><tbody>'
                        + "".join(drafts) + '</tbody></table></div>')
         content += ('<h2>Drafts</h2><div class="panel">'
                     + (draft_table if drafts else '<p class="empty">No draft active today.</p>') + '</div>')
-        content += ('<h2>Overlaps</h2><div class="panel">'
-                    + (table(("Drafts", "Files"), [(" · ".join(pair["drafts"]), pair["count"])
-                                                  for pair in snapshot["overlaps"]])
-                       if snapshot["overlaps"] else '<p class="empty">No drafts overlap.</p>') + '</div>')
+        content += _overlaps_panel(snapshot["overlaps"])
         ended = [(outcome, snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES]
         content += '<h2>Today</h2><div class="cards">' + "".join([
-            card("Runs ended", table(("Outcome", "Runs"), ended,
-                                    badges={"done": "good", "question": "warning", "infra": "neutral",
-                                            "failed": "critical", "other": "neutral"})),
-            card("Landings", table(("", "Last hour", "Today"), [
+            card("Runs ended", _table(("Outcome", "Runs"), ended,
+                                     badges={"done": "good", "question": "warning", "infra": "neutral",
+                                             "failed": "critical", "other": "neutral"})),
+            card("Landings", _table(("", "Last hour", "Today"), [
                 ("Landed on main", snapshot["landed"]["last_hour"], snapshot["landed"]["today"]),
                 ("Merged into a trunk", snapshot["merged"]["last_hour"], snapshot["merged"]["today"]),
                 ("Rejected", "–", snapshot["rejected_today"]),
             ])),
-            card("Weight", table(("", "Millions"), [
+            card("Weight", _table(("", "Millions"), [
                 ("Codex", f'{weights["codex_m"]:.1f}'), ("Claude", f'{weights["claude_m"]:.1f}'),
             ])),
         ]) + '</div>'
         content += '<h2>In flight</h2><div class="cards">' + "".join([
-            card("Codex runs by host", table(("Host", "Runs"), runs["by_host"].items())
+            card("Codex runs by host", _table(("Host", "Runs"), runs["by_host"].items())
                  if runs["by_host"] else '<p class="empty">None.</p>'),
-            card("Claude calls by role", table(("Role", "Calls"), active_calls["by_role"].items())
+            card("Claude calls by role", _table(("Role", "Calls"), active_calls["by_role"].items())
                  if active_calls["by_role"] else '<p class="empty">None.</p>'),
         ]) + '</div>'
     footer = ("<footer>From fab's event log on hel8; refreshes every 30 s. "
