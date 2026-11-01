@@ -19,10 +19,11 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, findings, log, plan, tier_reds, triage, wake, walks
+from fab import atomic, findings, log, plan, tier_reds, triage, wake
 from fab.plan import Plan
 from fab.report import LANDING
 from fab.sh import Failed
+from fab.walks import editions as read_editions
 
 PAGE = "user.md"  # the page, under FAB_HOME
 PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (fab-tick.md 5)
@@ -449,7 +450,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
         if not loaded.rungs:
             continue
         try:
-            editions = walks.editions(loaded, path.parent)
+            editions = read_editions(loaded, path.parent)
         except (OSError, ValueError, Failed) as error:
             unread.append(f"{path.parent}: {' '.join(str(error).splitlines())}")
             continue

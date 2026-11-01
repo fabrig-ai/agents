@@ -170,9 +170,11 @@ class ChannelTest(unittest.TestCase):
         sh = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.home)))
         sh.on(["git", "show"], Result(0, "The committed brief.\n"))
         read_editions = walks.editions
-        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+        with patch.object(channel, "read_editions", side_effect=lambda plan, directory:
                           read_editions(plan, directory, sh=sh)):
-            page = channel.compose(directories, events, ts(4))
+            with patch.object(walks, "editions", wraps=read_editions) as shared_editions:
+                page = channel.compose(directories, events, ts(4))
+        shared_editions.assert_not_called()
         self.assertLess(page.index("## After landing"), page.index("## The ladder"))
         for plan in loaded:
             editions = {rung.id: walks.edition([(path, "The committed brief.\n")
@@ -201,7 +203,7 @@ class ChannelTest(unittest.TestCase):
         sh.on(["git", "show", "origin/main:missing-brief/briefs/kit.md"], Result(1))
         sh.on(["git", "show"], Result(0, "brief\n"))
         read_editions = walks.editions
-        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+        with patch.object(channel, "read_editions", side_effect=lambda plan, directory:
                           read_editions(plan, directory, sh=sh)):
             page = channel.compose(directories, [], ts(4))
         self.assertLess(page.index("## The ladder"), page.index("## Unread"))
@@ -225,7 +227,7 @@ class ChannelTest(unittest.TestCase):
         sh = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.home)))
         sh.on(["git", "show"], Result(0, "brief\n"))
         read_editions = walks.editions
-        with patch.object(channel.walks, "editions", side_effect=lambda plan, directory:
+        with patch.object(channel, "read_editions", side_effect=lambda plan, directory:
                           read_editions(plan, directory, sh=sh)):
             self.assertNotIn("### backlog:ladder,", channel.compose([directory], events[:-2], ts(6)))
             page = channel.compose([directory], events, ts(6))
