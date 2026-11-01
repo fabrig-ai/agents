@@ -293,12 +293,14 @@ class RenderTest(unittest.TestCase):
         self.assertIn('<body><main><header><h1>Fabrig status</h1>', page)
         self.assertIn('<span class="meta">Updated 00:30 UTC · last event 7 min ago</span></header>', page)
         self.assertEqual(re.findall(r'<h2>(.*?)</h2>', page),
-                         ["Drafts", "Today", "In flight", "Waiting on the user"])
+                         ["Waiting on the user", "Drafts", "Today", "In flight"])
+        self.assertLess(page.index('<header>'), page.index('<div class="tiles">'))
+        self.assertIn('</div></div><h2>Waiting on the user</h2>', page)
         self.assertEqual(page.count('<div class="panel">'), 2)
         self.assertEqual(page.count('<div class="cards">'), 2)
         self.assertEqual(page.count('<div class="card">'), 5)
         self.assertEqual(page.count('<div class="scroll"><table>'), 7)
-        self.assertEqual(re.findall(r'<div class="tile">(.*?)</div></div>', page), [
+        self.assertEqual(re.findall(r'<(?:div|a) class="tile"[^>]*>(.*?)</div></(?:div|a)>', page), [
             '<div class="label">Runs in flight</div><div class="value">5</div>'
             '<div class="sub">hetzner6 2 · hetzner9 3',
             '<div class="label">Calls in flight</div><div class="value">4</div>'
@@ -317,6 +319,24 @@ class RenderTest(unittest.TestCase):
         self.assertTrue(page.endswith('</footer></main></body></html>'))
         self.assertIn("<footer>Counts only, from fab's event log on hel8; refreshes every 30 s. "
                       'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>', page)
+
+    def test_serve_render_waiting_links_to_open_questions(self):
+        issues = "https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&amp;labels=1"
+        for current in (self.current, serve.snapshot([], NOW, [])):
+            with self.subTest(asks=current["waiting_on_user"]["asks"]):
+                page = serve.render(current)
+                self.assertIn(f'<a class="tile" href="{issues}"><div class="label">'
+                              'Waiting on the user</div>'
+                              f'<div class="value">{current["waiting_on_user"]["asks"]}</div>', page)
+                for label, kind in (("Call questions", "call"), ("Parked chains", "parked")):
+                    count = current["waiting_on_user"]["by_kind"][kind]
+                    self.assertIn(f'<tr><td><a href="{issues}">{label}</a></td>'
+                                  f'<td class="num">{count}</td></tr>', page)
+                self.assertIn(f'</p><p><a href="{issues}">Open the questions</a></p></div>'
+                              '<h2>Drafts</h2>', page)
+                self.assertEqual(page.count(f'href="{issues}"'), 4)
+                self.assertIn('a{color:var(--info)}', page)
+                self.assertIn('a.tile{color:inherit;text-decoration:none;display:block}', page)
 
     def test_serve_render_drafts_and_outcome_badges(self):
         page = serve.render(self.current)
@@ -350,7 +370,7 @@ class RenderTest(unittest.TestCase):
         self.assertIn('<h2>Waiting on the user</h2><div class="panel"><div class="scroll"><table>'
                       '<thead><tr><th>Kind</th><th class="num">Open</th>', page)
         for label, value in (("Codex", "12.3"), ("Claude", "4.0"), ("hetzner6", 2), ("hetzner9", 3),
-                             ("answer", 1), ("review", 3), ("Call questions", 1), ("Parked chains", 2)):
+                             ("answer", 1), ("review", 3)):
             self.assertIn(f'<tr><td>{label}</td><td class="num">{value}</td></tr>', page)
         self.assertIn('<p class="facts">Oldest: 3 h</p>', page)
 

@@ -15,6 +15,7 @@ from fab import accounting, calls, channel, hosts as machines, log
 
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
+ISSUES = "https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1"
 
 STYLE = """:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#6f6d68;
 --grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--run:#2a78d6;--wait:#eb6834;--info:#2a78d6;
@@ -26,6 +27,8 @@ STYLE = """:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b
 --muted:#9a988f;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--run:#3987e5;--wait:#d95926;
 --info:#3987e5;--code:#262624}
 *{box-sizing:border-box}
+a{color:var(--info)}
+a.tile{color:inherit;text-decoration:none;display:block}
 body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:1280px;margin:0 auto;padding:20px 16px 48px}
 header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px;margin-bottom:16px}
@@ -199,9 +202,11 @@ def render(snapshot: dict) -> str:
         return f'<span class="badge {text(state)}"><i></i>{text(label)}</span>'
 
     def tile(label: str, value: object, sub: str = "") -> str:
-        return (f'<div class="tile"><div class="label">{text(label)}</div>'
+        tag = "a" if label == "Waiting on the user" else "div"
+        href = f' href="{text(ISSUES)}"' if tag == "a" else ""
+        return (f'<{tag} class="tile"{href}><div class="label">{text(label)}</div>'
                 f'<div class="value">{text(value)}</div>'
-                + (f'<div class="sub">{text(sub)}</div>' if sub else "") + "</div>")
+                + (f'<div class="sub">{text(sub)}</div>' if sub else "") + f"</{tag}>")
 
     def table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = None) -> str:
         headings = []
@@ -212,6 +217,8 @@ def render(snapshot: dict) -> str:
             cells = []
             for index, value in enumerate(values):
                 cell = badge(value, badges[value]) if index == 0 and badges else text(value)
+                if index == 0 and labels == ("Kind", "Open"):
+                    cell = f'<a href="{text(ISSUES)}">{cell}</a>'
                 cells.append(f'<td class="num">{cell}</td>' if index else f"<td>{cell}</td>")
             rows.append("<tr>" + "".join(cells) + "</tr>")
         return ('<div class="scroll"><table><thead><tr>' + "".join(headings) + '</tr></thead><tbody>'
@@ -244,6 +251,11 @@ def render(snapshot: dict) -> str:
             tile("Weight today, Codex", f'{weights["codex_m"]:.1f}M'),
             tile("Weight today, Claude", f'{weights["claude_m"]:.1f}M'),
         ]) + '</div>'
+        content += ('<h2>Waiting on the user</h2><div class="panel">'
+                    + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
+                                             ("Parked chains", waiting["by_kind"]["parked"])])
+                    + f'<p class="facts">{text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
+                    + f'<p><a href="{text(ISSUES)}">Open the questions</a></p></div>')
         drafts = []
         for name, counts in snapshot["drafts"].items():
             state = badge("running", "info") if counts["runs_in_flight"] else badge("idle", "neutral")
@@ -277,10 +289,6 @@ def render(snapshot: dict) -> str:
             card("Claude calls by role", table(("Role", "Calls"), active_calls["by_role"].items())
                  if active_calls["by_role"] else '<p class="empty">None.</p>'),
         ]) + '</div>'
-        content += ('<h2>Waiting on the user</h2><div class="panel">'
-                    + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
-                                             ("Parked chains", waiting["by_kind"]["parked"])])
-                    + f'<p class="facts">{text("Oldest: " + _age(waiting["oldest_age_s"]))}</p></div>')
     footer = ("<footer>Counts only, from fab's event log on hel8; refreshes every 30 s. "
               'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>')
     return ("""<!doctype html>

@@ -1812,8 +1812,14 @@ login that still works reused across them before more are signed in.
   holders in HTML or JSON.
 - The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
-  refresh every 30 seconds, phone width and light and dark colours. Now,
-  Waiting on the user, Today and Drafts; ages in seconds, minutes or hours.
+  refresh every 30 seconds, phone width and light and dark colours. Header,
+  tiles, Waiting on the user, Drafts, Today, In flight, then footer; ages in
+  seconds, minutes or hours. Waiting is the first section below the tiles.
+  Its tile, kind labels (Call questions and Parked chains) and "Open the
+  questions" below the oldest age link to the forge's open `waiting-on-user`
+  issues at `https://git.fabrig.ai/fabrig-ai/agents/issues?state=open&labels=1`.
+  The repository is private; the public page links to it without showing
+  issue contents.
 - **Deployment is by hand at the user's OK:** a transient unit on hel8 and
   Caddy's `status.fabrig.ai` moved to `reverse_proxy 127.0.0.1:8370`.
 
