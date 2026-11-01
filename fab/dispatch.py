@@ -1971,6 +1971,10 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
             sh(["git", "push", "origin", f"{step.tip}:refs/heads/ready/{plan.trunk}"],
                cwd=str(checkout), check=True)
             log.append("branch.ready", path=log_path, task=subject, branch=plan.trunk, tip=step.tip)
+        elif step.kind == "stop":
+            gate = min((name for name, host in hosts.items() if "gate" in host.roles), default="")
+            for ev, fields in integration.stopped(plan, events, step, gate):
+                log.append(ev, path=log_path, **fields)
         elif not any(event.get("ev") == "note" and event.get("task") == subject
                      and event.get("tip") == step.tip and event.get("text") == detail for event in events):
             log.append("note", path=log_path, task=subject, tip=step.tip, text=detail)

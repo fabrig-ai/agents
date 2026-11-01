@@ -329,7 +329,7 @@ class IntegrationTest(unittest.TestCase):
         events += [dict(refusal, tip="fixed")]
         self.assertEqual(list(integration.repair_tasks(PLAN, events, {})), ["demo/catch-up-1"])
         self.assertEqual(step(), integration.Step("stop", "fixed",
-                         "main catch-up refused repeatedly; needs judgement"))
+                         "main catch-up refused repeatedly; needs judgement", why="catch-up"))
         events[-1] = dict(refusal, tip="fixed", main="newer-sha")
         self.assertEqual(list(integration.repair_tasks(PLAN, events, {})),
                          ["demo/catch-up-1", "demo/catch-up-2"])
@@ -436,7 +436,7 @@ class IntegrationTest(unittest.TestCase):
         rejections = [dict(ev="branch.rejected", task="demo/integration", tip="tip", step="default",
                            queue_ts=f"t{n}") for n in range(integration.QUEUE_LIMIT)]
         step = integration.next_step(PLAN, {}, [merged(), *checked(), *rejections])
-        self.assertEqual(step.kind, "stop")
+        self.assertEqual((step.kind, step.why), ("stop", "queue"))
 
     def test_next_step_red_waits_for_repair_then_checks_new_tip_and_third_red_stops(self):
         events = [merged()] + checked(outcome="failed")
@@ -447,7 +447,7 @@ class IntegrationTest(unittest.TestCase):
         self.assertEqual(integration.next_step(PLAN, tasks, events), integration.Step("check", "fixed", "fixed"))
         events += checked(2, "failed", "fixed") + checked(3, "failed", "fixed")
         self.assertEqual(integration.next_step(PLAN, integration.repair_tasks(PLAN, events, {}), events),
-                         integration.Step("stop", "fixed", "red 3 times; needs judgement"))
+                         integration.Step("stop", "fixed", "red 3 times; needs judgement", why="red"))
 
     def test_baselines_accepts_only_known_baseline_paths(self):
         self.assertEqual(integration.baselines(["smith/scripts/old-forms.txt", "skein/scripts/old-forms.txt"]),
@@ -463,6 +463,107 @@ class IntegrationTest(unittest.TestCase):
                                       ["python3", "-I", "-B", "scripts/old_forms.py", "--write"],
                                       ["git", "add", "--", "skein/scripts/old-forms.txt"]])
         self.assertEqual([call.cwd for call in fake.calls], ["/checkout", "/checkout/skein", "/checkout"])
+
+
+class IntegrationStopTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(tmp_home())
+        red = [merged()]
+        for n in range(1, 4):
+            red += checked(n, "failed")
+        queue = [merged(), *checked()]
+        queue += [dict(ev="branch.rejected", task="demo/integration", tip="tip", queue_ts=f"t{n}",
+                       log=f"/queue/check-{n}.log") for n in range(1, 4)]
+        catch = [merged()]
+        catch += [dict(ev="branch.rejected", task="demo/integration", tip="tip", main=f"main-{n}",
+                       step=integration.CATCH_UP, findings=f"conflict {n}") for n in range(1, 4)]
+        self.causes = {"red": red, "queue": queue, "catch-up": catch}
+
+    def test_lifted_uses_log_position_and_only_the_integration_answer(self):
+        self.assertEqual(integration.lifted(PLAN, []), -1)
+        events = [dict(ev="question.answered", task="demo/repair-1"),
+                  dict(ev="question.answered", task="other/integration"),
+                  dict(ev="question.asked", task="demo/integration")]
+        self.assertEqual(integration.lifted(PLAN, events), -1)
+        events += [dict(ev="question.answered", task="demo/integration", ts="later"),
+                   dict(ev="question.answered", task="demo/integration", ts="earlier"),
+                   dict(ev="question.answered", task="demo/repair-2")]
+        self.assertEqual(integration.lifted(PLAN, events), 4)
+
+    def test_red_stop_records_last_failed_end_check_report_and_run(self):
+        events = self.causes["red"]
+        events += [dict(entry, mid=True) for entry in checked(4, "failed")]
+        events += checked(5) + [run_started("other/integration", kind="check"),
+                                run_ended("other/integration", outcome="failed")]
+        step = integration.next_step(PLAN, {}, events)
+        self.assertEqual(step.why, "red")
+        self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [
+            ("plan.stopped", dict(task="demo/integration", tip="tip", why="red", text=step.detail,
+                                 report=str(log.home() / "runs/demo/integration-3/report.md"))),
+            ("question.asked", dict(task="demo/integration", run="demo/integration-3", text=step.detail, park=True))])
+
+    def test_queue_stop_records_last_imported_rejection_on_the_gate(self):
+        events = self.causes["queue"]
+        events += [dict(ev="branch.rejected", task="demo/integration", log="/not-imported"),
+                   dict(ev="branch.rejected", task="other/integration", queue_ts="foreign", log="/foreign")]
+        step = integration.next_step(PLAN, {}, events)
+        self.assertEqual(step.why, "queue")
+        self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [
+            ("plan.stopped", dict(task="demo/integration", tip="tip", why="queue", text=step.detail,
+                                 report="gate:/queue/check-3.log")),
+            ("question.asked", dict(task="demo/integration", run="", text=step.detail, park=True))])
+
+    def test_catch_up_stop_quotes_twenty_lines_from_the_stopping_refusal(self):
+        events = self.causes["catch-up"]
+        events += [dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk,
+                        tip="main-3", main="tip"), *self.causes["catch-up"][1:]]
+        events[-1] = dict(events[-1], findings="\n".join(f"conflict line {n}" for n in range(25)))
+        events += [dict(events[-1], findings="a later refusal"),
+                   dict(events[-1], task="other/integration", findings="foreign refusal")]
+        step = integration.next_step(PLAN, {}, events)
+        self.assertEqual(step.why, "catch-up")
+        text = step.detail + "\n\n" + "\n".join(f"conflict line {n}" for n in range(20))
+        self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [
+            ("plan.stopped", dict(task="demo/integration", tip="tip", why="catch-up", text=text, report="")),
+            ("question.asked", dict(task="demo/integration", run="", text=text, park=True))])
+
+    def test_repaired_main_sha_refused_again_records_that_refusals_findings(self):
+        events = self.causes["catch-up"][:2]
+        events += [merged("repaired", "demo/catch-up-1"),
+                   dict(events[-1], tip="repaired", findings="still conflicts after repair")]
+        step = integration.next_step(PLAN, {}, events)
+        self.assertEqual(step.why, "catch-up")
+        text = step.detail + "\n\nstill conflicts after repair"
+        self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [
+            ("plan.stopped", dict(task="demo/integration", tip="repaired", why="catch-up", text=text, report="")),
+            ("question.asked", dict(task="demo/integration", run="", text=text, park=True))])
+
+    def test_stops_ask_once_across_merges_and_ask_again_after_their_answer(self):
+        for why, events in self.causes.items():
+            with self.subTest(why=why):
+                events += [dict(ev="plan.stopped", task="other/integration")]
+                step = integration.next_step(PLAN, {}, events)
+                records = integration.stopped(PLAN, events, step, "gate")
+                self.assertEqual([ev for ev, fields in records], ["plan.stopped", "question.asked"])
+                ev, fields = records[0]
+                events += [dict(ev=ev, **fields)]
+                self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [])
+                events += [merged("new-tip", "demo/repair-1"),
+                           dict(ev="question.answered", task="other/integration"),
+                           dict(ev="question.answered", task="demo/repair-1")]
+                step = replace(step, tip="new-tip")
+                self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [])
+                events += [dict(ev="question.answered", task="demo/integration")]
+                again = integration.stopped(PLAN, events, step, "gate")
+                self.assertEqual([ev for ev, fields in again], ["plan.stopped", "question.asked"])
+                self.assertEqual(again[0][1]["tip"], "new-tip")
+                events += [dict(ev=ev, **fields) for ev, fields in again]
+                self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [])
+
+    def test_other_steps_record_no_stop(self):
+        step = integration.Step("ready", "tip", "tip")
+        self.assertEqual(step.why, "")
+        self.assertEqual(integration.stopped(PLAN, [], step, ""), [])
 
 
 class IntegrationCommandTest(unittest.TestCase):

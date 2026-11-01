@@ -21,11 +21,12 @@ QUEUE_LIMIT = 3  # queue rejections of a trunk before its plan stops for judgeme
 
 @dataclass(frozen=True)
 class Step:
-    """The next integration action, its trunk tip and the detail printed by the tick."""
+    """The next action, trunk tip, printed detail and stop cause (empty for other actions)."""
 
     kind: str
     tip: str
     detail: str
+    why: str = ""
 
 
 MID_EVERY = 10  # task merges since the last check that call for a check along the way (integration.md 3)
@@ -225,11 +226,11 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
             check["outcome"] is None for check in checks):
         return None
     if sum(check["outcome"] == "failed" and not check.get("mid") for check in checks) >= 3:
-        return Step("stop", tip, "red 3 times; needs judgement")
+        return Step("stop", tip, "red 3 times; needs judgement", why="red")
     if catch_up_waiting(plan, events):
         if plan.ready and caught and trunk:
             return Step("caught", trunk, "main caught up by hand")
-        return Step("stop", tip, "main catch-up refused repeatedly; needs judgement")
+        return Step("stop", tip, "main catch-up refused repeatedly; needs judgement", why="catch-up")
     views = state.fold(tasks, events)
     if any(view.status != "landed" for view in views.values()):
         return _mid_step(plan, tasks, views, events, tip, checks, main=main)
@@ -239,6 +240,46 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict], *,
     if checked["outcome"] == "done" and plan.ready:
         return queue_step(plan, events, tip)
     return None
+
+
+def lifted(plan: Plan, events: Sequence[dict]) -> int:
+    """The last log position answering <draft>/integration, or -1 if none. Pure."""
+    return next((position for position in range(len(events) - 1, -1, -1)
+                 if events[position].get("ev") == "question.answered"
+                 and events[position].get("task") == f"{plan.draft}/integration"), -1)
+
+
+def stopped(plan: Plan, events: Sequence[dict], step: Step, gate: str) -> list[tuple[str, dict]]:
+    """The stop and parked question to log once since the last integration answer. Pure.
+
+    A red names its last failed end check's run and local report; a queue stop names
+    its last rejection's log on gate. A catch-up quotes at most 20 lines of the
+    stopping refusal's findings. Merges while a stop holds do not ask again.
+    """
+    subject = f"{plan.draft}/integration"
+    if step.kind != "stop" or any(event.get("ev") == "plan.stopped" and event.get("task") == subject
+                                  for event in events[lifted(plan, events) + 1:]):
+        return []
+    text, report, run_id = step.detail, "", ""
+    if step.why == "red":
+        check = next(check for check in reversed(_checks(plan, events))
+                     if check["outcome"] == "failed" and not check.get("mid"))
+        run_id = check["run"]
+        report = str(log.home() / "runs" / run_id / "report.md")
+    elif step.why == "queue":
+        rejected = next(event for event in reversed(events) if event.get("task") == subject
+                        and event.get("ev") == "branch.rejected" and "queue_ts" in event)
+        report = f"{gate}:{rejected.get('log', '')}"
+    elif step.why == "catch-up":
+        clean = next((position for position in range(len(events) - 1, -1, -1)
+                      if _clean_catch_up(plan, events[position])), -1)
+        refusal = next(events[position] for position, repair in _catch_up_refusals(plan, events).items()
+                       if repair is None and position > clean)
+        findings = "\n".join(refusal.get("findings", "").splitlines()[:20])
+        if findings:
+            text += "\n\n" + findings
+    return [("plan.stopped", dict(task=subject, tip=step.tip, why=step.why, text=text, report=report)),
+            ("question.asked", dict(task=subject, run=run_id, text=text, park=True))]
 
 
 def _mid_step(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
@@ -294,7 +335,7 @@ def queue_step(plan: Plan, events: Sequence[dict], tip: str) -> Step | None:
     rejections = [(position, event) for position, event in mine
                   if event.get("ev") == "branch.rejected" and "queue_ts" in event]
     if len(rejections) >= QUEUE_LIMIT:
-        return Step("stop", tip, f"rejected by the queue {QUEUE_LIMIT} times; needs judgement")
+        return Step("stop", tip, f"rejected by the queue {QUEUE_LIMIT} times; needs judgement", why="queue")
     readied = [(position, event) for position, event in mine if event.get("ev") == "branch.ready"]
     if not readied or readied[-1][1].get("tip") != tip:
         return Step("ready", tip, tip)

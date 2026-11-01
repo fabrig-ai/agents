@@ -5702,18 +5702,43 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertIn("draft/repair-1", tasks)
         self.assertIn("`trunk-tip`", tasks["draft/repair-1"].body)
 
-    def test_third_red_parks_without_starting_repair_and_notes_once_per_tip(self):
+    def test_third_red_records_stop_then_parked_question_once_across_ticks(self):
         for n in range(1, 4):
             self.append(run_started("draft/integration", n, kind="check", base="trunk-tip"),
                         run_ended("draft/integration", n, "failed"))
         self.tick()
         self.tick()
-        notes = [entry for entry in log.read(self.path) if entry["ev"] == "note"]
-        self.assertEqual(len(notes), 1)
-        self.assertEqual((notes[0]["text"], notes[0]["tip"]), ("red 3 times; needs judgement", "trunk-tip"))
-        # Read origin's branches and main's ancestry; nothing is started.
-        self.assertEqual([call.argv[:2] for call in self.fake.calls],
-                         [["git", "for-each-ref"], ["git", "merge-base"], ["git", "rev-parse"]] * 2)
+        records = log.read(self.path)
+        stops = [entry for entry in records if entry["ev"] in ("plan.stopped", "question.asked")]
+        self.assertEqual([{key: value for key, value in entry.items() if key != "ts"} for entry in stops], [
+            dict(ev="plan.stopped", task="draft/integration", tip="trunk-tip", why="red",
+                 text="red 3 times; needs judgement",
+                 report=str(log.home() / "runs/draft/integration-3/report.md")),
+            dict(ev="question.asked", task="draft/integration", run="draft/integration-3",
+                 text="red 3 times; needs judgement", park=True)])
+        self.assertFalse(any(entry["ev"] == "note" for entry in records))
+        self.assertEqual([entry["run"] for entry in records if entry["ev"] == "run.started"],
+                         [f"draft/integration-{n}" for n in range(1, 4)])
+
+    def test_queue_stop_report_uses_first_gate_by_name_or_empty_without_gates(self):
+        for gates_present in (True, False):
+            with self.subTest(gates_present=gates_present):
+                path = self.home / f"queue-stop-{gates_present}.jsonl"
+                for entry in [event("branch.landed", into=self.plan.trunk, main="trunk-tip", tip="a-tip"),
+                              run_started("draft/integration", kind="check", base="trunk-tip"),
+                              run_ended("draft/integration")]:
+                    log.append(path=path, **entry)
+                for n in range(3):
+                    log.append("branch.rejected", path=path, task="draft/integration", queue_ts=str(n),
+                               log=f"/queue/check-{n}.log")
+                hosts = {**self.hosts, "z-gate": Host("z-gate", "fake@z", ("gate",)),
+                         "a-gate": Host("a-gate", "fake@a", ("gate",))} if gates_present else self.hosts
+                dispatch._integration(self.plan, self.tasks, self.home, hosts, sh=self.fake, log_path=path)
+                records = log.read(path)
+                self.assertEqual(records[-2]["ev"], "plan.stopped")
+                self.assertEqual(records[-2]["report"], ("a-gate" if gates_present else "") + ":/queue/check-2.log")
+                self.assertEqual((records[-1]["ev"], records[-1]["run"], records[-1]["park"]),
+                                 ("question.asked", "", True))
 
     def test_import_queue_accepts_integration_landing_without_a_spec(self):
         gate = Host("gate", "fake@gate", ("gate",))
