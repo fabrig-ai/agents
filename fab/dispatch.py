@@ -1924,10 +1924,20 @@ def _contains(sha: str, descendant: str, checkout: Path, *, sh: Runner) -> bool:
     return ancestor.ok
 
 
+def _lift_catch_up(plan: Plan, *, log_path: Path | None) -> list[dict]:
+    """Clear a caught-up stop's question once and return the current log."""
+    events = log.read(log_path)
+    if integration.catch_up_lifts(plan, events):
+        log.append("question.answered", path=log_path, task=f"{plan.draft}/integration",
+                   answer="lifted by a clean catch-up", by="tick")
+        events = log.read(log_path)
+    return events
+
+
 def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                  hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> None:
     """Read main's ancestry after the checkout's fetch and take the trunk's next action."""
-    events = log.read(log_path)
+    events = _lift_catch_up(plan, log_path=log_path)
     tasks = _integration_tasks(plan, tasks, events)
     subject = f"{plan.draft}/integration"
     step = None
@@ -1978,6 +1988,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
         elif not any(event.get("ev") == "note" and event.get("task") == subject
                      and event.get("tip") == step.tip and event.get("text") == detail for event in events):
             log.append("note", path=log_path, task=subject, tip=step.tip, text=detail)
+        _lift_catch_up(plan, log_path=log_path)
     except (OSError, ValueError, Failed) as error:
         detail = "failed: " + " ".join(str(error).splitlines())
         log.append("note", path=log_path, task=subject, text=detail)

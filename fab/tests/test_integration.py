@@ -479,6 +479,132 @@ class IntegrationStopTest(unittest.TestCase):
                        step=integration.CATCH_UP, findings=f"conflict {n}") for n in range(1, 4)]
         self.causes = {"red": red, "queue": queue, "catch-up": catch}
 
+    def test_end_reds_restart_at_the_lift_and_keep_repair_numbers(self):
+        for source in ({"call": "answer-1"}, {}):
+            with self.subTest(source=source):
+                events = list(self.causes["red"])
+                self.assertEqual(integration.next_step(PLAN, {}, events).kind, "stop")
+                events += [dict(ev="question.answered", task="demo/integration", **source)]
+                for n in range(4, 7):
+                    events += checked(n, "failed")
+                    repairs = integration.repair_tasks(PLAN, events, {})
+                    self.assertIn(f"demo/repair-{n}", repairs)
+                    step = integration.next_step(PLAN, repairs, events)
+                    if n < 6:
+                        self.assertIsNone(step)
+                    else:
+                        self.assertEqual(step.why, "red")
+
+    def test_red_started_before_the_lift_does_not_count_when_it_ends_after(self):
+        events = [*self.causes["red"], *checked(4, "failed")[:1],
+                  dict(ev="question.answered", task="demo/integration"),
+                  *checked(4, "failed")[1:]]
+        for n in range(5, 8):
+            events += checked(n, "failed")
+            step = integration.next_step(PLAN, {}, events)
+            self.assertEqual(getattr(step, "why", None), "red" if n == 7 else None)
+
+    def test_queue_rejections_restart_at_the_last_lift(self):
+        events = list(self.causes["queue"])
+        self.assertEqual(integration.queue_step(PLAN, events, "tip").why, "queue")
+        for cycle in range(2):
+            events += [dict(ev="question.answered", task="demo/integration"),
+                       dict(ev="branch.ready", task="demo/integration", tip="tip")]
+            self.assertIsNone(integration.queue_step(PLAN, events, "tip"))
+            for n in range(1, 4):
+                events += [dict(ev="branch.rejected", task="demo/integration", queue_ts=f"{cycle}-{n}")]
+                step = integration.queue_step(PLAN, events, "tip")
+                self.assertEqual(step.kind, "stop" if n == 3 else "check")
+
+    def test_queue_lift_keeps_the_rejected_tip_due_for_a_recheck(self):
+        events = [dict(ev="branch.ready", task="demo/integration", tip="tip"),
+                  *self.causes["queue"],
+                  dict(ev="question.answered", task="demo/integration")]
+        self.assertEqual(integration.queue_step(PLAN, events, "tip").kind, "check")
+        events += checked(2)
+        self.assertEqual(integration.queue_step(PLAN, events, "tip").kind, "ready")
+
+    def test_catch_up_refusals_restart_after_each_lift_and_keep_repair_numbers(self):
+        events = list(self.causes["catch-up"])
+        for cycle in range(2):
+            events.append(dict(ev="question.answered", task="demo/integration"))
+            self.assertIsNone(integration.catch_up_waiting(PLAN, events))
+            for n in range(1, 4):
+                sha = f"main-{cycle}-{n}"
+                events.append(dict(ev="branch.rejected", task="demo/integration", tip="tip", main=sha,
+                                   step=integration.CATCH_UP, findings=sha))
+                repairs = integration.repair_tasks(PLAN, events, {})
+                if n < 3:
+                    identifier = f"demo/catch-up-{3 + cycle * 2 + n - 1}"
+                    self.assertIn(identifier, repairs)
+                    self.assertEqual(integration.catch_up_main(PLAN, events, identifier), sha)
+                    self.assertIsNone(integration.catch_up_waiting(PLAN, events))
+                    self.assertIsNone(integration.next_step(PLAN, repairs, events))
+                else:
+                    self.assertEqual(integration.catch_up_waiting(PLAN, events), sha)
+                    step = integration.next_step(PLAN, repairs, events)
+                    self.assertEqual(step.why, "catch-up")
+                    records = integration.stopped(PLAN, events, step, "gate")
+                    self.assertTrue(records[0][1]["text"].endswith(sha))
+                    events += [dict(ev=ev, **fields) for ev, fields in records]
+
+    def test_catch_up_repair_counts_as_merged_only_after_the_lift(self):
+        refusal = dict(ev="branch.rejected", task="demo/integration", tip="tip", main="same-sha",
+                       step=integration.CATCH_UP)
+        events = [merged(), refusal, merged(task="demo/catch-up-1"), refusal]
+        self.assertEqual(integration.catch_up_waiting(PLAN, events), "same-sha")
+        events += [dict(ev="question.answered", task="demo/integration"), refusal]
+        self.assertIsNone(integration.catch_up_waiting(PLAN, events))
+        self.assertIn("demo/catch-up-2", integration.repair_tasks(PLAN, events, {}))
+        events += [dict(merged(task="demo/catch-up-1"), into="other/integration"), refusal]
+        self.assertIsNone(integration.catch_up_waiting(PLAN, events))
+        events += [merged(task="demo/catch-up-1"), refusal]
+        self.assertEqual(integration.catch_up_waiting(PLAN, events), "same-sha")
+
+    def test_stop_answers_reach_unmerged_and_later_repairs_in_log_order(self):
+        events = [merged(), *checked(1, "failed"), merged(task="demo/repair-1"),
+                  *checked(2, "failed"), *checked(3, "failed"),
+                  dict(ev="branch.rejected", task="demo/integration", tip="tip", main="main-sha",
+                       step=integration.CATCH_UP),
+                  dict(ev="question.answered", task="demo/repair-2", answer="Own first."),
+                  dict(ev="question.answered", task="demo/integration", answer="First stop.", call="answer-1"),
+                  dict(ev="question.answered", task="demo/repair-2", answer="Own second."),
+                  dict(ev="question.answered", task="demo/integration", answer="Tick lift.", by="tick"),
+                  dict(ev="question.answered", task="demo/integration"),
+                  dict(ev="question.answered", task="other/integration", answer="Foreign stop."),
+                  dict(merged(task="demo/repair-2"), into="other/integration"),
+                  dict(ev="question.answered", task="demo/integration", answer="Second stop."),
+                  merged(task="demo/repair-2"),
+                  dict(ev="question.answered", task="demo/integration", answer="Third stop."),
+                  *checked(4, "failed")]
+        repairs = integration.repair_tasks(PLAN, events, {})
+        self.assertNotIn("## Answers", repairs["demo/repair-1"].body)
+        self.assertTrue(repairs["demo/repair-2"].body.endswith(
+            "## Answers\n\n- Own first.\n- First stop.\n- Own second.\n- Second stop.\n"))
+        for identifier in ("demo/repair-3", "demo/repair-4", "demo/catch-up-1"):
+            self.assertTrue(repairs[identifier].body.endswith(
+                "## Answers\n\n- First stop.\n- Second stop.\n- Third stop.\n"), identifier)
+        self.assertFalse(any("Tick lift." in task.body or "Foreign stop." in task.body
+                             for task in repairs.values()))
+
+    def test_clean_catch_up_lifts_only_an_open_catch_up_stop_after_it(self):
+        clean = dict(ev="branch.landed", task="demo/integration", branch="main", into=PLAN.trunk)
+        stop = dict(ev="plan.stopped", task="demo/integration", why="catch-up")
+        self.assertFalse(integration.catch_up_lifts(PLAN, [clean]))
+        self.assertFalse(integration.catch_up_lifts(PLAN, [clean, stop]))
+        for by in (None, "repair", "hand"):
+            with self.subTest(by=by):
+                events = [stop, dict(clean, by=by)]
+                self.assertTrue(integration.catch_up_lifts(PLAN, events))
+                events.append(dict(ev="question.answered", task="demo/integration"))
+                self.assertFalse(integration.catch_up_lifts(PLAN, events))
+        for unrelated in (dict(clean, task="other/integration"), dict(clean, into="other/integration"),
+                          dict(clean, branch="other"), dict(clean, ev="branch.rejected")):
+            self.assertFalse(integration.catch_up_lifts(PLAN, [stop, unrelated]))
+        for why in ("red", "queue"):
+            self.assertFalse(integration.catch_up_lifts(PLAN, [dict(stop, why=why), clean]))
+        self.assertFalse(integration.catch_up_lifts(PLAN, [stop, clean, dict(stop, why="red")]))
+
     def test_lifted_uses_log_position_and_only_the_integration_answer(self):
         self.assertEqual(integration.lifted(PLAN, []), -1)
         events = [dict(ev="question.answered", task="demo/repair-1"),
@@ -554,6 +680,16 @@ class IntegrationStopTest(unittest.TestCase):
                 step = replace(step, tip="new-tip")
                 self.assertEqual(integration.stopped(PLAN, events, step, "gate"), [])
                 events += [dict(ev="question.answered", task="demo/integration")]
+                if why == "red":
+                    events += [entry for n in range(4, 7) for entry in checked(n, "failed")]
+                else:
+                    if why == "queue":
+                        events += checked(4, tip="new-tip")
+                    events += [dict(ev="branch.rejected", task="demo/integration", queue_ts=str(n))
+                               if why == "queue" else dict(ev="branch.rejected", task="demo/integration",
+                                   step=integration.CATCH_UP, main=f"main-{n}", tip="new-tip")
+                               for n in range(4, 7)]
+                step = integration.next_step(PLAN, {}, events)
                 again = integration.stopped(PLAN, events, step, "gate")
                 self.assertEqual([ev for ev, fields in again], ["plan.stopped", "question.asked"])
                 self.assertEqual(again[0][1]["tip"], "new-tip")

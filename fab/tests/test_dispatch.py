@@ -610,6 +610,15 @@ class CallActionsTest(unittest.TestCase):
         self.assertEqual(self.actions([self.question()]), [Action("call", task="draft", run_kind="answer")])
         self.assertEqual(self.actions([self.question(), self.call()]), [])
 
+    def test_integration_answers_its_only_stop_question_at_once(self):
+        self.plan = replace(self.plan, landing="integration")
+        self.tasks = {"draft/a": task("a")}
+        events = [dict(ev="plan.stopped", task="draft/integration", why="red"),
+                  self.question("integration", ts=self.now)]
+        events[-1]["park"] = True
+        self.assertEqual(self.actions(events), [Action("call", task="draft", run_kind="answer")])
+        self.assertEqual(self.actions([*events, self.call()]), [])
+
     def test_answer_age_threshold_uses_oldest_timestamp(self):
         for ts, expected in (("2026-10-30T12:00:00.001Z", False),
                              ("2026-10-30T12:00:00.000Z", True),
@@ -2480,6 +2489,21 @@ parts = []
                 self.assertEqual([entry["task"] for entry in answered], ["draft/a"])
                 self.assertEqual(log.read()[-1]["call"], f"{root}-amend")
                 self.land.assert_called_with([f"calls/{root}"])
+
+    def test_finish_answer_logs_the_stop_answer_from_the_report(self):
+        path = self.home / "stop-answer.jsonl"
+        self.append(dict(ev="plan.stopped", task="draft/integration", why="red"),
+                    dict(ev="question.asked", task="draft/integration", park=True, text="Three reds."),
+                    call_started("answer-stop", "answer", "draft"), call_ended("answer-stop"), path=path)
+        write(log.home() / "calls/answer-stop/report.md",
+              "Done: judged\nAnswered: draft/integration\n"
+              "Answer draft/integration: Repair the shared fixture first.\n")
+        dispatch._finish(Action("finish", task="answer-stop"), log_path=path)
+        answered, = [entry for entry in log.read(path) if entry["ev"] == "question.answered"]
+        self.assertEqual({key: value for key, value in answered.items() if key != "ts"},
+                         dict(ev="question.answered", task="draft/integration", call="answer-stop",
+                              answer="Repair the shared fixture first."))
+        self.assertEqual(log.read(), [])
 
     def test_finish_lands_then_parses_answered_line_and_logs_once(self):
         self.add_task("b")
@@ -5484,10 +5508,13 @@ class IntegrationCheckTickTest(unittest.TestCase):
             self.tick()
         catch.assert_not_called()
         self.assertIn(ancestry, self.fake.argvs())
-        record = log.read(self.path)[-1]
+        record, answer = log.read(self.path)[-2:]
         self.assertEqual({key: record[key] for key in ("ev", "task", "branch", "tip", "main", "into", "by")},
                          dict(ev="branch.landed", task="draft/integration", branch="main",
                               tip="main-1", main="fetched-trunk-tip", into=self.plan.trunk, by="hand"))
+        self.assertEqual({key: value for key, value in answer.items() if key != "ts"},
+                         dict(ev="question.answered", task="draft/integration",
+                              answer="lifted by a clean catch-up", by="tick"))
         self.assertIn("integration draft caught", self.output.getvalue())
         with patch.object(dispatch, "_catch_up", return_value="newly-caught-tip") as catch:
             self.tick()
@@ -5495,6 +5522,37 @@ class IntegrationCheckTickTest(unittest.TestCase):
         check = log.read(self.path)[-1]
         self.assertEqual((check["ev"], check["kind"], check["base"]), ("run.started", "check", "newly-caught-tip"))
         self.assertEqual(sum(entry.get("by") == "hand" for entry in log.read(self.path)), 1)
+
+    def test_clean_catch_up_answers_only_the_catch_up_stop_once_across_ticks(self):
+        for why in ("catch-up", "red", "queue"):
+            for by in (None, "repair", "hand"):
+                with self.subTest(why=why, by=by):
+                    write(self.path, "")
+                    self.append(event("branch.landed", into=self.plan.trunk, main="trunk-tip", tip="a-tip"),
+                                dict(ev="plan.stopped", task="draft/integration", why=why),
+                                dict(ev="question.asked", task="draft/integration", park=True, text="Judge."),
+                                dict(ev="branch.landed", task="draft/integration", branch="main",
+                                     into=self.plan.trunk, main="caught-tip", tip="main-sha", by=by))
+                    with patch.object(dispatch, "_integration_check"), patch.object(dispatch, "_catch_up"):
+                        self.tick()
+                        self.tick()
+                    answers = [{key: value for key, value in entry.items() if key != "ts"}
+                               for entry in log.read(self.path) if entry["ev"] == "question.answered"]
+                    self.assertEqual(answers, [dict(ev="question.answered", task="draft/integration",
+                                     answer="lifted by a clean catch-up", by="tick")] if why == "catch-up" else [])
+
+    def test_clean_catch_up_before_stop_or_before_lift_cannot_answer_a_new_stop(self):
+        clean = dict(ev="branch.landed", task="draft/integration", branch="main", into=self.plan.trunk,
+                     main="caught-tip", tip="main-sha")
+        stop = dict(ev="plan.stopped", task="draft/integration", why="catch-up")
+        for history in ([clean, stop], [stop, clean,
+                         dict(ev="question.answered", task="draft/integration", answer="Manual lift."), stop]):
+            with self.subTest(history=history):
+                write(self.path, "")
+                self.append(*history)
+                dispatch._integration(self.plan, self.tasks, self.home, self.hosts,
+                                      sh=self.fake, log_path=self.path)
+                self.assertFalse(any(entry.get("by") == "tick" for entry in log.read(self.path)))
 
     def test_catch_up_refusal_starts_implement_repair_from_trunk_then_merges_and_checks(self):
         self.append(event("branch.rejected", task="draft/integration", branch="main", tip="trunk-tip",
@@ -5719,6 +5777,21 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertFalse(any(entry["ev"] == "note" for entry in records))
         self.assertEqual([entry["run"] for entry in records if entry["ev"] == "run.started"],
                          [f"draft/integration-{n}" for n in range(1, 4)])
+
+    def test_tick_starts_answer_call_when_the_stop_is_the_only_question(self):
+        for n in range(1, 4):
+            self.append(run_started("draft/integration", n, kind="check", base="trunk-tip"),
+                        run_ended("draft/integration", n, "failed"))
+        self.tick()
+        with patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
+            actions = self.tick()
+        decide.assert_called_once()
+        self.assertEqual([action for action in actions if action.kind == "call"],
+                         [Action("call", task="draft", run_kind="answer")])
+        self.assertTrue(any(argv[:2] == ["systemd-run", "--user"]
+                            and argv[-4:-2] == ["call", "answer"] for argv in self.fake.argvs()))
+        self.assertEqual([entry["task"] for entry in log.read(self.path) if entry["ev"] == "question.asked"],
+                         ["draft/integration"])
 
     def test_queue_stop_report_uses_first_gate_by_name_or_empty_without_gates(self):
         for gates_present in (True, False):
