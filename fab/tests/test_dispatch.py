@@ -4075,6 +4075,7 @@ class AfterLandingImportTest(unittest.TestCase):
         records = log.read(self.path)
         self.assertEqual([(entry["ev"], entry.get("test")) for entry in records],
                          [("tiers.red", "a"), ("tiers.red", "b"), ("tiers.run", None)])
+        self.assertEqual([entry["host"] for entry in records], ["b", "b", "b"])
         self.assertIn("--since t2", self.fake.calls[-1].argv[-1])
 
     def test_same_test_in_distinct_binaries_is_imported_once_per_binary(self):
@@ -4093,6 +4094,7 @@ class AfterLandingImportTest(unittest.TestCase):
                                                    sh=self.fake, log_path=self.path)
                 self.assertEqual([(entry["ev"], entry["binary"]) for entry in log.read(self.path)],
                                  [(event, "a"), (event, "b"), (event, "c")])
+                self.assertTrue(all(entry["host"] == "b" for entry in log.read(self.path)))
 
     def test_no_machine_with_the_role_reads_nothing_and_a_failed_read_is_a_note(self):
         dispatch._import_after_landing([], {"c": Host("c", "fake@c", ("builder",))}, sh=self.fake,

@@ -485,7 +485,7 @@ def _import_after_landing(events: list[dict], hosts: Mapping[str, Host], *, sh: 
         ev = record.pop("ev")
         key = (entry["ts"], ev, record.get("profile"), record.get("binary"), record.get("test"))
         if key not in seen:
-            events.append(log.append(ev, path=log_path, al_ts=entry["ts"], **record))
+            events.append(log.append(ev, path=log_path, al_ts=entry["ts"], host=machine.name, **record))
             seen.add(key)
 
 

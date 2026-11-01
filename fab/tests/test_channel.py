@@ -245,6 +245,17 @@ class ChannelTest(unittest.TestCase):
         events.append(event(7, "tiers.run"))
         self.assertEqual([signal.id for signal in channel.signals(events)], ["queue:hand/pushed"])
 
+    def test_fault_signal_reads_the_newest_runs_machine_and_log(self):
+        events = [event(1, "tiers.run", faults=["live-temper: exit 4"],
+                        host="first", log="/al/first.log"),
+                  event(2, "tiers.run", faults=["live-temper: no login"],
+                        host="tiers-box", log="/al/newest.log")]
+        signal, = channel.signals(events)
+        self.assertEqual((signal.since, signal.read), (ts(1), "tiers-box:/al/newest.log"))
+        self.assertIn("- Read: `tiers-box:/al/newest.log`", channel.compose([], events, ts(3)))
+        del events[-1]["host"]
+        self.assertEqual(channel.signals(events)[0].read, "after-landing:/al/newest.log")
+
     def test_fault_signal_skips_malformed_fault_fields(self):
         for faults in (None, "live-temper: exit 4", [None, 3, {}, "missing separator", ": no profile"]):
             with self.subTest(faults=faults):

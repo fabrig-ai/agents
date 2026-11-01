@@ -177,9 +177,9 @@ def _red_signals(events: Sequence[dict]) -> list[Signal]:
 
 
 def _fault_signals(events: Iterable[dict]) -> list[Signal]:
-    """Keep each pair's unbroken fault streak, with the newest fault text and run log.
+    """Keep each pair's unbroken fault streak, with the newest fault text and host:log.
 
-    Imported records name no host; `after-landing` identifies the machine's role.
+    Older imported records without a host use the `after-landing` role as a fallback.
     """
     opened = {}
     for event in events:
@@ -196,10 +196,11 @@ def _fault_signals(events: Iterable[dict]) -> list[Signal]:
         current = {}
         for profile, fault in faults.items():
             since, count = opened[profile][:2] if profile in opened else (event["ts"], 0)
-            current[profile] = (since, count + 1, fault, event.get("log", "-"))
+            current[profile] = (since, count + 1, fault,
+                                f"{event.get('host', 'after-landing')}:{event.get('log', '-')}")
         opened = current
     return [Signal(f"fault:{profile}", "after-landing pair cannot run", since,
-                   (f"- Fault: {fault}", f"- Runs: {count}"), f"after-landing:{path}", False)
+                   (f"- Fault: {fault}", f"- Runs: {count}"), path, False)
             for profile, (since, count, fault, path) in opened.items()]
 
 
