@@ -237,6 +237,29 @@ class TierRedsFoldTest(unittest.TestCase):
         self.assertEqual(reds.reds(events)[0].state, "signal")
         self.assertIn("still red at later", reds.reds(events)[0].signal_reason)
 
+    def test_covering_run_preserves_landed_since_but_dates_a_repairing_transition(self):
+        base = repair_events()
+        covering = checked((), tip="cover", branches=["demo/red-1"], starved=1) | {"ts": "cover-time"}
+        landed = event("branch.landed", task="demo/red-1") | {"ts": "land-time"}
+        for preceding, since in ((base, "cover-time"), (base + [landed], "land-time")):
+            with self.subTest(since=since):
+                red, = reds.reds(preceding + [covering])
+                self.assertEqual((red.state, red.covered, red.since), ("landed", "cover", since))
+
+    def test_imported_records_with_invalid_fields_are_skipped(self):
+        base = repair_events() + [event("branch.landed", task="demo/red-1")]
+        malformed = [*(checked((), branches=["demo/red-1"]) | {"reds": value}
+                       for value in (None, 5, KEY, {}, [None], [[KEY]])),
+                     *(event(reds.RECOVERED, key=value, tip="green")
+                       for value in (None, 5, [], {}, [KEY])),
+                     *(record | {"red": value}
+                       for record in (opened(), settled()) for value in (None, 5, [], {}))]
+        self.assertEqual(reds.reds(base + malformed), reds.reds(base))
+        self.assertEqual(reds.closures(base + malformed), [])
+        recovered = event(reds.RECOVERED, key=KEY, tip="green")
+        self.assertEqual(reds.closures(base + malformed + [recovered]), [("red-1", "recovered", "green")])
+        self.assertEqual(reds.reds([malformed[-1], *base]), reds.reds(base))
+
     def test_states_since_report_and_frozen_record(self):
         records = [opened(), *foreman_run("done"), settled(),
                    event("run.started", task="demo/red-1", run="demo/red-1-1", kind="implement"),
@@ -382,7 +405,7 @@ class TierRedsFoldTest(unittest.TestCase):
         self.assertEqual(reds.reds(events)[0].covered, "cover")
         self.assertEqual(reds.closures(events), [("red-1", "absent", "green")])
 
-    def test_fold_routes_twenty_thousand_events_for_one_hundred_reds_quickly(self):
+    def test_fold_routes_twenty_thousand_events_only_to_named_reds(self):
         events = []
         for n in range(100):
             identifier, task = f"red-{n + 1}", f"demo/red-{n + 1}"

@@ -119,22 +119,30 @@ def reds(events: Iterable[dict]) -> list[Red]:
     The first matching red.settled after a done end makes repairing for fix/none or
     signal for left, with reason `not the suspects': <reason>`. Settlement fields are
     retained. Task run.started marks started; branch.landed makes landed. The first
-    subsequent fault-free tiers.run naming that task (via fab.land.task_of) records
-    covered, its tip. That run or any later fault-free run listing a key makes signal,
+    fault-free tiers.run naming that task (via fab.land.task_of) records covered, its
+    tip; covering-before-import also moves a repairing red to landed, since that run
+    proves the repair is on main even before branch.landed is imported. That run or any
+    later fault-free run listing a key makes signal,
     `unfixed: <task> landed, still red at <tip>`. A covering run that starves a key does
     not unfix it unless that key is listed red; coverage persists for later runs.
     red.closed is terminal and supplies close_reason/close_tip. since is the record's
     ts for each state transition; report is the foreman's run.ended report path, even
     when collected after closing.
-    Missing required fields, non-string red/tip/draft/route, and keys/suspects/tasks
-    other than lists of strings are skipped. A clear is decided by closures, not folded as
-    closed until close_reds writes red.closed. No files are read.
+    Missing required opening fields, non-string red/tip/draft/route, and
+    keys/suspects/tasks other than lists of strings are skipped. Non-string red ids on
+    settlements and tiers.run records with reds other than a list of strings are skipped
+    too. A clear is decided by closures, not folded as closed until close_reds writes
+    red.closed. No files are read.
     """
     found: dict[str, Red] = {}
     by_run, by_task, landed = {}, {}, set()
     for position, event in enumerate(events):
         kind, stamp = event.get("ev"), event.get("ts")
         if not isinstance(stamp, str) or not isinstance(kind, str):
+            continue
+        if (kind == TIERS_RUN and "reds" in event
+                and (not isinstance(event["reds"], list)
+                     or not all(isinstance(key, str) for key in event["reds"]))):
             continue
         if kind == OPENED and all(k in event for k in
                                   ("red", "tip", "keys", "suspects", "tasks", "draft", "route")):
@@ -175,7 +183,7 @@ def reds(events: Iterable[dict]) -> list[Red]:
         else:
             affected = (identifier,)
         for identifier in affected:
-            red = found.get(identifier)
+            red = found.get(identifier) if isinstance(identifier, str) else None
             if red is None or (red.state == "closed" and kind != "run.ended"):
                 continue
             advanced = _advance(red, event)
@@ -229,7 +237,9 @@ def _advance(red: Red, event: dict) -> Red:
     if red.repair and red.state in ("repairing", "landed") and kind == TIERS_RUN and not event.get("faults"):
         if not red.covered and any(land.task_of(branch) == red.task
                                    for branch in event.get("branches", ())):
-            red = replace(red, state="landed", since=stamp, covered=event.get("tip", ""))
+            red = replace(red, covered=event.get("tip", ""))
+            if red.state == "repairing":
+                red = replace(red, state="landed", since=stamp)
         if red.covered and set(red.keys).intersection(event.get("reds", ())):
             return replace(red, state="signal", since=stamp,
                            signal_reason=f"unfixed: {red.task} landed, still red at {event.get('tip', '')}")
@@ -245,7 +255,8 @@ def closures(events: Sequence[dict], *, folded: Sequence[Red] | None = None) -> 
     reason/tip, except all recovered is recovered. A signal.cleared naming this red
     while it is a signal closes all keys with cleared and empty tip. Already red.closed
     reds are omitted. Log positions, not ts, order it. folded may be reds(events), reused
-    for this same events snapshot, to avoid folding again.
+    for this same events snapshot, to avoid folding again. Malformed red.opened red ids,
+    tiers.recovered keys, and tiers.run reds lists are skipped.
     """
     folded = reds(events) if folded is None else folded
     opened = {red.id: red for red in folded if red.state != "closed"}
@@ -255,18 +266,22 @@ def closures(events: Sequence[dict], *, folded: Sequence[Red] | None = None) -> 
         if not isinstance(event.get("ts"), str):
             continue
         identifier = event.get("red")
-        if (kind == OPENED and identifier in opened and identifier not in remaining
+        if (kind == OPENED and isinstance(identifier, str)
+                and identifier in opened and identifier not in remaining
                 and all(k in event for k in ("tip", "keys", "suspects", "tasks", "draft", "route"))):
             remaining[identifier] = set(opened[identifier].keys)
             for key in remaining[identifier]:
                 by_key.setdefault(key, set()).add(identifier)
         elif kind == RECOVERED:
             key = event.get("key")
+            if not isinstance(key, str):
+                continue
             for identifier in by_key.pop(key, ()):
                 remaining[identifier].discard(key)
                 if not remaining[identifier] and identifier not in result:
                     result[identifier] = (identifier, "recovered", event.get("tip", ""))
-        elif (kind == TIERS_RUN and "reds" in event and not event.get("faults")
+        elif (kind == TIERS_RUN and isinstance(event.get("reds"), list)
+              and all(isinstance(key, str) for key in event["reds"]) and not event.get("faults")
               and not event.get("wall_starved") and event.get("starved") == 0
               and event.get("unobserved") == 0):
             absent = by_key.keys() - set(event["reds"])
