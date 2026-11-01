@@ -2029,7 +2029,7 @@ login that still works reused across them before more are signed in.
 - The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
   refresh every 30 seconds, phone width and light and dark colours. Header,
-  tiles, Waiting on the user, Subscriptions, Drafts, Today, In flight, then footer; ages in
+  tiles, Waiting on the user, Subscriptions, Drafts, Overlaps, Today, In flight, then footer; ages in
   seconds, minutes or hours. Waiting is the first section below the tiles.
   Its tile, kind labels (Call questions and Parked chains) and "Open the
   questions" below the oldest age link to the forge's open `waiting-on-user`

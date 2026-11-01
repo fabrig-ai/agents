@@ -14,6 +14,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from fab import calls, channel, cli, log, serve
+from fab.tests.support import tmp_home
 
 NOW = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)
 
@@ -40,6 +41,7 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(empty["runs_in_flight"], {"total": 0, "by_host": {}})
         self.assertEqual(empty["calls_in_flight"], {"total": 0, "by_role": {}})
         self.assertEqual(empty["drafts"], {})
+        self.assertEqual(empty["overlaps"], [])
         for stamp in (None, "bad", "2026-11-01", "2026-11-01T00:00:00", 1, [],
                       "0001-01-01T00:00:00+23:00"):
             with self.subTest(stamp=stamp):
@@ -318,6 +320,102 @@ class SnapshotTest(unittest.TestCase):
         failure = serve.render({"updated": "now", "log": "unreadable"})
         self.assertIn('<p class="empty">The event log is unreadable.</p>', failure)
         self.assertNotIn("Runs in flight", failure)
+
+
+class OverlapsTest(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(tmp_home())
+
+    def test_serve_overlaps_latest_count_and_panel_after_drafts(self):
+        events = [event("run.started", 100000, task=name + "/task") for name in ("alpha", "beta")]
+        events += [event("trunks.overlap", 95000, drafts=["alpha", "beta"], tips=["a" * 40, "b" * 40],
+                         files=["private/old"], more=0, reason="probe"),
+                   event("trunks.overlap", 90000, drafts=["alpha", "beta"], tips=["c" * 40, "d" * 40],
+                         files=[f"private/file-{index}" for index in range(40)], more=3, reason="probe")]
+        before = copy.deepcopy(events)
+        current = serve.snapshot(events, NOW, [])
+        self.assertEqual(events, before)
+        self.assertEqual(current["overlaps"], [{"drafts": ["alpha", "beta"], "count": 43}])
+        self.assertEqual(current["drafts"], {})
+        page = serve.render(current)
+        self.assertIn('<h2>Overlaps</h2><div class="panel"><div class="scroll"><table><thead><tr>'
+                      '<th>Drafts</th><th class="num">Files</th></tr></thead><tbody>'
+                      '<tr><td>alpha · beta</td><td class="num">43</td></tr>', page)
+        self.assertLess(page.index('<h2>Drafts</h2>'), page.index('<h2>Overlaps</h2>'))
+        self.assertLess(page.index('<h2>Overlaps</h2>'), page.index('<h2>Today</h2>'))
+        for output in (json.dumps(current), page):
+            for record in events[2:]:
+                for private in record["files"] + record["tips"]:
+                    self.assertNotIn(private, output)
+
+    def test_serve_overlaps_closed_pairs_disappear(self):
+        for reason in ("probe", "gone"):
+            with self.subTest(reason=reason):
+                events = [event("run.started", 30, task=name + "/task") for name in ("alpha", "beta")]
+                events += [event("trunks.overlap", 20, drafts=["alpha", "beta"], tips=["a" * 40, "b" * 40],
+                                 files=["private/path"], more=3, reason="probe"),
+                           event("trunks.overlap", 10, drafts=["alpha", "beta"], tips=["c" * 40, "d" * 40],
+                                 files=[], more=0, reason=reason)]
+                current = serve.snapshot(events, NOW, [])
+                self.assertEqual(current["overlaps"], [])
+                page = serve.render(current)
+                self.assertIn('<h2>Overlaps</h2><div class="panel">'
+                              '<p class="empty">No drafts overlap.</p></div>', page)
+                self.assertNotIn('alpha · beta', page)
+                for output in (json.dumps(current), page):
+                    self.assertNotIn('private/path', output)
+                    for tip in ("a" * 40, "b" * 40, "c" * 40, "d" * 40):
+                        self.assertNotIn(tip, output)
+
+    def test_serve_overlaps_unknown_and_invalid_drafts_are_other(self):
+        for name, known in (("unseen", False), ("Upper", True), ("<private>", True),
+                            ("a" * 65, True), ("../private", False)):
+            with self.subTest(name=name, known=known):
+                events = [event("run.started", 90000, task="zulu/task")]
+                if known:
+                    events.append(event("run.started", 90000, task=name + "/task"))
+                events.append(event("trunks.overlap", drafts=[name, "zulu"], tips=["a" * 40, "b" * 40],
+                                    files=["private/path"], more=0, reason="probe"))
+                current = serve.snapshot(events, NOW, [])
+                self.assertEqual(current["overlaps"], [{"drafts": ["other", "zulu"], "count": 1}])
+                page = serve.render(current)
+                self.assertIn('<tr><td>other · zulu</td><td class="num">1</td></tr>', page)
+                for output in (json.dumps(current), page):
+                    self.assertNotIn(name, output)
+
+    def test_serve_overlaps_sorted_by_public_labels_keep_each_pair(self):
+        events = [event("run.started", 90000, task=name + "/task") for name in ("alpha", "zulu")]
+        for pair, more in ((["alpha", "zulu"], 1), (["Upper", "zulu"], 2),
+                           (["Upper", "alpha"], 3), (["unseen", "zulu"], 4)):
+            events.append(event("trunks.overlap", drafts=pair, tips=["a" * 40, "b" * 40],
+                                files=["private/path"], more=more, reason="probe"))
+        current = serve.snapshot(events, NOW, [])
+        self.assertEqual(current["overlaps"], [
+            {"drafts": ["alpha", "other"], "count": 4},
+            {"drafts": ["alpha", "zulu"], "count": 2},
+            {"drafts": ["other", "zulu"], "count": 3},
+            {"drafts": ["other", "zulu"], "count": 5},
+        ])
+        page = serve.render(current)
+        self.assertLess(page.index('alpha · other'), page.index('alpha · zulu'))
+        self.assertLess(page.index('alpha · zulu'), page.index('other · zulu'))
+        self.assertEqual(page.count('<td>other · zulu</td>'), 2)
+
+    def test_serve_overlaps_skip_invalid_and_future_events(self):
+        opened = event("trunks.overlap", 20, drafts=["alpha", "beta"], tips=["a" * 40, "b" * 40],
+                       files=["private/path"], more=0, reason="probe")
+        closed = {**opened, "files": [], "more": 0}
+        events = [opened, {**closed, "ts": "invalid"}, {**closed, "ts": event("note", -1)["ts"]},
+                  {**event("run.started", task="alpha/task"), "ts": "invalid"},
+                  event("run.started", -1, task="beta/task")]
+        self.assertEqual(serve.snapshot(events, NOW, [])["overlaps"], [
+            {"drafts": ["other", "other"], "count": 1},
+        ])
+        for stamp in (None, "invalid", event("note", -1)["ts"]):
+            with self.subTest(stamp=stamp):
+                self.assertEqual(serve.snapshot([{**opened, "ts": stamp}], NOW, [])["overlaps"], [])
+        events.append({**closed, "ts": event("note", 30)["ts"]})
+        self.assertEqual(serve.snapshot(events, NOW, [])["overlaps"], [])
 
 
 class SubscriptionsTest(unittest.TestCase):
@@ -626,10 +724,10 @@ class RenderTest(unittest.TestCase):
         self.assertIn('<body><main><header><h1>Fabrig status</h1>', page)
         self.assertIn('<span class="meta">Updated 00:30 UTC · last event 7 min ago</span></header>', page)
         self.assertEqual(re.findall(r'<h2>(.*?)</h2>', page),
-                         ["Waiting on the user", "Subscriptions", "Drafts", "Today", "In flight"])
+                         ["Waiting on the user", "Subscriptions", "Drafts", "Overlaps", "Today", "In flight"])
         self.assertLess(page.index('<header>'), page.index('<div class="tiles">'))
         self.assertIn('</div></div><h2>Waiting on the user</h2>', page)
-        self.assertEqual(page.count('<div class="panel">'), 3)
+        self.assertEqual(page.count('<div class="panel">'), 4)
         self.assertEqual(page.count('<div class="cards">'), 2)
         self.assertEqual(page.count('<div class="card">'), 5)
         self.assertEqual(page.count('<div class="scroll"><table>'), 7)
@@ -726,6 +824,8 @@ class RenderTest(unittest.TestCase):
         self.assertIn('Updated 00:30 UTC · no events yet</span>', page)
         self.assertIn('<h2>Drafts</h2><div class="panel">'
                       '<p class="empty">No draft active today.</p></div>', page)
+        self.assertIn('<h2>Overlaps</h2><div class="panel">'
+                      '<p class="empty">No drafts overlap.</p></div>', page)
         for title in ("Codex runs by host", "Claude calls by role"):
             self.assertIn(f'<div class="card"><h3>{title}</h3><p class="empty">None.</p></div>', page)
         self.assertIn('<div class="label">Runs in flight</div><div class="value">0</div></div>', page)
@@ -749,9 +849,10 @@ class RenderTest(unittest.TestCase):
         self.current["runs_in_flight"]["by_host"] = {label: 5}
         self.current["calls_in_flight"]["by_role"] = {label: 4}
         self.current["drafts"] = {label: {"runs_in_flight": 1, "merged_today": 2, "landed_today": 3}}
+        self.current["overlaps"] = [{"drafts": [label, "zulu"], "count": 2}]
         page = serve.render(self.current)
         self.assertNotIn(label, page)
-        self.assertEqual(page.count('&lt;label &amp; &quot;quoted&quot;&gt;'), 5)
+        self.assertEqual(page.count('&lt;label &amp; &quot;quoted&quot;&gt;'), 6)
         failure = serve.render({"updated": label, "log": "unreadable"})
         self.assertNotIn(label, failure)
         self.assertIn('&lt;label &amp; &quot;quoted&quot;&gt;', failure)

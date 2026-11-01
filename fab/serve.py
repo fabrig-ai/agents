@@ -12,7 +12,7 @@ from collections.abc import Collection
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from fab import accounting, calls, channel, hosts as machines, log
+from fab import accounting, calls, channel, hosts as machines, log, overlaps
 
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
@@ -257,6 +257,11 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     asks = channel.asks((), [event for event, _ in dated])
     by_kind = Counter(ask.kind for ask in asks)
     waiting_since = [_stamp(ask.since) for ask in asks]
+    public_overlaps = []
+    for pair, record in overlaps.open_pairs([event for event, _ in dated]).items():
+        labels = sorted(name if name in known_drafts and DRAFT.fullmatch(name) else "other"
+                        for name in pair)
+        public_overlaps.append({"drafts": labels, "count": len(record["files"]) + record["more"]})
     return {
         "updated": now.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "log": "ok",
@@ -275,6 +280,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
                          "claude_m": round(claude / accounting.MILLION, 1),
                          "ratio": round(codex / claude, 1) if claude else None},
         "drafts": dict(sorted(drafts.items())),
+        "overlaps": sorted(public_overlaps, key=lambda pair: pair["drafts"]),
         "subscriptions": _subscriptions(dated, now),
     }
 
@@ -423,6 +429,10 @@ def render(snapshot: dict) -> str:
                        + "".join(drafts) + '</tbody></table></div>')
         content += ('<h2>Drafts</h2><div class="panel">'
                     + (draft_table if drafts else '<p class="empty">No draft active today.</p>') + '</div>')
+        content += ('<h2>Overlaps</h2><div class="panel">'
+                    + (table(("Drafts", "Files"), [(" · ".join(pair["drafts"]), pair["count"])
+                                                  for pair in snapshot["overlaps"]])
+                       if snapshot["overlaps"] else '<p class="empty">No drafts overlap.</p>') + '</div>')
         ended = [(outcome, snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES]
         content += '<h2>Today</h2><div class="cards">' + "".join([
             card("Runs ended", table(("Outcome", "Runs"), ended,
