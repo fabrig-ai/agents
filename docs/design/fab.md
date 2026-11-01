@@ -1981,7 +1981,11 @@ login that still works reused across them before more are signed in.
   masked emails. No task, run or call ids, branches, shas, paths, question
   or answer text, notes, reports, full emails or holders in HTML or JSON;
   subscriptions never expose hosts.
-- **Subscriptions:** group nonretired Claude and Codex logins whose latest
+- **Subscriptions:** include logins named `claude-<n>`, `claude-box-<n>` or
+  `codex-<n>` of kind `claude`, `claude-box` or `codex`. Normalize `claude-box`
+  to `claude` for grouping and display: a box login and a Claude login for
+  the same account share one row and their sign-ins count together.
+  Group nonretired logins whose latest
   `login.checked` is within 24 hours and successful (no error), with a
   nonempty email, by `(kind, email)`. Each login's latest check decides its
   current account; a failed check or one without an email leaves that login

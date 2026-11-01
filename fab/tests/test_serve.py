@@ -417,6 +417,38 @@ class SubscriptionsTest(unittest.TestCase):
         self.assertIn("Codex · max · c***1@example.invalid · 2 sign-ins", page)
         self.assertIn('<div class="sub">1 subscriptions</div>', page)
 
+    def test_subscriptions_claude_box_alone_is_a_claude_row(self):
+        name = "claude-box-1"
+        current = serve.snapshot([self.added(name, "claude-box"),
+                                  self.checked(name=name, plan="max")], NOW, [])
+        self.assertEqual(current["subscriptions"], [{
+            "subscription": "c***1@example.invalid", "kind": "claude", "plan": "max", "logins": 1,
+            "checked_age_s": 0, "limits": [{"name": "week", "used": 80,
+                                          "resets": NOW.timestamp() + 7200,
+                                          "rate_per_h": None, "full_at": None, "at_reset": None}],
+        }])
+        page = serve.render(current)
+        self.assertIn("Claude · max · c***1@example.invalid · 1 sign-in", page)
+        self.assertIn('<div class="sub">1 subscriptions</div>', page)
+
+    def test_subscriptions_claude_box_and_claude_share_account_and_pace(self):
+        reset = NOW.timestamp() + 7200
+        email = "shared@example.invalid"
+        for latest, earlier in (("claude-box-1", "claude-1"), ("claude-1", "claude-box-1")):
+            with self.subTest(latest=latest):
+                events = [self.added("claude-1", "claude"), self.added("claude-box-1", "claude-box"),
+                          self.checked(3600, name=earlier, email=email, limits=[("week", 70, reset)]),
+                          self.checked(name=latest, email=email, plan="max")]
+                current = serve.snapshot(list(reversed(events)), NOW, [])
+                self.assertEqual(current["subscriptions"], [{
+                    "subscription": "s***d@example.invalid", "kind": "claude", "plan": "max", "logins": 2,
+                    "checked_age_s": 0, "limits": [{"name": "week", "used": 80, "resets": reset,
+                                                  "rate_per_h": 10, "full_at": None, "at_reset": 100}],
+                }])
+                page = serve.render(current)
+                self.assertEqual(page.count("Claude · max · s***d@example.invalid · 2 sign-ins"), 1)
+                self.assertIn('<div class="sub">1 subscriptions</div>', page)
+
     def test_subscriptions_latest_account_moves_login_to_new_group(self):
         events = [self.added(), self.added("codex-2"),
                   self.checked(3600), self.checked(1800, name="codex-2", email="codex-1@example.invalid")]
@@ -516,15 +548,18 @@ class SubscriptionsTest(unittest.TestCase):
     def test_subscriptions_private_account_and_custody_fields_never_leave_fold(self):
         private = {"email": "private@example.invalid", "holder": "private-holder", "host": "private-host",
                    "path": "/private/path", "plan": "private@example.invalid"}
-        events = [self.added(), event("login.lent", 100, id="codex-1", at="/private/path", **private),
-                  self.checked(3600, error="private failure", **private), self.checked(**private)]
-        current = serve.snapshot(events, NOW, [])
-        self.assertEqual(current["subscriptions"][0]["subscription"], "p***e@example.invalid")
-        for output in (json.dumps(current), serve.render(current)):
-            for secret in (*private.values(), "private-sha", "private-host:/private/path",
-                           "private failure", "codex-1"):
-                self.assertNotIn(secret, output)
-            self.assertIn("p***e@example.invalid", output)
+        for name, kind in (("codex-1", "codex"), ("claude-1", "claude"), ("claude-box-1", "claude-box")):
+            with self.subTest(kind=kind):
+                events = [self.added(name, kind), event("login.lent", 100, id=name, at="/private/path", **private),
+                          self.checked(3600, name=name, error="private failure", **private),
+                          self.checked(name=name, **private)]
+                current = serve.snapshot(events, NOW, [])
+                self.assertEqual(current["subscriptions"][0]["subscription"], "p***e@example.invalid")
+                for output in (json.dumps(current), serve.render(current)):
+                    for secret in (*private.values(), "private-sha", "private-host:/private/path",
+                                   "private failure", name):
+                        self.assertNotIn(secret, output)
+                    self.assertIn("p***e@example.invalid", output)
 
     def test_subscriptions_table_meters_resets_pace_and_tile(self):
         reset = NOW.timestamp() + 11340

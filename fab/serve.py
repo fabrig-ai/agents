@@ -107,11 +107,11 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
     kinds, retired, checks = {}, set(), {}
     for event, stamp in sorted(dated, key=lambda pair: pair[1]):
         name = event.get("id")
-        if not isinstance(name, str) or not re.fullmatch(r"(?:claude|codex)-[0-9]+", name):
+        if not isinstance(name, str) or not re.fullmatch(r"(?:claude(?:-box)?|codex)-[0-9]+", name):
             continue
         ev = event.get("ev")
-        if ev == "login.added" and event.get("kind") in ("claude", "codex"):
-            kinds[name] = event["kind"]
+        if ev == "login.added" and event.get("kind") in ("claude", "claude-box", "codex"):
+            kinds[name] = "claude" if event["kind"] == "claude-box" else event["kind"]
         elif ev == "login.retired":
             retired.add(name)
         elif ev == "login.checked":
