@@ -6,8 +6,7 @@
 
 - **QA findings' first build** (2, "Now, independent"; plan
   `docs/plan/findings-loop`, retired 11-01), on walks a session starts by
-  hand. Tested with temporary homes, fake runners and synthetic records; no
-  real ladder has been ticked by it yet.
+  hand. Tested with temporary homes, fake runners and synthetic records.
   - **The ladder plan** (`fab/plan.py`): `[ladder]` and `[[rung]]` read into
     `Plan.ladder` and `Plan.rungs` (`fab.plan.Ladder`, `fab.plan.Rung`),
     `[[part]]` optional, `triage` in `fab.plan.RESERVED`, and 2's problems
@@ -62,12 +61,44 @@
   - **The page's `finding-<n>`** (`fab/channel.py`, channel.md 2): open from
     `finding.settled` left until its rung's next `rung.passed`, or a hand
     clear, which drops the finding.
+- **A repair leaves the briefs** (2; plan `docs/plan/brief-guard`, retired
+  11-01, landed as c22e074), on the repair path. Tested with temporary homes,
+  fake runners and fixture logs.
+  - **The check** (`fab.dispatch._screen_briefs`, from `_screen_ready`, which
+    `_take` gives the plan, its directory and the checkout): kind `finding`
+    only, after `rust_gates.screen` finds nothing and before `_ready`, so a
+    branch the Rust gates refuse meets it at its next readying. Every rung's
+    `brief` paths, repository-relative, against `rust_digest.changes` from the
+    merge base with `origin/main` to the branch's remote tip; `--no-renames`
+    lists a renamed or deleted brief under its old path. No rungs: no git.
+  - **The refusal:** `branch.rejected` with step `gate:briefs`, `log` the
+    screen's digest and `findings` from `fab.gates.findings_text`, one line a
+    path, so `repair_actions` sends it to its refusal foreman as any gate's.
+    `briefs` is not in `fab.gates.GATES`: no digest decides it.
+  - **The text:** the same sentence in `_body`'s Acceptance
+    (`fab/fixes.py`) and in `fab/roles/foreman-finding.md`.
 
 ## Gaps and departures
 
-- **Neither build has met a real ladder:** both plans' code is tested on
-  fake runners and synthetic logs only; the first walk by hand on hel8
-  will be the first finding to reach a foreman and a repair.
+- **Real ladders, and what they have not met:** the first two builds have met
+  one: `v0.1.0-ladder/finding-17` reached a repair (the plan's request). The
+  brief check's only tests are fakes and fixture logs (`walk = false`). That
+  repair's kit edit is fabrig/qa's to revert by hand (the request): the check
+  stops the next one and undoes nothing landed.
+- **A repair's word on a brief reaches triage by no code** (2 makes a fault in
+  a brief a `brief` decision of triage; 3): the sentence asks a repair and a
+  foreman to say so in their reports, and nothing routes that line.
+  `fab.triage.brief` holds findings, not repairs' reports; a foreman's `Done:
+  fix:` lines become the repair's Repair section, and its `Done: retry:`
+  leaves the page's signal. Triage hears of it only if the rung's rerun raises
+  it as a finding.
+- **Only the `finding` kind is checked** (2, as the request says; 3): a red
+  repair or a feature branch that edits a rung brief still readies and makes a
+  new edition.
+- **The tip read is not held:** `_screen_briefs` reads the remote tip outside
+  the screen's lock, and `_ready` fetches and reads it again, so a tip pushed
+  between them readies unchecked. The cut accepted this: the repair's run has
+  ended, and the tick is one process.
 - **Walks run by fab: not built** (2's last part; 3): a session still walks
   by hand with `fab qa walk` and `fab qa result`.
 - **Departures,** each with its reason in 2:

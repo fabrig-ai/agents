@@ -253,7 +253,10 @@
   fast-forwarded by hand. The same window holds the code: the install follows
   main at the next tick (machines.md, "Following main"; 21:21:47Z here), so
   this `fab call retire` ran the old `EFFORTS`, `claude --effort high`, not the
-  xhigh its plan had just landed.
+  xhigh its plan had just landed. Seen again at brief-guard's retire (11-01):
+  `guard` landed as c22e074 at 21:24:48Z, 29 s before the brief, and its
+  worktree was 502d014, one commit behind, without the guard's code; the call
+  fast-forwarded by hand.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
@@ -276,6 +279,9 @@
   diff is d6fc657's and landing.md's is acceptance-fixes'. Seen again at
   designer-effort's retire (11-01): calls.md 1, integration.md 3 and tick.md 7
   changed with the request (3e9e59f), before its cut, so its brief quoted none.
+  Seen again at brief-guard's retire (11-01): qa.md 2 changed with the request
+  (bbf4d10), before its cut, so its brief listed no designs at all, and the
+  call found qa.status.md from plan.toml's `design` and the cut's decisions.
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
 - **The request's third spelling is a reading** (3; plan

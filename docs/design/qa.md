@@ -520,6 +520,12 @@ session still walks by hand; walks run by fab are the section's last part.
     new finding raised `again`, triaged as any.
   - A kit change that reopens only the rungs it touches (today every rung
     whose brief lists the kit gets a new edition).
+  - A repair's or foreman's report that a rung brief is at fault reaching
+    triage by code, as a `brief` decision to make; today the report's line
+    has no reader (brief-guard).
+  - The brief check for red repairs and other kinds, if one is seen editing
+    a rung brief (2 checks the `finding` kind, as brief-guard's request
+    says).
   - Fix mode's gate waking Claude when a finding's fix touches a public
     item, with the api gate (as for reds, above).
   - The backlog taken up after v0.1.0 (v0.1.0.md 4): a cut of the backlog
