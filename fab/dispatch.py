@@ -341,6 +341,7 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
                    if identifier not in candidates]
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
                 if refusal.task not in rebases}
+    actions.extend(_failed_asks(views, events))
     step = integration.next_step(plan, tasks, events)
     startable = ([identifier for identifier in candidates if tasks[identifier].kind == tier_reds.KIND]
                  if step is not None and step.kind == "stop" else candidates)
@@ -354,6 +355,25 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
         design = _design_action(plan, tasks, views, hosts, len(candidates))
         if design is not None:
             actions.append(design)
+    return actions
+
+
+def _failed_asks(views: Mapping[str, state.TaskView], events: list[dict]) -> list[Action]:
+    """A park for each task whose last run ended failed with no question asked since: a failed run
+    parks with nobody to answer it otherwise (the playground replay, 11-01: fe-world-remove sat
+    parked 40 minutes). The park queues for the answerer, whose answer grants fresh runs."""
+    actions = []
+    for identifier, view in views.items():
+        if view.status != "parked" or not (view.question or "").startswith("Failed: ") or not view.runs:
+            continue
+        last = view.runs[-1]
+        ended = next((position for position, event in enumerate(events) if event.get("ev") == "run.ended"
+                      and event.get("run") == last), None)
+        if ended is None or any(event.get("ev") == "question.asked" and event.get("task") == identifier
+                                for event in events[ended + 1:]):
+            continue
+        actions.append(Action("park", task=identifier, run=last,
+                              detail=f"the run ended failed; its report: {view.question.removeprefix('Failed: ')}"))
     return actions
 
 

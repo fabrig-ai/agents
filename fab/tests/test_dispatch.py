@@ -5107,6 +5107,16 @@ class EarlyStartTest(unittest.TestCase):
         plain = landed + [started("b", n=2, branch="draft/b"), ended("b", n=2, outcome="failed")]
         self.assertEqual(state.fold(self.tasks, plain)["draft/b"].status, "parked")
 
+    def test_a_failed_run_with_no_question_is_parked_for_the_answerer(self):
+        events = [started(branch="draft/a"), ended(outcome="failed")]
+        parks = [a for a in dispatch.decide(self.PLAN, self.tasks, events, self.HOSTS) if a.kind == "park"]
+        self.assertEqual([(a.task, a.run) for a in parks], [("draft/a", "draft/a-1")])
+        self.assertIn("report.md", parks[0].detail)
+        asked = events + [event("question.asked", run="draft/a-1", text=parks[0].detail, park=True)]
+        self.assertFalse([a for a in dispatch.decide(self.PLAN, self.tasks, asked, self.HOSTS) if a.kind == "park"])
+        answered = asked + [event("question.answered")]
+        self.assertIn("start", [a.kind for a in dispatch.decide(self.PLAN, self.tasks, answered, self.HOSTS)])
+
     def test_one_level_only(self):
         # b runs early on a; c may not start on b while b still waits for a.
         events = [started(branch="draft/a"), started("b", branch="draft/b")]
