@@ -28,48 +28,54 @@
   `_fix_steps` sends to each kind's start or settle; the plan's tasks are
   joined with its finding repairs; `finding.settled` wakes the tick again.
   Tested with fake runners and fixture logs.
+- **The flow grows** (`docs/design/tick.md`, 4; since 10-30):
+  `fab.flow.target` folds first-attempt landings from full windows, rejections
+  and infra outcomes; `calm` and `measure` check builders' load and waits.
+  `fab.dispatch._round` measures once per builder; `decide` caps queue-plan
+  starts at the target and prints it, and `places` allows one extra run on
+  a calm builder below its slot limit. Since 10-31, `decide` starts the
+  target at builders' places; integration plans use that capacity directly.
+- **Several plans share a tick** (`docs/design/tick.md`, 5; since 10-31):
+  `fab.dispatch._round` takes `fab.channel.plan_dirs`' listed then named
+  plans under `tick`'s lock; `_checkout` shares fetches, `_load_plans` skips
+  retired plans and reports failed loads, and `_import_queue` reads from
+  the oldest loaded draft's cursor. Each `_tick_loaded` sees fresh events;
+  `fab.drafts.owned` scopes collection, `strays` leaves unowned runs until
+  last, and `spend` spends a builder's calm extra once per round.
+  `fab.dispatch.call_actions` scopes call limits and review times by draft;
+  `_part_calls` uses `fab.drafts.design_calls` to share the flow target
+  between parallel skeleton and contract calls. `_call` uses
+  `fab.drafts.unit` to name units by role and subject.
+- **The buffer's order** (`docs/design/tick.md`, 7; since 10-31):
+  `fab.buffer.group` and `order` put consolidations before refusals' repairs
+  and rebases, then contracts, then slice tasks, breaking ties by slice,
+  part and spec order. `fab.plan.parse_task` reads `consolidation` and
+  `fab.dispatch.decide` applies the sort before `_run_starts`; an infra
+  rerun alone keeps its part's place. Red tasks and finding repairs also
+  enter the repair group through `fab.buffer.group` (11-01).
+- **Events drive the tick** (`docs/design/tick.md`, 6; since 10-31):
+  `fab.wake.want`, `wake` and `take` append reasons locally or over ssh and
+  coalesce them by renaming the want before reading it.
+  `fab.dispatch.tick` takes it under its lock, waits for the lock on event
+  ticks, and closes every round with `fab.wake.settle`: lost-event notes
+  on backstop ticks and self-wakes bounded to five rounds. `fab.wake.main`
+  supplies `fab wake`; `units` and `install` supply the four event and
+  10-minute backstop units, enable them and stop the old 2-minute timer.
+  Wakers are wired in `fab.codex.start` (ExecStopPost), `fab.calls.start`,
+  `fab.land.main`, `fab.channel.answer` and `clear`, `fab.queue.Queue.cycle`
+  (with the callback supplied by `main`), `fab.after_landing.AfterLanding.check`
+  and `fab.walks.result`.
+- **Design follows designed needs** (`docs/design/tick.md`, 2; since
+  10-31): `fab.dispatch.decide` measures the ready buffer against the
+  current flow target; `_design_action` accepts designed or done needs,
+  requires done for `needs_landed` and probes, and excludes parts held by
+  unanswered plan questions. Tasks still wait for their own needs to land.
 
 ## Gaps and departures
 
 - **A failed task run parks for the answerer** (11-01, findings-loop): `fab.run.collect`
   logs a failed implement, repair or rebase run's report as a `question.asked` with `park`
   (calls.md 2), so it queues at once; it parked unheard before.
-- **The flow is a skeleton:** `fab/flow.py` holds 4's target, calm and
-  measure, and `fab.dispatch.places` and `decide` take a `calm` argument they
-  do not use yet. The task `flow` fills them after `gates-tick`; until then
-  the tick fills every builder's `places` and never passes them.
-- **Several plans are a skeleton:** `fab/drafts.py` holds 5's rules:
-  which runs in flight a draft owns, the strays no plan owns, a plan's
-  design calls up to its flow target, the calm a plan leaves the next, and
-  a call's unit named by its subject. The task `drafts` fills it.
-  `plans-tick` makes one tick take every plan in `FAB_HOME/plans`, after
-  `designer-tick`, `channel-tick` and `accounting`. Until it lands, `fab
-  tick PLAN_DIR` ticks one plan and collects every run in flight. It
-  starts one skeleton call at a time (one contract call beside it once
-  `designer-tick` lands), in units numbered by role. Its answer and review
-  limits, and the review's last-review time, count every draft's calls,
-  and its queue import reads from the log's newest record of any draft.
-- **The buffer's order is a skeleton:** `fab/buffer.py` holds 7's
-  groups and the sort, `fab.plan.Task` its `consolidation` field, and
-  `fab/roles/reviewer.md` asks the review call to mark its specs with it.
-  The task `buffer-order` fills the sort, reads the header and makes
-  `decide` start runs in the sort's order, after `receipts-ready` and
-  `plans-tick`. Until then `decide` starts rejected tasks first, then
-  runnable ones in their specs' order, and a spec's `consolidation` key is
-  ignored.
-- **Events are a skeleton:** `fab/wake.py` holds 6's want file, the
-  wake from any machine, the round's close (the lost-event note, the tick
-  waking itself) and the tick's four units; `fab.hosts.this` names this
-  machine's entry. The task `wake` fills the module, registers `fab wake`
-  and makes the wakers wake: a Codex unit's ExecStopPost, a call's end, `fab
-  land`, `fab page answer` and the queue's cycle. `wake-tick` makes the tick
-  take the want, wait for its lock as an event tick, close each round, and
-  fills `fab wake --install`, after `buffer-order` since it changes
-  `fab/dispatch.py`. Until both land the transient `fab-tick.timer` ticks
-  every 2 minutes and wants pile up unread in `FAB_HOME/tick.want`. Once
-  they land, `fab wake --install` on hel8 starts the units, and each
-  builder needs ssh to hel8 for its runs' wakes.
-- **Design waits for implementation:** `fab.dispatch.decide` makes a part
-  eligible only when every task of its needs has landed, and sizes the
-  buffer against nominal places; section 2 now says otherwise, and the task
-  `design-eligibility` brings the code to it.
+- **`fab draft start` is not built** (`docs/design/tick.md`, 7):
+  `fab.cli.main` dispatches through `COMMANDS`, which has no `draft`
+  command. Intake still starts the cut by hand through `fab.calls.main`.
