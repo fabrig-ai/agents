@@ -146,15 +146,16 @@ only as tweaks once a replay matches its run.
     then pushes from it, `git push -u
     --force-with-lease=refs/heads/<draft>/integration: origin
     <draft>/integration` (the empty lease creates the branch only if
-    absent; `-u` sets the upstream). A refused push removes the worktree
-    and the local branch. Only after both succeed it logs `trunk.made`
+    absent; `-u` sets the upstream). A push that fails, refused or not,
+    removes the worktree and the local branch. Only after both succeed it logs `trunk.made`
     (draft, base the REV given, tip its sha) and prints the plan
     directory to give `fab plan inputs` and `fab call cut --plan`.
   - `fab plan inputs PLAN_DIR FILE...  [--replace]` (any plan): FILE is a
     file or a directory (copied whole, as the manual recipe's `reviews/`).
     It never commits in the plan's checkout. After a fetch it adds a
     temporary worktree of the checkout's repository, detached at
-    `origin/<trunk>`, copies the files to `PLAN_DIR/inputs/<name>` there,
+    `origin/<trunk>` (`<trunk>` being `<draft>/integration` for a checkout
+    tracking `origin/<draft>/integration`, else main), copies the files to `PLAN_DIR/inputs/<name>` there,
     commits them (`<draft>: inputs`, author fab) and pushes; the worktree
     is removed in every outcome, so a refusal or a failure leaves no
     commit, file or local branch. The push depends on the checkout: one
@@ -177,7 +178,11 @@ only as tweaks once a replay matches its run.
     when `inputs/<name>` exists at `origin/<trunk>` (unless `--replace`),
     or exists untracked or changed in the checkout (that would break the
     fast-forward); when the branch or ready ref it would push already
-    exists on origin; for a draft named `inputs`. It prints the repository
+    exists on origin (after a queue rejection the operator deletes
+    `ready/inputs/<draft>`, or `--replace` replaces the command's own ready
+    ref); for a draft named `inputs`; for a checkout tracking any other
+    branch (an agents checkout must track `origin/main`; a fabrig one
+    `origin/main`, `origin/<draft>/integration`, or be detached). It prints the repository
     paths to give `fab call cut --source`.
   The tick follows a
   plan checkout that tracks a branch: after its fetch it fast-forwards the

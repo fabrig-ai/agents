@@ -34,7 +34,8 @@ small ones now"). The designs now say what to build, each marked "the user, 11-0
      - the triage start checks it;
      - `fab/calls.py`, `fab/designer.py` and `fab/triage.py` `main` park alike;
      - `wake.want` after the park;
-     - a later `call.started` of the subject closes the ask (`fab/channel.py` `_log_asks`);
+     - a later `call.started` of the subject closes an open parked ask whose call is ""
+       (`fab/channel.py` `_log_asks`); chain parks are untouched;
      - a parked ask with no report shows no excerpt and no "Read:" in the forge body
        (`fab/forge.py`).
    - `fab.channel.asks` already shows a `call.parked` as a parked ask: test it, don't rebuild it.
@@ -44,7 +45,8 @@ the two commands, as `test_overlaps_git.py` does.
 
 The user's rule: dogfood. Built by fab's loop (landed through `bin/fab land`); the plan's landing
 is `queue` (the cut is started with `--set 'landing="queue"'`). There are three tasks: 1 and 2 are
-independent, and 3 touches `fab/dispatch.py` `_call`, `call_actions`, `_parked_subjects` and
-`fab/calls.py` `main`. Run it after `docs/plan/dogfood-faults` has landed its tasks; it may run
+independent, and 3 touches `fab/dispatch.py` (`_call`, `call_actions`, `_parked_subjects`),
+`fab/calls.py` `main`, `fab/designer.py` `main`, `fab/triage.py` `main`, `fab/channel.py` and
+`fab/forge.py`. Run it after `docs/plan/dogfood-faults` has landed its tasks; it may run
 beside `docs/plan/mechanisms-out` if that one has not reached `fab/calls.py` `main`'s amend path
 yet. Otherwise order 3 after it.

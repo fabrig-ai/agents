@@ -21,7 +21,8 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   - a call's chain referred by settle as `user: ...`, or parked because
     settlement failed (calls.md 2), or a call the tick started whose brief
     could not compile (`brief failed: ...`, calls.md 2), closed by
-    `call.answered` or a later `call.started` of its subject; an ordinary second refusal or failed
+    `call.answered`, or (`call` "") by a later `call.started` of its
+    subject; an ordinary second refusal or failed
     amend goes to settle first. Amend and settle calls' own `Question:`
     reports open no ask. Older parked asks stay open until their chain
     settles; a later `chain.settled` for the subject closes its parked ask,
@@ -134,8 +135,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   timestamp precision, decides later. Both ask kinds for a subject share
   one issue, using the newest ask. Title: `<subject>: <first non-blank
   question line>`, cut to 200 characters. Body: the call report's
-  `channel.excerpt`, or the parked reason and its report's excerpt, then
-  `Read: <report path>` and the footer: "Answer in a comment. Ask for more
+  `channel.excerpt`, or the parked reason and, when it has a report, its
+  excerpt; `Read: <report path>` only when there is a report; then the
+  footer: "Answer in a comment. Ask for more
   context if you need it: the loop replies here. Your answer is recorded
   once the loop reads it as one." Apply label 1 and log `issue.opened`
   (subject, kind, number, url).

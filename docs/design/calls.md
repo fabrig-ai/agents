@@ -350,8 +350,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   the park the call wants a wake (`wake.want("park <subject>")`), so the
   page shows it at once. The ask closes at `call.answered` for the
   subject (`fab page answer SUBJECT TEXT`, channel.md 2), then the next
-  tick tries once more and a second failure parks it again, or at a later
-  `call.started` of the subject (a run by hand that went through).
+  tick tries once more and a second failure parks it again, or, for a park
+  whose `call` is "", at a later `call.started` of the subject (a run by
+  hand that went through); a chain's park stays until its answer, its
+  settlement or `call.finished`.
 
 ## 3. The designer's calls
 
