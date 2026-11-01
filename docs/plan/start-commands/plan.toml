@@ -1,0 +1,64 @@
+landing = "queue"
+
+# The thin cut of start-commands: the request's four items, each built as
+# its design now says (marked "the user, 11-01" or "fixed 11-01"). Every
+# part is direct, one task each; specs in tasks/, shared rules in
+# notes/common.md, decisions and the critical path in notes/decisions.md.
+# trunk-make and plan-inputs start at once (their fab/cli.py entries sit
+# apart); brief-park then retired-import, both changing fab/dispatch.py.
+draft = "start-commands"
+repo = "agents"
+sources = [
+  "docs/plan/start-commands/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "trunk-make"
+title = "fab trunk make PLAN_PATH [--base REV]: the refusals, the worktree, the push with an empty lease and its undo, trunk.made"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "plan-inputs"
+title = "fab plan inputs PLAN_DIR FILE... [--replace]: committed in a temporary worktree, pushed per checkout kind, the plan checkout fast-forwarded"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "brief-park"
+title = "A --tick call whose brief cannot be compiled parks its subject; the tick, the page and the forge read the park"
+mode = "direct"
+needs = []
+design = "docs/design/calls.md, 2"
+
+[[part]]
+id = "retired-import"
+title = "A retired plan's draft stays in the queue import, and its retire chain's finish is recorded from the imported landing"
+mode = "direct"
+needs = []
+design = "docs/design/tick.md, 5"
+
+[[slice]]
+id = 1
+story = "An operator starts an integration plan with two commands: fab trunk make makes and pushes <draft>/integration with its worktree, and fab plan inputs commits the run's inputs on the trunk (or lands them on main, or readies them for the queue) and fast-forwards the plan's checkout"
+parts = ["trunk-make", "plan-inputs"]
+walk = false
+
+[[slice]]
+id = 2
+story = "A call the tick starts whose brief cannot be compiled logs call.parked once and wakes the tick; the tick starts nothing for that subject until an answer or a later call.started closes the park, and the page and the issue show the reason without a Read line"
+parts = ["brief-park"]
+walk = false
+
+[[slice]]
+id = 3
+story = "A plan whose retire landed through fabrig's queue and that now reads retired = true still gets its branch.landed imported and its retire chain's call.finished, and nothing else runs for it"
+parts = ["retired-import"]
+walk = false
