@@ -132,6 +132,7 @@ class AfterLandingTest(unittest.TestCase):
         self.load = self.enterContext(patch.object(tiers, "load", return_value=self.configured))
         self.enterContext(patch.object(cpu, "run_pair", side_effect=self.run_pair))
         self.enterContext(patch.object(cpu, "build_wrapper", return_value=self.home / "wrapper"))
+        self.wake = self.enterContext(patch.object(after_landing.events, "wake", return_value=True))
         self.runner = self.make_runner()
 
     def make_runner(self, **kwargs):
@@ -259,6 +260,8 @@ class AfterLandingTest(unittest.TestCase):
             ["git", "fetch", "-q", "origin", "main"], ["git", "rev-parse", "origin/main"],
             ["git", "switch", "--detach", "--force", tip], ["git", "clean", "-fd"]])
         self.assertTrue(all(call.cwd == str(self.repo) for call in self.sh.calls))
+        self.assertEqual(record["reds"], [])
+        self.wake.assert_not_called()
 
     def test_new_red_standing_and_recovered_follow_own_history(self):
         self.runner.cycle()
@@ -275,6 +278,13 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual(Path(record["log"]).name, "qa-skein.log")
         self.assertEqual(Path(record["rerun"]).name, "qa-skein-1.log")
         self.assertEqual(self.records("run")[-1]["new"], 1)
+        self.assertEqual(record["key"], nextest.Case("qa-skein", self.binary, "works", "", "").key)
+        self.assertEqual(self.records("run")[-1]["reds"], [record["key"]])
+        self.assertEqual(after_landing.imported(self.records("run")[-1])["reds"], [record["key"]])
+        self.wake.assert_called_once_with(
+            f"after-landing {first[:12]} new 1 unattributed 0 recovered 0",
+            sh=self.sh, hosts=self.runner.known)
+        self.wake.reset_mock()
         self.assertEqual(self.records("run")[-1]["verdict"], "red")
         self.assertEqual(self.runner.state["cursor"], first)
         self.assertEqual(self.history(), {"result": "red", "commit": first})
@@ -285,6 +295,8 @@ class AfterLandingTest(unittest.TestCase):
         self.assertNotIn("branches", standing)
         self.assertEqual(self.history(), {"result": "red", "commit": second})
         self.assertEqual(self.records("run")[-1]["standing"], 1)
+        self.assertEqual(self.records("run")[-1]["reds"], [record["key"]])
+        self.wake.assert_not_called()
         self.response([("works", "pass")])
         third = self.advance("draft/fix")
         self.runner.cycle()
@@ -293,6 +305,13 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual(self.records("run")[-1]["recovered"], 1)
         self.assertEqual(self.records("run")[-1]["verdict"], "green")
         self.assertEqual(self.history(), {"result": "pass", "commit": third})
+        self.assertEqual(self.records("run")[-1]["reds"], [])
+        self.assertEqual(after_landing.imported(recovered), dict(
+            ev="tiers.recovered", tip=third, key=record["key"],
+            profile="qa-skein", binary=self.binary, test="works"))
+        self.wake.assert_called_once_with(
+            f"after-landing {third[:12]} new 0 unattributed 0 recovered 1",
+            sh=self.sh, hosts=self.runner.known)
 
     def test_new_red_attributes_since_its_last_execution_not_cursor(self):
         self.runner.cycle()
@@ -322,14 +341,89 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual(self.runner.state["cursor"], self.base)
 
     def test_unattributed_and_skipped_tests(self):
+        self.runner.cycle()
+        self.advance("draft/one")
+        self.advance()
+        self.advance("draft/two")
         self.response([("new_test", "fail"), ("unknown", "skipped")])
         self.response([("new_test", "fail")], alone="new_test")
         self.runner.cycle()
         record, = self.records("test")
         self.assertEqual((record["state"], record["good"]), ("unattributed", ""))
-        self.assertEqual(self.records("run")[0]["unattributed"], 1)
+        self.assertEqual(self.records("run")[-1]["unattributed"], 1)
+        self.assertEqual(self.records("run")[-1]["reds"], [record["key"]])
+        self.assertEqual(record["branches"], ["draft/one", "draft/two"])
+        red = after_landing.imported(record)
+        self.assertEqual(red, dict(
+            ev="tiers.red", tip=self.tip, key=record["key"], state="unattributed",
+            profile="qa-skein", binary=self.binary, test="new_test", error="assertion failed",
+            branches=["draft/one", "draft/two"], log=record["log"], rerun=record["rerun"]))
+        self.wake.assert_called_once_with(
+            f"after-landing {self.tip[:12]} new 0 unattributed 1 recovered 0",
+            sh=self.sh, hosts=self.runner.known)
         self.assertEqual(self.history("new_test")["result"], "red")
         self.assertIsNone(self.history("unknown"))
+
+    def test_mixed_run_wakes_once_after_records_and_history_are_saved(self):
+        cases = [("new_red", "fail"), ("unknown_red", "fail"), ("fixed", "pass")]
+        for name, result in (("new_red", "pass"), ("fixed", "red")):
+            key = nextest.Case("qa-skein", self.binary, name, "", "").key
+            self.runner.state["tests"][key] = dict(result=result, commit=self.base)
+        self.response(cases)
+        self.response([("new_red", "fail")], alone="new_red")
+        self.response([("unknown_red", "fail")], alone="unknown_red")
+        self.runner.known = {"builder": Host("builder", "free@builder", ("builder",))}
+
+        observed = []
+
+        def wake(reason, **kwargs):
+            observed.append((list(log.read(self.runner.log_path))[-1],
+                             json.loads(self.runner.state_path.read_text()),
+                             self.history("fixed")["result"]))
+            return True
+
+        self.wake.side_effect = wake
+        record = self.runner.check(self.tip)
+        self.assertEqual((record["new"], record["unattributed"], record["recovered"]), (1, 1, 1))
+        self.assertEqual(observed, [(record, self.runner.state, "pass")])
+        self.assertEqual(record["reds"], [nextest.Case("qa-skein", self.binary, name, "", "").key
+                                          for name in ("new_red", "unknown_red")])
+        self.wake.assert_called_once_with(
+            f"after-landing {self.tip[:12]} new 1 unattributed 1 recovered 1",
+            sh=self.sh, hosts=self.runner.known)
+
+    def test_standing_flake_unobserved_and_passing_tests_do_not_wake(self):
+        key = nextest.Case("qa-skein", self.binary, "standing", "", "").key
+        self.runner.state["tests"][key] = dict(result="red", commit=self.base)
+        self.response([("standing", "fail"), ("flake", "fail"), ("unknown", "skipped")])
+        self.response([("standing", "fail")], alone="standing")
+        self.response([("flake", "pass")], alone="flake")
+        record = self.runner.check(self.tip)
+        self.assertEqual((record["standing"], record["flake"], record["unobserved"], record["passing"]),
+                         (1, 1, 1, 1))
+        self.assertEqual(record["reds"], [key])
+        self.wake.assert_not_called()
+
+    def test_wake_failure_is_printed_without_failing_or_losing_the_run(self):
+        self.response([("works", "fail")])
+        self.response([("works", "fail")], alone="works")
+        for failure in (False, OSError("offline"), RuntimeError("wake broke")):
+            with self.subTest(failure=failure):
+                self.runner.state["tests"] = {}
+                self.wake.reset_mock()
+                self.wake.side_effect = failure if isinstance(failure, Exception) else None
+                self.wake.return_value = False
+                with contextlib.redirect_stderr(io.StringIO()) as errors:
+                    record = self.runner.check(self.tip)
+                self.wake.assert_called_once()
+                self.assertEqual((record["verdict"], record["unattributed"]), ("red", 1))
+                self.assertEqual(list(log.read(self.runner.log_path))[-1], record)
+                self.assertEqual(json.loads(self.runner.state_path.read_text()), self.runner.state)
+                self.assertEqual(self.runner.state["cursor"], self.tip)
+                self.assertEqual(self.history()["result"], "red")
+                expected = str(failure) if isinstance(failure, Exception) else (
+                    f"not delivered: after-landing {self.tip[:12]} new 0 unattributed 1 recovered 0")
+                self.assertEqual(errors.getvalue(), f"fab after-landing: wake: {expected}\n")
 
     def test_pair_faults_preserve_cursor_and_history_and_skip_same_partial_tip(self):
         self.runner.cycle()
@@ -391,6 +485,8 @@ class AfterLandingTest(unittest.TestCase):
         self.assertIsNone(self.history("passed"))
         self.assertIsNone(self.history("later"))
         self.assertEqual(self.records("run")[-1]["verdict"], "partial")
+        self.assertEqual(self.records("run")[-1]["reds"], [])
+        self.wake.assert_not_called()
         self.assertEqual([path.name for _, _, path in self.invocations[-4:]],
                          ["qa-skein.log", "qa-skein-1.log", "qa-skein-2.log", "qa-jig.log"])
 
@@ -668,6 +764,7 @@ class AfterLandingTest(unittest.TestCase):
         self.assertEqual(len(record["possible_hangs"]), 2)
         tests = [row for row in log.read(self.runner.log_path) if row["ev"] == "test"]
         self.assertTrue(all(row["state"] == "starved" and row["cpu_s"] == .01 for row in tests))
+        self.wake.assert_not_called()
 
     def test_total_wall_stops_later_pairs_without_fault_or_confirmation(self):
         atomic.write(self.repo / cpu.BUDGETS, '[after-landing]\nwall_hard_s=5\n')
@@ -789,16 +886,50 @@ class InstallTest(unittest.TestCase):
 
 
 class ImportedTest(unittest.TestCase):
-    def test_runs_and_new_reds_are_kept_everything_else_stays(self):
-        run = {"ts": "t", "ev": "run", "tip": "x", "verdict": "green", "new": 0, "pairs": ["p"], "freed": 3}
+    def test_runs_keep_reds_and_leave_pair_details_on_the_machine(self):
+        key = nextest.Case("qa-jig", "b", "t1", "", "").key
+        run = {"ts": "t", "ev": "run", "tip": "x", "verdict": "red", "new": 0,
+               "standing": 1, "reds": [key], "pairs": ["p"], "freed": 3}
         self.assertEqual(after_landing.imported(run), {"ev": "tiers.run", "tip": "x",
-                                                       "verdict": "green", "new": 0})
-        red = {"ev": "test", "state": "new", "tip": "x", "profile": "qa-jig", "test": "t1",
-               "binary": "b", "branches": ["d/a"], "log": "l", "rerun": "r"}
-        self.assertEqual(after_landing.imported(red)["ev"], "tiers.red")
-        self.assertNotIn("rerun", after_landing.imported(red))
-        for entry in ({**red, "state": "standing"}, {"ev": "error", "error": "boom"}):
-            self.assertIsNone(after_landing.imported(entry))
+                                                       "verdict": "red", "new": 0,
+                                                       "standing": 1, "reds": [key]})
+
+    def test_new_and_unattributed_reds_keep_their_evidence(self):
+        key = nextest.Case("qa-jig", "b", "t1", "", "").key
+        for state in ("new", "unattributed"):
+            with self.subTest(state=state):
+                red = dict(tip="x", key=key, state=state, profile="qa-jig", binary="b",
+                           test="t1", error="assertion failed", branches=["d/a"], log="l", rerun="r")
+                entry = dict(red, ev="test", ts="t", cpu_s=1, good="old")
+                self.assertEqual(after_landing.imported(entry), dict(red, ev="tiers.red"))
+                self.assertEqual(entry["ev"], "test")
+
+    def test_recovered_tests_keep_only_their_identity(self):
+        identity = dict(tip="x", key=nextest.Case("qa-jig", "b", "t1", "", "").key,
+                        profile="qa-jig", binary="b", test="t1")
+        entry = dict(identity, ev="test", state="recovered", branches=["d/a"], log="l",
+                     rerun="", error="", cpu_s=1)
+        self.assertEqual(after_landing.imported(entry), dict(identity, ev="tiers.recovered"))
+
+    def test_older_records_omit_missing_fields(self):
+        self.assertEqual(after_landing.imported(dict(ev="run", tip="x", verdict="green")),
+                         dict(ev="tiers.run", tip="x", verdict="green"))
+        for state, event in (("new", "tiers.red"), ("unattributed", "tiers.red"),
+                             ("recovered", "tiers.recovered")):
+            with self.subTest(state=state):
+                entry = dict(ev="test", state=state, tip="x", profile="qa-jig", binary="b", test="t1")
+                expected = dict(ev=event, tip="x", profile="qa-jig", binary="b", test="t1")
+                if state != "recovered":
+                    expected["state"] = state
+                self.assertEqual(after_landing.imported(entry), expected)
+
+    def test_other_records_stay_on_the_machine(self):
+        for state in ("standing", "passing", "flake", "starved", "unobserved"):
+            with self.subTest(state=state):
+                self.assertIsNone(after_landing.imported(dict(ev="test", state=state)))
+        for event in ("pair", "error"):
+            with self.subTest(event=event):
+                self.assertIsNone(after_landing.imported(dict(ev=event, error="boom")))
 
 
 if __name__ == "__main__":

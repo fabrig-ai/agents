@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import atomic, cpu, hosts, log, logins, nextest, slots, tiers, units
+from fab import atomic, cpu, hosts, log, logins, nextest, slots, tiers, units, wake as events
 from fab.sh import Runner, run, ssh
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
@@ -330,6 +330,8 @@ class AfterLanding:
         every selected test's result and CPU, then the run's totals, optional budget
         and verdict. Starved and unobserved tests preserve history. A fault keeps
         the cursor; a crash before saving causes a whole new run on the next cycle.
+        After saving, wake the tick once for new, unattributed or recovered tests;
+        a failed wake is printed and does not fail the run.
         """
         started_ns = time.time_ns()
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
@@ -354,6 +356,7 @@ class AfterLanding:
             over.append(f"total CPU {total_cpu:.6f}s > {self.limits['cpu_total_s']}s; tests: {contributors}")
         tests = dict(self.state["tests"])
         states = []
+        reds = []
         for pair in pairs:
             log.append("pair", path=self.log_path, tip=tip, profile=pair["profile"],
                        status=pair["status"], cpu_s=pair["cpu_s"], wall_s=pair["wall_s"],
@@ -376,12 +379,16 @@ class AfterLanding:
                 last = self.state["tests"].get(case.key)
                 good = last["commit"] if last and last["result"] == "pass" else ""
                 attribution = {}
-                if current == "new":
+                if current in CONFIRMED:
+                    reds.append(case.key)
+                if current == "unattributed":
+                    attribution = {"branches": [item.branch for item in landed if item.branch]}
+                elif current == "new":
                     changed = suspects(self.repo, good, tip, sh=self.sh)
                     attribution = {"branches": [item.branch for item in changed if item.branch],
                                    "commits": len(changed)}
                 log.append("test", path=self.log_path, tip=tip, profile=case.profile,
-                           binary=case.binary, test=case.test, state=current, error=case.error,
+                           key=case.key, binary=case.binary, test=case.test, state=current, error=case.error,
                            cpu_s=used, wall_s=wall, starved=bool(measured.get("starved")),
                            incomplete=measured.get("incomplete", 0), possible_hang=possible_hang,
                            log=pair["log"], rerun=rerun_log, good=good, **attribution)
@@ -394,7 +401,7 @@ class AfterLanding:
         record = log.append(
             "run", path=self.log_path, tip=tip, previous=previous or "",
             branches=[item.branch for item in landed if item.branch], commits=len(landed),
-            verdict=outcome, **counts, cpu_s=total_cpu, wall_s=self.wall_s,
+            verdict=outcome, reds=reds, **counts, cpu_s=total_cpu, wall_s=self.wall_s,
             wall_starved=((self.remaining() is not None and self.remaining() <= 0)
                           or any(pair["starved_run"] or pair["status"] == "unobserved" for pair in pairs)),
             possible_hangs=hangs, budget=[f"{key}={value}s" for key, value in self.limits.items()],
@@ -408,6 +415,14 @@ class AfterLanding:
                  "last": {"tip": tip, "verdict": outcome}, "tests": tests}
         atomic.write(self.state_path, json.dumps(saved, sort_keys=True) + "\n")
         self.state = saved
+        if any(counts[name] for name in ("new", "unattributed", "recovered")):
+            reason = (f"after-landing {tip[:12]} new {counts['new']} "
+                      f"unattributed {counts['unattributed']} recovered {counts['recovered']}")
+            try:
+                if not events.wake(reason, sh=self.sh, hosts=self.known):
+                    print(f"fab after-landing: wake: not delivered: {reason}", file=sys.stderr)
+            except Exception as error:
+                print(f"fab after-landing: wake: {error}", file=sys.stderr)
         return record
 
     def cycle(self) -> bool:
@@ -441,16 +456,22 @@ class AfterLanding:
 
 def imported(entry: dict) -> dict | None:
     """The log record the dispatcher keeps for one of RECORD's entries, its ev included, or
-    None: a `run` becomes tiers.run (tip, verdict, the counts, branches, faults,
-    log), a `test` whose state is new becomes tiers.red (tip, profile, binary, test,
-    branches, log); anything else is left on the machine. Pure."""
+    None: a `run` becomes tiers.run (tip, verdict, the counts, branches, reds, faults,
+    log), a new or unattributed `test` becomes tiers.red (tip, key, state, profile,
+    binary, test, error, branches, log, rerun), a recovered `test` becomes
+    tiers.recovered (tip, key, profile, binary, test). Omit absent fields for older
+    records; anything else is left on the machine. Pure."""
     if entry.get("ev") == "run":
         fields = ("tip", "verdict", *CONFIRMED, "flake", "recovered", "starved", "unobserved", "cpu_s", "wall_s",
-                  "wall_starved", "possible_hangs", "budget", "over_budget", "branches", "faults", "log")
+                  "wall_starved", "possible_hangs", "budget", "over_budget", "branches", "reds", "faults", "log")
         return {"ev": "tiers.run", **{key: entry[key] for key in fields if key in entry}}
-    if entry.get("ev") == "test" and entry.get("state") == "new":
-        fields = ("tip", "profile", "binary", "test", "branches", "log")
-        return {"ev": "tiers.red", **{key: entry[key] for key in fields if key in entry}}
+    if entry.get("ev") == "test":
+        if entry.get("state") in ("new", "unattributed"):
+            fields = ("tip", "key", "state", "profile", "binary", "test", "error", "branches", "log", "rerun")
+            return {"ev": "tiers.red", **{key: entry[key] for key in fields if key in entry}}
+        if entry.get("state") == "recovered":
+            fields = ("tip", "key", "profile", "binary", "test")
+            return {"ev": "tiers.recovered", **{key: entry[key] for key in fields if key in entry}}
     return None
 
 
