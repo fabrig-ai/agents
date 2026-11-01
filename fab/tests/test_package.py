@@ -23,6 +23,7 @@ class CliTest(unittest.TestCase):
         self.assertIn("report", out.getvalue())
         self.assertIn("page", out.getvalue())
         self.assertIn("issues", out.getvalue())
+        self.assertIn("qa", out.getvalue())
         self.assertIn("unknown command", err.getvalue())
 
 

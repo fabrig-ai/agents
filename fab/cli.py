@@ -12,6 +12,7 @@ COMMANDS = {
     "wake": ("fab.wake", "wake the tick from any machine; install the tick's units"),
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
     "issues": ("fab.forge", "the user's questions as forge issues: open, converse, close"),
+    "qa": ("fab.walks", "a ladder's QA walks: start one, report its result, show the rungs"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),
     "report": ("fab.report", "the standing reports of a plan and of the landing"),
     "serve": ("fab.serve", "the public status page, live from the log"),
