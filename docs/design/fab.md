@@ -523,7 +523,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   reds are not imported one by one: the run's `reds` says which are still
   red. The user's page shows the newest run's verdict, counts, total CPU,
   test wall, starved count, possible hangs, any configured budget and
-  excesses, faults and its new reds with their suspects' branches, then
+  excesses, faults, and its new and unattributed reds with their suspects'
+  branches, each labelled by its state (`new red: ...`, `unattributed red:
+  ...`), then
   one line per open red that is not a signal, `red-<n> (<draft>/red-<n>):
   <state>, <k> tests at \`<tip[:12]>\`, since <ts>` (below), under `##
   After landing`.
