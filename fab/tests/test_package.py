@@ -94,6 +94,15 @@ builds = 1
         with self.assertRaises(ValueError):
             hosts.parse('[b]\nssh = "x"\nroles = ["chef"]\n')
 
+    def test_after_landing_needs_a_builder_and_one_of_its_slots(self):
+        base = '[a]\nssh = "x"\ndisk_gb = 300\nplaces = 1\nslots = 7\nslot_bound_gb = 20\nbuilds = 1\n'
+        for extra, bad in (('roles = ["builder", "after-landing"]\nafter_landing_slot = 7\n', False),
+                           ('roles = ["builder", "after-landing"]\n', True),
+                           ('roles = ["builder", "after-landing"]\nafter_landing_slot = 8\n', True),
+                           ('roles = ["after-landing"]\nafter_landing_slot = 1\n', True)):
+            with self.subTest(extra=extra):
+                self.assertEqual(bool(hosts.problems(hosts.parse(base + extra)["a"])), bad)
+
     def test_a_gate_budgets_one_more_bound_for_the_queue(self):
         text = '[g]\nssh = "x"\nroles = ["gate", "builder"]\nslots = 2\nslot_bound_gb = 20\n'
         self.assertEqual(hosts.parse(text)["g"].budget_gb(), 60)

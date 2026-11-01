@@ -974,7 +974,7 @@ class UnitTest(unittest.TestCase):
 
     def test_a_machine_without_the_gate_role_disables_a_unit_it_has(self):
         fake = FakeRunner()
-        self.assertEqual(self.install(self.builder, fake), 'not a gate: nothing to do')
+        self.assertEqual(self.install(self.builder, fake), 'fab-queue.service: no gate role here: nothing to do')
         self.assertEqual(fake.argvs(), [])
         write(self.directory / queue.UNIT, 'old\n')
         line = self.install(self.builder, fake)

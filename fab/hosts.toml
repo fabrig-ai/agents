@@ -47,7 +47,8 @@ builds = 4
 [hetzner10]
 ssh = "free@65.108.159.130"
 hostname = "debian-16gb-hel1-10"
-roles = ["builder"]
+roles = ["builder", "after-landing"]
+after_landing_slot = 7  # claimed for fab after-landing for good (docs/design/fab.md, 11)
 disk_gb = 305
 places = 4
 slots = 7

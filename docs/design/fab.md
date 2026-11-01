@@ -322,7 +322,15 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   repository's `tools/after-landing` (`docs/design/after-landing.md`) and
   fabrig's `tools/tiers/run`. `fab after-landing run --slot N` loops on one
   builder in one slot claimed for it (`fab slot claim N after-landing
-  after-landing`); it refuses any other slot. Every cargo command goes
+  after-landing`); it refuses any other slot.
+- **Its machine and slot are config:** the builder with the role
+  `after-landing` in `fab/hosts.toml` names its `after_landing_slot`
+  (hetzner10, slot 7). `fab after-landing install`, run by the deploy on
+  every machine as `fab queue install` is (section 6, `fab/units.py`),
+  claims that slot for good and writes `fab-after-landing.service`; a stop
+  waits up to two hours for the run in progress, so a deploy never cuts one
+  short. On a machine without the role it disables a unit it finds; the
+  slot's claim is released by hand there. Every cargo command goes
   through `heavy` in the build lane, which waits for disk by itself.
 - **A tier is a pair:** a nextest profile `<tier>-<tree>` of fabrig's
   `.config/nextest.toml`, its packages and the native binaries its tests run

@@ -20,7 +20,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import atomic, log, nextest, slots, tiers
+from fab import atomic, hosts, log, nextest, slots, tiers, units
 from fab.sh import Runner, run
 
 # The pairs every tip gets, in order. A profile is enrolled only by adding it here: not the
@@ -33,6 +33,9 @@ STATE = "after-landing"  # FAB_HOME/after-landing/: state.json and one directory
 # A queue merge on main's first parent: fab's queue writes `Merge <draft>/<task>`, the old
 # queue `Merge ready/<draft>/<task>`.
 MERGE = re.compile(r"Merge (?:ready/)?([^/\s]+/[^/\s]+)")
+UNIT = "fab-after-landing.service"  # the runner's user unit on the machine with the role
+ROLE = "after-landing"  # the fab/hosts.toml role of that machine, which names its slot
+DRAIN = "2h"  # a stop waits for the run in progress: a deploy never cuts a run short
 CONFIRMED = ("new", "standing", "unattributed")  # the states of a red confirmed by its rerun
 
 
@@ -296,23 +299,53 @@ class AfterLanding:
                     sleep(idle)
 
 
+def service(slot: int) -> units.Service:
+    """UNIT, which runs `fab after-landing run --slot <slot>` and drains for up to DRAIN."""
+    return units.Service(UNIT, "fabrig's slow tiers on each new main", ROLE,
+                         (RUN, "run", "--slot", str(slot)), "after-landing.stop", DRAIN)
+
+
+def install(*, sh: Runner = run, directory: Path | None = None, checkout: Path | None = None,
+            known: dict[str, hosts.Host] | None = None) -> str:
+    """Install or refresh UNIT on this machine at a deploy; return what was done, one line.
+
+    known is the machines (default fab.hosts.load()). On the machine with ROLE, its
+    after_landing_slot is claimed for RUN first (fab.slots.claim, or the claim RUN already
+    holds); a slot that is missing or held by another run is a ValueError and nothing is
+    installed. Then fab.units.install of service(slot), which on a machine without ROLE
+    disables a unit it finds; the slot is the user's to release there."""
+    known = known if known is not None else hosts.load()
+    host = hosts.this(known)
+    slot = host.after_landing_slot if host is not None else 0
+    if host is not None and ROLE in host.roles:
+        if slot < 1:
+            raise ValueError(f"{host.name}: the {ROLE} role needs after_landing_slot")
+        held = slots.claim(slot, RUN, RUN) or slots.read_claim(slot)
+        if held is None or held.run != RUN:
+            raise ValueError(f"slot {slot} is held by {held.run if held else 'nobody'}, not {RUN}")
+    return units.install(service(slot), sh=sh, directory=directory, checkout=checkout, known=known)
+
+
 def main(argv: list[str]) -> int:
-    """`fab after-landing run|once --slot N` (run stops at FAB_HOME/after-landing.stop) and
+    """`fab after-landing run|once --slot N` (run stops at FAB_HOME/after-landing.stop),
     `fab after-landing log [--since TS]` (RECORD's records at or after TS, one JSON object per
-    line, as `fab queue log` prints). Exit 0; 1 with `fab after-landing: <error>` on stderr
-    for an OSError, RuntimeError or ValueError (a slot not claimed for RUN); 2 on bad
-    arguments."""
+    line, as `fab queue log` prints) and `fab after-landing install` (install() at a deploy,
+    printing its line). Exit 0; 1 with `fab after-landing: <error>` on stderr for an OSError,
+    RuntimeError or ValueError (a slot not claimed for RUN); 2 on bad arguments."""
     parser = argparse.ArgumentParser(prog="fab after-landing")
     commands = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "once"):
         commands.add_parser(command).add_argument("--slot", type=int, required=True)
     commands.add_parser("log").add_argument("--since")
+    commands.add_parser("install")
     try:
         args = parser.parse_args(argv)
     except SystemExit as error:
         return int(error.code)
     try:
-        if args.command == "log":
+        if args.command == "install":
+            print(install())
+        elif args.command == "log":
             for entry in log.iterate(log.home() / RECORD):
                 if args.since is None or entry["ts"] >= args.since:
                     print(json.dumps(entry, ensure_ascii=False))

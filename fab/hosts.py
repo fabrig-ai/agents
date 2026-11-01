@@ -14,10 +14,10 @@ from pathlib import Path
 from fab import log
 
 DEFAULT = Path(__file__).resolve().parent / "hosts.toml"
-ROLES = {"dispatcher", "builder", "gate"}
+ROLES = {"dispatcher", "builder", "gate", "after-landing"}
 LOCAL = "hosts.local.toml"  # FAB_HOME's live overrides of this file, never in git (docs/design/fab.md, 7)
 OVERRIDES = frozenset({"roles", "disk_gb", "places", "slots", "slot_bound_gb", "kache_gb",
-                       "headroom_gb", "builds"})  # what an override may change: not a host's identity
+                       "headroom_gb", "builds", "after_landing_slot"})  # what an override may change: not a host's identity
 
 
 @dataclass(frozen=True)
@@ -33,6 +33,7 @@ class Host:
     kache_gb: int = 0
     headroom_gb: int = 0
     builds: int = 0
+    after_landing_slot: int = 0  # the slot claimed for after landing, with that role
 
     def budget_gb(self) -> int:
         """What fab's own use of the disk may reach: kache + slots x bound + headroom, and one
@@ -111,7 +112,12 @@ def this(hosts: Mapping[str, Host], name: str | None = None) -> Host | None:
 
 
 def problems(host: Host) -> list[str]:
-    """A builder whose budget exceeds its disk, or that lacks the figures to say."""
+    """A builder whose budget exceeds its disk, or that lacks the figures to say; an
+    after-landing machine that is no builder or names no slot of its own."""
+    if "after-landing" in host.roles and not (
+            "builder" in host.roles and 0 < host.after_landing_slot <= host.slots):
+        return [f"{host.name}: after-landing needs the builder role and one of its slots "
+                "as after_landing_slot"]
     if "builder" not in host.roles:
         return []
     if not (host.disk_gb and host.slots and host.slot_bound_gb and host.places and host.builds):

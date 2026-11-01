@@ -10,7 +10,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import after_landing, atomic, log, nextest, slots, tiers
+from fab import after_landing, atomic, hosts, log, nextest, slots, tiers
 from fab.after_landing import AfterLanding, Suspect, state, suspects, verdict
 from fab.sh import Failed, Result
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
@@ -526,6 +526,49 @@ class AfterLandingTest(unittest.TestCase):
                      ["once", "--slot", "1", "--since", "now"]]:
             with self.subTest(args=args), contextlib.redirect_stderr(io.StringIO()):
                 self.assertEqual(after_landing.main(args), 2)
+
+
+class InstallTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.slots = self.home / "slots"
+        (self.slots / "7").mkdir(parents=True)
+        self.enterContext(patch.dict(os.environ, {"FAB_SLOTS": str(self.slots), "FAB_HOST": "b"}))
+        self.directory = self.home / "units"
+        self.known = {"b": hosts.Host("b", "free@b", ("builder", "after-landing"), slots=7,
+                                      after_landing_slot=7)}
+
+    def install(self, known=None, fake=None):
+        return after_landing.install(sh=fake or FakeRunner(), directory=self.directory,
+                                     known=known or self.known, checkout=Path("/i"))
+
+    def test_the_role_claims_its_slot_and_runs_the_slow_tiers_there(self):
+        line = self.install()
+        self.assertTrue(line.endswith("fab-after-landing.service enabled and restarting"))
+        self.assertEqual(slots.read_claim(7).run, after_landing.RUN)
+        text = (self.directory / after_landing.UNIT).read_text()
+        self.assertIn('ExecStart=/usr/bin/bash -lc "exec /i/bin/fab after-landing run --slot 7"', text)
+        self.assertIn("TimeoutStopSec=2h\n", text)
+        self.assertIn("after-landing.stop", text)
+        self.install()  # the claim it already holds is kept
+        self.assertEqual(slots.read_claim(7).run, after_landing.RUN)
+
+    def test_a_slot_held_by_a_run_installs_nothing(self):
+        slots.claim(7, "draft/a-1", "draft/a")
+        with self.assertRaisesRegex(ValueError, "held by draft/a-1"):
+            self.install()
+        self.assertFalse((self.directory / after_landing.UNIT).exists())
+
+    def test_a_machine_without_the_role_claims_nothing(self):
+        builder = {"b": hosts.Host("b", "free@b", ("builder",), slots=7)}
+        self.assertIn("nothing to do", self.install(builder))
+        self.assertIsNone(slots.read_claim(7))
+
+    def test_main_install_prints_its_line(self):
+        out = io.StringIO()
+        with patch.object(after_landing, "install", return_value="done"), contextlib.redirect_stdout(out):
+            self.assertEqual(after_landing.main(["install"]), 0)
+        self.assertEqual(out.getvalue(), "done\n")
 
 
 if __name__ == "__main__":
