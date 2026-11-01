@@ -1619,7 +1619,9 @@ only as tweaks once a replay matches its run.
   started early on fe-remove and asked four times for the same unfinished
   removal before it parked). A run that started early and ended `Failed:`
   (its needs' work unfinished) waits for them likewise and then runs again
-  (r6: fe-world-remove), rather than parking with nobody to answer it. Its brief gains `# Started early`, naming those branches and saying
+  (r6: fe-world-remove), rather than parking with nobody to answer it. A
+  rerun that continues from its pushed branch merges the trunk into it first
+  (a conflict is left to the run), so it sees the needs merged since. Its brief gains `# Started early`, naming those branches and saying
   to merge them again before it pushes; `run.started` carries `early`. A
   done task of an integration plan merges only after every need has merged.
   The tick reads origin's branches of the draft from the plan checkout after

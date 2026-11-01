@@ -304,6 +304,14 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         # an untracked file the new base tracks stops the switch (the playground replay, 10-31).
         remote(["git", "-C", str(worktree), "clean", "-fdq"])
         remote(["git", "-C", str(worktree), "switch", "--discard-changes", "-C", branch, source])
+        if kind == "implement" and source != base:
+            # The continued branch catches up with the trunk, which may now hold the needs it
+            # started early on (the playground replay, 11-01: fe-world-remove reran three times
+            # asking for its merged needs). A conflict is left for the run: it is aborted here.
+            caught = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
+                                       "user.email=fab@localhost", "merge", "--no-edit", base]))
+            if not caught.ok:
+                sh(ssh(host.ssh, ["git", "-C", str(worktree), "merge", "--abort"]))
     elif kind == "repair":
         source = f"origin/{branch}"
         remote(["git", "-C", str(repo), "worktree", "add", "--detach", str(worktree), source])

@@ -427,6 +427,8 @@ class RunStartTest(unittest.TestCase):
             commands = [command(call) for call in fake.calls]
             self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "switch", "--discard-changes",
                            "-C", TASK.id, f"origin/{TASK.id}"], commands)
+            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "-c", "user.name=fab", "-c",
+                           "user.email=fab@localhost", "merge", "--no-edit", "origin/main"], commands)
 
     def test_start_fabrig_claims_slot_and_switches_for_every_kind(self):
         for kind in run.KINDS:
