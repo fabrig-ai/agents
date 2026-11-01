@@ -80,3 +80,16 @@ Preserve HTML escaping, section order, empty states, issue links and the Finding
 Keep the behavior required by `docs/design/fab.md`, section 13.14.
 Limit the repair to `fab/serve.py`, with `fab/tests/test_serve.py` changes only if needed.
 Run the serve tests with Python `-B`, then `bin/fab test` and the size gate.
+
+## Repair (2026-11-01, step test, foreman findings-loop/ladder-page/foreman-2)
+
+isolate the page’s edition reader from the dispatch edition-read spy
+`LadderTickTest.test_decisions_then_passes_reach_decide_and_use_one_edition_read` expects one call but sees two.
+The first is dispatch’s `_record_passes(..., sh=self.fake)` on origin/main.
+The second comes from this branch’s `fab/channel.py:compose`, calling `walks.editions` without `sh`.
+Both reference the same module attribute, so the dispatch test also intercepts the page’s independent read.
+In `fab/channel.py`, import `editions` into a channel-local binding and use that binding in `compose`.
+Update edition-reader patches in `fab/tests/test_channel.py` to patch that local binding and retain FakeRunner coverage.
+Preserve current-edition rendering and unreadable-plan handling required by `docs/design/fab.md`, sections 13.6 and 13.15.
+Keep changes within those two authorized files; do not weaken the dispatch assertion.
+Run the channel tests and the failing dispatch test with Python `-B`, then `bin/fab test` and the size gate.
