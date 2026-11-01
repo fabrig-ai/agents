@@ -128,17 +128,23 @@
   openings by tip and suspects; the closings, the absent rule among them;
   owners; the evidence file; the red tasks `<draft>/red-<n>`; the red
   foreman's brief, start, remedy and settle) and `fab/roles/foreman-red.md`
-  (11, 13.1). Designed, not built: the wiring into the tick and the page,
-  that is, the dispatcher's round (closing, opening, `red_actions`), red
-  tasks run and readied from main and their `RED_RUNS` limit (11); the
-  page's `red-<n>` and `fault:<profile>` signals (13.6); the specless
-  refusal foreman (13.1); `red.settled` and `red.closed` waking the tick
-  again and the lost-event note for `tiers.red` and `tiers.recovered`
-  (13.9); a fabrig plan's retire waiting for its verdict (11, 13.12); the
-  landing report's red figures (10). Until the wiring lands the imported
-  reds open nothing, and a specless repair's refusal foreman still reads
-  its spec from `task.path` (`fab.repairs.start`), which a specless task
-  does not have.
+  (11, 13.1). Built (11-01), the page and the report: the after-landing
+  imports carry `host` (11); the page's `red-<n>` signals (opened to the
+  page, left, unfixed; hidden as soon as the red's closing is due, and a
+  clear refused while that closure is pending) and `fault:<profile>`
+  signals (an unbroken streak, never cleared by hand), and the open-red
+  lines under `## After landing` (13.6, 11); the landing report's red
+  figures and its signal line for ownerless reds and hand-pushed
+  rejections, counted on their `queue_ts` day (10). Designed, not built:
+  the tick's wiring, that is, the dispatcher's round (reds opened and
+  closed, foremen started and settled, `red_actions`), red tasks run from
+  main and readied, and their `RED_RUNS` limit (11); the specless refusal
+  foreman (13.1); `red.settled` and `red.closed` waking the tick again and
+  the lost-event note for `tiers.red` and `tiers.recovered` (13.9); a
+  fabrig plan's retire waiting for its verdict (11, 13.12). So today no red
+  opens: only faults and queue signals reach the page, and a specless
+  repair's refusal foreman still reads its spec from `task.path`
+  (`fab.repairs.start`), which a specless task does not have.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
   `fab.calls.review_brief`, `last_review` and `landed_after` the review

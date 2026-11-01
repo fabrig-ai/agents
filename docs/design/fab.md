@@ -83,7 +83,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
-| `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, commits, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time (section 11) |
+| `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, commits, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time, `host` the machine's name (section 11) |
 | `red.opened` | red, tip, keys, suspects, tasks, draft, route, reason | an after-landing red's tests, grouped, sent to a foreman or to the page (section 11) |
 | `red.settled` | red, run, verdict, reason, owner, section | the tick acted on a red's foreman: fix or none (a repair task follows) or left (the page) (13.1) |
 | `red.closed` | red, reason, tip | every test of the red recovered or is no longer red in a run without faults, or its signal was cleared (section 11) |
@@ -514,7 +514,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   short is redone whole.
 - **The verdict comes home:** each tick imports the after-landing
   machine's records into the log (`al_ts` the record's time, read from the
-  newest imported): a `run` as `tiers.run` (its `reds` and `commits` too:
+  newest imported, and beside it `host`, the machine's name, so the page
+  can say where a log is: `<host>:<log>`, and `after-landing:<log>` for
+  older records without it): a `run` as `tiers.run` (its `reds` and `commits` too:
   the evidence file counts the commits that are no branch's, which the
   tick cannot know otherwise), a `test` whose
   state is new or unattributed as `tiers.red` (tip, key, state, profile,
@@ -1135,7 +1137,8 @@ before it lands (13.1).
       `- Suspects` (hand-pushed ones marked), `- Read:` the evidence file
       and the foreman's report when there is one;
     - `fault:<profile>`, a pair that cannot run: `- Fault` (its text),
-      `- Runs` (how many in a row), `- Read: \`<machine>:<run log>\``;
+      `- Runs` (how many in a row), `- Read: \`<host>:<run log>\`` (the
+      run's `host`, section 11);
   - then, from each standing report's latest day (section 10), its path and
     only the Signals lines whose owner is the user (the drafts' signal
     tables: targets, capacity, a usage limit, a budget the three questions
