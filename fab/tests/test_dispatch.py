@@ -2617,6 +2617,23 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual([a.task for a in actions if a.kind == "start"], ["one/a"])
         self.assertFalse(any(e["ev"] == "note" for e in log.read()))
 
+    def test_fetch_failure_defers_red_opening_until_all_owners_load(self):
+        one = self.plan_dir("one", tasks=("a",), repo="fabrig")
+        two = self.fabrig_plan(draft="two", tasks=("a",))
+        self.hosts["tiers"] = Host("tiers", "fake@tiers", ("after-landing",))
+        self.append(dict(ev="tiers.red", key="key", tip="tip", branches=["one/a"]),
+                    dict(ev="tiers.run", tip="tip", reds=["key"], branches=["one/a"]))
+        self.fake.rules.insert(0, (["git", "fetch", "origin"], lambda call:
+            Result(1, err="fetch failed") if call.cwd == str(self.checkout) else Result(0)))
+        actions = self.tick(one, two)
+        self.assertTrue(any(a.kind == "load" and "fetch failed" in a.detail for a in actions))
+        self.assertFalse(any(e["ev"] == "red.opened" for e in log.read()))
+        self.fake.rules.pop(0)
+        self.tick(one, two)
+        opened, = [e for e in log.read() if e["ev"] == "red.opened"]
+        self.assertEqual((opened["draft"], opened["route"], opened["tasks"]),
+                         ("one", "foreman", ["one/a"]))
+
     def test_retired_among_plans_is_skipped(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")
         path = one / "plan.toml"
@@ -2908,6 +2925,25 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(lines[1:], ["flow two target 1, 0 in flight", "start two/a implement builder"])
         self.assertFalse(log.home().exists())
         self.starts.assert_not_called()
+
+    def test_dry_run_includes_red_tasks_in_both_landing_modes(self):
+        from fab.tests.test_tier_reds import repair_events
+        for landing in ("queue", "integration"):
+            with self.subTest(landing=landing):
+                directory = self.plan_dir("demo", tasks=("a",), repo="fabrig")
+                path = directory / "plan.toml"
+                write(path, path.read_text().replace('landing = "queue"', f'landing = "{landing}"'))
+                events = repair_events()
+                with patch.object(dispatch, "run", side_effect=AssertionError("command ran")), \
+                     patch.object(log, "read", return_value=events), \
+                     patch("fab.hosts.load", return_value=self.hosts), \
+                     patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
+                    self.assertEqual(dispatch.main([str(directory), "--dry-run"]), 0)
+                self.assertEqual(decide.call_args.args[1]["demo/red-1"].kind, "red")
+                self.assertIn("start demo/red-1 implement builder", self.out.getvalue())
+                self.out.seek(0)
+                self.out.truncate()
+                self.assertFalse(log.home().exists())
 
     def test_dry_run_uses_same_events_for_both_plans_without_fetch_or_writes(self):
         one, two = self.plan_dir("one", tasks=("a",)), self.plan_dir("two", tasks=("a",))
@@ -3547,6 +3583,18 @@ class IntegrationDecideTest(unittest.TestCase):
                     repair, = [action for action in starts if action.task == "draft/c"]
                     self.assertEqual(repair.run_kind, "repair")
                 self.assertEqual((the_plan, tasks, events, hosts), before)
+
+    def test_stop_keeps_runnable_count_for_design_without_starting_tasks(self):
+        the_plan = replace(make_plan(part("core"), part("next"), low=0.5), landing="integration")
+        tasks = {"draft/a": task("a")}
+        events = [event("branch.landed", into=the_plan.trunk, main="trunk-tip", tip="task-tip")]
+        for n in range(1, 4):
+            events += [run_started("draft/integration", n, kind="check", base="trunk-tip"),
+                       run_ended("draft/integration", n, outcome="failed")]
+        hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=2)}
+        self.assertEqual(integration.next_step(the_plan, tasks, events).kind, "stop")
+        self.assertEqual(dispatch.decide(the_plan, tasks, events, hosts),
+                         [Action("flow", task="draft", detail="target 2, 0 in flight")])
 
     def test_clean_landings_do_not_grow_integration_target(self):
         the_plan = plan.Plan("draft", "agents", (), 1, 2,
@@ -4209,8 +4257,9 @@ class IntegrationCheckTickTest(unittest.TestCase):
             log.append(path=self.path, **entry)
 
     def tick(self):
-        return dispatch._tick_plan(self.plan, self.tasks, self.directory, self.home, self.hosts, {},
-                                   sh=self.fake, log_path=self.path)
+        events = log.read(self.path)
+        return dispatch._tick_loaded(self.plan, self.tasks, self.directory, self.home, self.hosts, {},
+                                     tier_reds.reds(events), self.tasks, sh=self.fake, log_path=self.path)
 
     def commands(self):
         return [shlex.split(shlex.split(call.argv[-1])[2]) for call in self.fake.calls if call.argv[:1] == ["ssh"]]
@@ -4514,6 +4563,14 @@ class RedDispatchTest(unittest.TestCase):
                           Action("remedy-red", task="draft/red-1", run="draft/red-1/foreman-1", detail="red-1")])
         self.assertEqual(folded, before)
 
+    def test_red_dispatch_retire_ignores_unrecognized_branch_names(self):
+        for last_branch, checked_branch in (("manual", "unrelated"),
+                                            ("manual", "draft/a"), ("draft/a", "manual")):
+            with self.subTest(last_branch=last_branch, checked_branch=checked_branch):
+                events = [dict(ev="branch.landed", task="draft/a", branch=last_branch),
+                          dict(ev="tiers.run", branches=[checked_branch], reds=[])]
+                self.assertFalse(dispatch.retire_ready(self.plan, self.tasks, events, [], after_landing=True))
+
     def test_red_dispatch_retire_uses_main_verdict_even_if_queue_import_lags(self):
         for landing in ("queue", "integration"):
             with self.subTest(landing=landing):
@@ -4680,6 +4737,21 @@ class RedDispatchTest(unittest.TestCase):
         self.open()
         self.assertFalse(any(e["ev"] == "red.opened" for e in log.read(self.path)))
 
+    def test_red_dispatch_import_knows_red_tasks_without_reading_evidence(self):
+        self.open()
+        self.finish_foreman()
+        original_import = dispatch._import_queue
+
+        def checked_import(tasks, *args, **kwargs):
+            self.assertIn("draft/red-1", tasks)
+            read_evidence.assert_not_called()
+            return original_import(tasks, *args, **kwargs)
+
+        with patch.object(tier_reds, "_read_evidence", wraps=tier_reds._read_evidence) as read_evidence, \
+             patch.object(dispatch, "_import_queue", side_effect=checked_import):
+            self.tick()
+        self.assertTrue(read_evidence.called)
+
     def test_red_dispatch_queue_import_knows_red_tasks_in_both_modes(self):
         for landing in ("queue", "integration"):
             with self.subTest(landing=landing):
@@ -4696,7 +4768,7 @@ class RedDispatchTest(unittest.TestCase):
                 self.assertFalse(any(e["ev"] == "queue.landed" for e in log.read(self.path)))
                 self.queue_records = []
 
-    def test_red_dispatch_two_runs_park_and_answer_at_once_while_other_work_moves(self):
+    def test_red_dispatch_two_runs_park_and_queue_while_other_work_moves(self):
         self.open()
         self.finish_foreman()
         self.tick()
@@ -4707,8 +4779,16 @@ class RedDispatchTest(unittest.TestCase):
         actions = self.tick()
         park, = [a for a in actions if a.kind == "park"]
         self.assertEqual((park.task, park.detail), ("draft/red-1", "2 runs without landing; needs judgement"))
-        self.assertTrue(any(a.run_kind == "answer" for a in actions))
+        self.assertFalse(any(a.kind == "call" for a in actions))
         self.assertFalse(any(a.kind == "foreman" for a in actions))
+        events = log.read(self.path)
+        tasks = {**self.tasks, **tier_reds.tasks(self.plan, events)}
+        question, = foreman.questions(tasks, events)
+        self.assertEqual((question.task, question.state), ("draft/red-1", "queued"))
+        due = (datetime.fromisoformat(question.since) + timedelta(minutes=30)).isoformat()
+        self.assertEqual([a for a in dispatch.call_actions(self.plan, tasks, events, [], due)
+                          if a.run_kind == "answer"],
+                         [Action("call", task="draft", run_kind="answer")])
         self.append(dict(ev="run.ended", task="draft/other", run="draft/other-1", outcome="done"),
                     dict(ev="question.answered", task="draft/red-1", answer="Try a unit test."))
         self.assertTrue(any(a.kind == "start" and a.task == "draft/red-1" for a in self.tick()))

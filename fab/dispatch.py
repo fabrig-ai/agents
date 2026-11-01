@@ -91,11 +91,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
         old_enough = (datetime.fromisoformat(now) -
                       min(datetime.fromisoformat(question.since) for question in questions)
                       >= timedelta(minutes=ANSWER_AFTER))
-        red_park = any(event.get("ev") == "question.asked" and event.get("park")
-                       and any(question.task == event.get("task") and question.run == event.get("run")
-                               and tasks[question.task].kind == tier_reds.KIND for question in questions)
-                       for event in events)
-        if red_park or plan.landing == "integration" or len(questions) >= ANSWER_AT or old_enough or blocking(
+        if plan.landing == "integration" or len(questions) >= ANSWER_AT or old_enough or blocking(
                 tasks, events, [{"task": question.task} for question in questions],
                 calls_in_flight=bool(roles), design=design, draft=plan.draft):
             actions.append(Action("call", task=plan.draft, run_kind="answer"))
@@ -159,7 +155,8 @@ def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: 
 
 @dataclass(frozen=True)
 class Action:
-    kind: str  # collect, land, ready, merge, start, park, design, foreman, settle, examine, remedy, call, vet, hold, finish
+    kind: str  # collect, land, ready, merge, start, park, design, foreman, settle, examine, remedy,
+    # examine-red, remedy-red, call, vet, hold, finish
     task: str | None = None
     run: str | None = None
     host: str | None = None
@@ -228,8 +225,9 @@ def retire_ready(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict],
     if not landed:
         return False
     last = landed[-1]
-    return any(event.get("ev") == "tiers.run" and any(
-        land.task_of(branch) == land.task_of(last.get("branch", last.get("task", "")))
+    identifier = land.task_of(last.get("branch", last.get("task", "")))
+    return identifier is not None and any(event.get("ev") == "tiers.run" and any(
+        land.task_of(branch) is not None and land.task_of(branch) == identifier
         for branch in event.get("branches", ())) for event in events)
 
 
@@ -307,8 +305,8 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
        free place by places(hosts, flight, calm) (the builder with most free places first;
        ties by name). A rejected task's run_kind is rebase when its last branch.rejected step
        is rebase or merge, otherwise repair; a runnable task's is implement, or repair when its
-       last run ended infra. A task that already has MAX_RUNS runs gets park instead of start,
-       whatever the target and the places. An open refusal permits neither start nor park
+       last run ended infra. A task that already has MAX_RUNS runs (tier_reds.RED_RUNS
+       for kind red) gets park instead of start, whatever the target and the places. An open refusal permits neither start nor park
        until settled fix or none, or fallback. Settled fixes add their section to the start's
        rejection; settled retries fold as done and go through step 2.
     4. design: when fewer tasks are runnable or rejected than plan.low times the flow's
@@ -342,11 +340,11 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
                 if refusal.task not in rebases}
     step = integration.next_step(plan, tasks, events)
-    if step is not None and step.kind == "stop":
-        candidates = [identifier for identifier in candidates if tasks[identifier].kind == tier_reds.KIND]
-    if candidates:
+    startable = ([identifier for identifier in candidates if tasks[identifier].kind == tier_reds.KIND]
+                 if step is not None and step.kind == "stop" else candidates)
+    if startable:
         actions.extend(replace(action, early=early.get(action.task, ())) if action.kind == "start" else action
-                       for action in _run_starts(candidates, views, events, free, limit - occupied, refusals,
+                       for action in _run_starts(startable, views, events, free, limit - occupied, refusals,
                                                  {identifier: tier_reds.RED_RUNS for identifier, task in tasks.items()
                                                   if task.kind == tier_reds.KIND}))
 
@@ -403,19 +401,14 @@ def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, st
     return Action("design", detail=", ".join(eligible)) if eligible else None
 
 
-def _starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
-            free: dict[str, int], budget: int, refusals: Mapping[str, repairs.Refusal]) -> list[Action]:
-    """Reserve places or park exhausted tasks only after their refusal permits a run.
-
-    Settled fixes carry their section in the rejection; none and fallback keep it alone.
-    """
-    return _run_starts(candidates, views, events, free, budget, refusals, {})
-
-
 def _run_starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], events: list[dict],
                 free: dict[str, int], budget: int, refusals: Mapping[str, repairs.Refusal],
-                limits: Mapping[str, int]) -> list[Action]:
-    """Reserve starts with each task's allowance; refusal foremen must finish first."""
+                limits: Mapping[str, int] | None = None) -> list[Action]:
+    """Reserve starts with each task's allowance; refusal foremen must finish first.
+
+    Settled fixes carry their section in the rejection; none and fallback keep it alone.
+    Unlisted tasks and limits None use MAX_RUNS.
+    """
     actions = []
     for identifier in candidates:
         refusal = refusals.get(identifier)
@@ -427,7 +420,7 @@ def _run_starts(candidates: Iterable[str], views: Mapping[str, state.TaskView], 
         kinds = {event["run"]: event.get("kind") for event in events if event.get("ev") == "run.started"}
         kind, rejection = _start_kind(view, events)
         counted = _since_park(identifier, view.runs, events)
-        allowance = limits.get(identifier, MAX_RUNS)
+        allowance = (limits or {}).get(identifier, MAX_RUNS)
         if not (rejection or {}).get("skeleton") and sum(
                 kinds.get(run_id) != "rebase" for run_id in counted) >= allowance:
             actions.append(Action("park", task=identifier,
@@ -892,9 +885,10 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
 
     Fetch each checkout once; print load failures and skip retired plans. With no loaded
     plan, import unowned queue records and refresh the page, without measuring. Otherwise
-    decide each plan on fresh events and spend calm extras once. Question and refusal
-    actions share a log snapshot before fresh call decisions. Collect unowned runs last
-    and refresh the page.
+    close recovered reds, then open new reds against all loaded owners, unless any plan
+    failed to load. Decide each plan on fresh events and spend calm extras once. Question,
+    refusal and red actions share a log snapshot before fresh call decisions. Collect
+    unowned runs last and refresh the page.
     """
     # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
@@ -905,16 +899,15 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     events = log.read(log_path)
     folded = tier_reds.reds(events)
     tasks = {key: task for plan, plan_tasks, _, _ in loaded
-             for key, task in {**plan_tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
-    before_imports = log.read(log_path)
-    imported_from = len(before_imports)
-    _import_queue(tasks, before_imports, hosts, sh=sh, log_path=log_path,
+             for key, task in {**plan_tasks, **tier_reds.repair_tasks(plan, events, {}, folded=folded)}.items()}
+    imported_from = len(events)
+    _import_queue(tasks, events, hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
     if not loaded:
         if not only:
             _page(plan_dirs, log_path)
         return actions
-    _import_after_landing(log.read(log_path), hosts, sh=sh, log_path=log_path)
+    _import_after_landing(events, hosts, sh=sh, log_path=log_path)
     events = log.read(log_path)
     # Queue imports and after-landing runs can advance repairs before their verdicts arrive.
     if any(event.get("ev") in ("branch.landed", "tiers.run") for event in events[imported_from:]):
@@ -925,7 +918,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         folded = tier_reds.reds(events)
     owner_map = tier_reds.owners(((plan, tasks) for plan, tasks, _, _ in loaded), events, folded=folded)
     after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
-    if after_host is not None:
+    if after_host is not None and not actions:
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
         folded = [*folded, *tier_reds.reds(opened)] if opened else folded
@@ -997,16 +990,6 @@ def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
     return loaded, actions
 
 
-def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
-               hosts: Mapping[str, Host], calm: Mapping[str, bool], *, sh: Runner,
-               log_path: Path | None) -> list[Action]:
-    """Take decisions, then question and refusal actions from one fresh snapshot in that
-    order, then calls decided from the resulting log."""
-    events = log.read(log_path)
-    return _tick_loaded(plan, tasks, directory, checkout, hosts, calm, tier_reds.reds(events), tasks,
-                        sh=sh, log_path=log_path)
-
-
 def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
                  hosts: Mapping[str, Host], calm: Mapping[str, bool], folded: Sequence[tier_reds.Red],
                  plan_tasks: Mapping[str, Task], *, sh: Runner, log_path: Path | None) -> list[Action]:
@@ -1018,7 +1001,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
     tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind != tier_reds.KIND},
              **tier_reds.tasks(plan, events, folded=folded)}
-    actions = decide(plan, tasks, log.read(log_path), hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
+    actions = decide(plan, tasks, events, hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     events = log.read(log_path)
@@ -1408,7 +1391,9 @@ def main(argv: list[str]) -> int:
             events = log.read()
             loaded, actions = _load_plans(directories, events, sh=run, fetch=False)
             hosts = machines.load() if loaded else {}
+            folded = tier_reds.reds(events)
             for plan, tasks, _, _ in loaded:
+                tasks = {**tasks, **tier_reds.tasks(plan, events, folded=folded)}
                 for action in decide(plan, tasks, events, hosts):
                     print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:
