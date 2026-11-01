@@ -1,0 +1,45 @@
+landing = "queue"
+
+# The thin cut of df-followups: dogfood-faults' acceptance follow-ups, in the
+# request's two tasks. Item 1 by itself (every call after a trunk lands
+# starts from main), then items 2-4 together (the branch probe, the stop's
+# empty report, two status lines). Both parts are direct, one task each;
+# specs in tasks/, shared rules in notes/common.md, decisions and the
+# critical path in notes/decisions.md. small-fixes waits for from-main: both
+# change fab/calls.py and fab/tests/test_calls.py.
+draft = "df-followups"
+repo = "agents"
+sources = [
+  "docs/plan/df-followups/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "from-main"
+title = "Every call, foreman and refusal start of an integration plan after its trunk landed starts from main; the tick reads no origin/<trunk> after it"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[part]]
+id = "small-fixes"
+title = "The branch probe tells an error from an absent branch; a catch-up stop's empty report reads as none; two status lines brought current"
+mode = "direct"
+needs = []
+design = "docs/design/integration.md, 3"
+
+[[slice]]
+id = 1
+story = "Between an integration trunk's landing and its retire's, an answer, review, triage or amend call starts from origin/main, a foreman or refusal starts from main, and the tick logs no failed: note for the gone trunk"
+parts = ["from-main"]
+walk = false
+
+[[slice]]
+id = 2
+story = "A rerun whose branch probe fails over ssh or in git fails instead of starting from the base; a catch-up stop with no report briefs as quoted findings; the status files say what ran live"
+parts = ["small-fixes"]
+walk = false
