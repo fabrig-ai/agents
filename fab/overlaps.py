@@ -1,10 +1,13 @@
 """Overlap decisions and the tick's probe (docs/design/fab-integration.md, 4).
 
-FAB_HOME/overlaps.json holds two JSON objects, trees and pairs. Their keys are
-JSON lists of repository, checkout, main SHA, then one trunk tip (trees) or
-both name-ordered tips (pairs). Values are a tree ID or {files: [...], more: n}.
-Checkout scoping keeps tree IDs in their object store. Only successful results
-are cached; missing, unreadable or malformed caches are empty.
+FAB_HOME/overlaps.json holds three JSON objects: trees, pairs and conflicts.
+Their keys are JSON lists of repository, checkout, main SHA, then one trunk tip
+(trees or conflicts) or both name-ordered tips (pairs). Values are a tree ID,
+{files: [...], more: n}, or true for a catch-up conflict. Checkout scoping keeps
+tree IDs in their object store. Only results are cached, never failures. Each
+probe keeps only entries looked up or stored this tick, excluding trees evicted
+after pair failures, and writes only on change. Missing, unreadable or malformed
+caches are empty; the first format without conflicts remains valid.
 """
 
 from __future__ import annotations
@@ -145,7 +148,9 @@ def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Se
     escape for the tick to print.
     """
     cache_path = log.home() / "overlaps.json"
-    cache = _read_cache(cache_path)
+    previous = _read_cache(cache_path)
+    cache = {kind: dict(answers) for kind, answers in previous.items()}
+    cache["used"] = {kind: set() for kind in previous}
     records = list(events)
     lines = []
     current = []
@@ -183,7 +188,7 @@ def probe(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]], events: Se
         for fields in gone_pairs(current, records):
             records.append(log.append("trunks.overlap", path=log_path, **fields))
             lines.append(f"overlap {' '.join(fields['drafts'])} gone")
-    atomic.write(cache_path, json.dumps(cache) + "\n")
+    _write_cache(cache_path, cache, previous)
     return lines
 
 
@@ -202,11 +207,15 @@ def _catch_up_trees(plans: Sequence[Plan], tips: dict[str, str],
     for plan in plans:
         key = json.dumps([*key_prefix, tips[plan.draft]])
         tree_keys[plan.draft] = key
-        tree = cache["trees"].get(key)
+        if _cache_lookup(cache, "conflicts", key):
+            continue
+        tree = _cache_lookup(cache, "trees", key)
         if tree is None:
             result = _merge(["git", "merge-tree", "--write-tree", "--no-messages",
                              "origin/main", f"origin/{plan.trunk}"], checkout, sh)
             status, tree = parse_catch_up(result.code, result.out)
+            if status == "conflict":
+                cache["conflicts"][key] = True
             if status == "failure":
                 lines.append(_failure((plan.draft,), result, records, log_path))
             if tree is None:
@@ -232,7 +241,7 @@ def _pair_results(repo_pairs: Sequence[tuple[str, str]], tips: dict[str, str],
             continue
         pair_tips = [tips[a], tips[b]]
         key = json.dumps([*key_prefix, *pair_tips])
-        answer = cache["pairs"].get(key)
+        answer = _cache_lookup(cache, "pairs", key)
         if answer is None:
             result = _merge(["git", "merge-tree", "--write-tree", "--name-only",
                              "--no-messages", "-z", "--merge-base=origin/main",
@@ -259,6 +268,8 @@ def _read_cache(path: Path) -> dict:
         cache = json.loads(path.read_text(encoding="utf-8"))
         if (isinstance(cache, dict) and isinstance(cache.get("trees"), dict)
                 and isinstance(cache.get("pairs"), dict)
+                and isinstance(cache.get("conflicts", {}), dict)
+                and all(value is True for value in cache.get("conflicts", {}).values())
                 and all(isinstance(tree, str) and _object_id(tree)
                         for tree in cache["trees"].values())
                 and all(isinstance(answer, dict) and isinstance(answer.get("files"), list)
@@ -266,10 +277,24 @@ def _read_cache(path: Path) -> dict:
                         and all(isinstance(path, str) for path in answer["files"])
                         and type(answer.get("more")) is int and answer["more"] >= 0
                         for answer in cache["pairs"].values())):
-            return cache
+            return {kind: cache.get(kind, {}) for kind in ("trees", "pairs", "conflicts")}
     except (OSError, ValueError, UnicodeError):
         pass
-    return {"trees": {}, "pairs": {}}
+    return {"trees": {}, "pairs": {}, "conflicts": {}}
+
+
+def _cache_lookup(cache: dict, kind: str, key: str) -> str | dict | bool | None:
+    """Look up and mark a result for pruning (docs/design/fab-integration.md, 4)."""
+    cache["used"][kind].add(key)
+    return cache[kind].get(key)
+
+
+def _write_cache(path: Path, cache: dict, previous: dict) -> None:
+    """Prune and write only changed results (docs/design/fab-integration.md, 4)."""
+    pruned = {kind: {key: answer for key, answer in cache[kind].items() if key in used}
+              for kind, used in cache["used"].items()}
+    if pruned != previous:
+        atomic.write(path, json.dumps(pruned) + "\n")
 
 
 def _merge(argv: list[str], checkout: str, sh: Runner) -> Result:

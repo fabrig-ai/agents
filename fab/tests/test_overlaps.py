@@ -235,17 +235,23 @@ class OverlapProbeTest(unittest.TestCase):
             ["git", "rev-parse", "--verify", "origin/a/integration"],
             ["git", "rev-parse", "--verify", "origin/b/integration"]])
 
-    def test_overlap_probe_catch_up_conflict_keeps_pairs_open_and_is_not_cached(self):
+    def test_overlap_probe_catch_up_conflict_keeps_pairs_open_and_is_cached(self):
         self.probe()
         self.tips["a"] = "e" * 40
         self.catch_results["a"] = Result(1, TREE + "\n")
-        for _ in range(2):
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(len(self.merges()), 4)
+        with patch.object(atomic, "write") as write:
             self.assertEqual(self.probe(), [])
+        write.assert_not_called()
         self.assertEqual(len(self.events("trunks.overlap")), 1)
         self.assertEqual(self.events("note"), [])
-        self.assertEqual(len(self.merges()), 5)
+        self.assertEqual(len(self.merges()), 4)
         cache = json.loads(self.cache_path.read_text())
         self.assertFalse(any(self.tips["a"] in key for key in cache["trees"]))
+        self.assertEqual(cache["pairs"], {})
+        self.assertEqual(list(cache["conflicts"].values()), [True])
+        self.assertIn(self.tips["a"], next(iter(cache["conflicts"])))
 
     def test_overlap_probe_catch_up_failure_prints_each_tick_and_notes_changes(self):
         self.catch_results["a"] = Result(128, err="missing object\nsecond line")
@@ -268,7 +274,7 @@ class OverlapProbeTest(unittest.TestCase):
         for number in range(2):
             self.assertEqual(self.probe(), ["trunks.overlap a b: exit 128: missing tree"])
             cache = json.loads(self.cache_path.read_text())
-            self.assertEqual(cache, {"trees": {}, "pairs": {}})
+            self.assertEqual(cache, {"trees": {}, "pairs": {}, "conflicts": {}})
             self.assertEqual(len(self.merges()), 1 + 3 * number)
         self.assertEqual(len(self.events("note")), 1)
         self.assertEqual(len(self.events("trunks.overlap")), 1)
@@ -376,3 +382,111 @@ class OverlapProbeTest(unittest.TestCase):
         before = len(self.merges())
         self.assertEqual(self.probe(), [])
         self.assertEqual(len(self.merges()) - before, 3)
+
+
+    def test_overlap_probe_unchanged_results_only_resolve_refs_and_never_write(self):
+        self.probe()
+        self.fake.calls.clear()
+        before = self.cache_path.stat().st_mtime_ns
+        with patch.object(atomic, "write") as write:
+            self.assertEqual(self.probe(), [])
+        write.assert_not_called()
+        self.assertEqual(self.cache_path.stat().st_mtime_ns, before)
+        self.assertEqual(self.fake.argvs(), [
+            ["git", "rev-parse", "--verify", "origin/main"],
+            ["git", "rev-parse", "--verify", "origin/a/integration"],
+            ["git", "rev-parse", "--verify", "origin/b/integration"]])
+
+    def test_overlap_probe_empty_missing_cache_needs_no_write(self):
+        self.loaded = []
+        with patch.object(atomic, "write") as write:
+            self.assertEqual(self.probe(), [])
+        write.assert_not_called()
+        self.assertFalse(self.cache_path.exists())
+        self.assertEqual(self.fake.calls, [])
+
+    def test_overlap_probe_conflicts_retry_only_when_tip_or_main_moves(self):
+        self.catch_results["a"] = Result(1, TREE + "\n")
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(len(self.merges()), 2)
+        self.fake.calls.clear()
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(self.merges(), [])
+        old_tip = self.tips["a"]
+        self.tips["a"] = "e" * 40
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(len(self.merges()), 1)
+        cache = json.loads(self.cache_path.read_text())
+        self.assertFalse(any(old_tip in key for answers in cache.values() for key in answers))
+        old_main = self.main
+        self.main = "f" * 40
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(len(self.merges()), 3)
+        cache = json.loads(self.cache_path.read_text())
+        self.assertFalse(any(old_main in key for answers in cache.values() for key in answers))
+        self.assertEqual(list(cache["conflicts"].values()), [True])
+        self.catch_results.clear()
+        self.tips["a"] = "9" * 40
+        self.assertEqual(self.probe(), ["overlap a b 1"])
+        self.assertEqual(json.loads(self.cache_path.read_text())["conflicts"], {})
+
+    def test_overlap_probe_prunes_old_tip_and_departed_pair_keys(self):
+        self.loaded.append(self.entry("c"))
+        self.probe()
+        old_tip = self.tips["b"]
+        self.tips["b"] = "e" * 40
+        self.assertEqual(self.probe(), [])
+        cache = json.loads(self.cache_path.read_text())
+        self.assertFalse(any(old_tip in key for answers in cache.values() for key in answers))
+        self.assertEqual(len(cache["trees"]), 3)
+        self.assertEqual(len(cache["pairs"]), 3)
+        self.loaded.pop()
+        self.fake.calls.clear()
+        self.assertEqual(self.probe(), ["overlap a c gone", "overlap b c gone"])
+        cache = json.loads(self.cache_path.read_text())
+        self.assertFalse(any(self.tips["c"] in key for answers in cache.values() for key in answers))
+        self.assertEqual(len(cache["trees"]), 2)
+        self.assertEqual(len(cache["pairs"]), 1)
+        self.assertEqual(self.merges(), [])
+        self.loaded.clear()
+        self.assertEqual(self.probe(), ["overlap a b gone"])
+        self.assertEqual(json.loads(self.cache_path.read_text()),
+                         {"trees": {}, "pairs": {}, "conflicts": {}})
+
+    def test_overlap_probe_prunes_conflicts_after_a_pair_leaves(self):
+        self.catch_results["a"] = Result(1, TREE + "\n")
+        self.probe()
+        self.loaded.pop()
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(json.loads(self.cache_path.read_text()),
+                         {"trees": {}, "pairs": {}, "conflicts": {}})
+
+    def test_overlap_probe_reads_first_format_without_rewriting_it(self):
+        self.probe()
+        cache = json.loads(self.cache_path.read_text())
+        cache.pop("conflicts")
+        atomic.write(self.cache_path, json.dumps(cache))
+        self.fake.calls.clear()
+        with patch.object(atomic, "write") as write:
+            self.assertEqual(self.probe(), [])
+        write.assert_not_called()
+        self.assertEqual(self.merges(), [])
+        cache["pairs"] = {}
+        atomic.write(self.cache_path, json.dumps(cache))
+        self.assertEqual(self.probe(), [])
+        self.assertEqual(len(self.merges()), 1)
+        self.assertIn("--name-only", self.merges()[0].argv)
+        self.assertEqual(json.loads(self.cache_path.read_text())["conflicts"], {})
+
+    def test_overlap_probe_malformed_conflicts_discards_other_cached_results(self):
+        self.probe()
+        cache = json.loads(self.cache_path.read_text())
+        for conflicts in (None, [], True, "bad", {"key": False}, {"key": 1},
+                          {"key": "true"}, {"key": {}}):
+            with self.subTest(conflicts=conflicts):
+                cache["conflicts"] = conflicts
+                atomic.write(self.cache_path, json.dumps(cache))
+                self.fake.calls.clear()
+                self.assertEqual(self.probe(), [])
+                self.assertEqual(len(self.merges()), 3)
+                self.assertEqual(json.loads(self.cache_path.read_text())["conflicts"], {})
