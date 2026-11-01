@@ -1,0 +1,5 @@
+draft = "citation-sweep"
+repo = "agents"
+sources = ["docs/plan/citation-sweep/inputs/request.md", "docs/design/draft/execution-modes.md"]
+# Plan options, written by fab call cut --set; keep them
+landing = "queue"
