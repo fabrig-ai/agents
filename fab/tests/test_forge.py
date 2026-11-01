@@ -3,13 +3,14 @@
 import fcntl
 import io
 import json
+import os
 import unittest
 import urllib.error
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
-from fab import atomic, calls, channel, cli, forge, log, wake
+from fab import atomic, calls, channel, cli, forge, hosts, log, units, wake
 from fab.sh import Failed, Result
 from fab.tests import qa_records as qa
 from fab.tests.support import FakeRunner, tmp_home
@@ -395,3 +396,45 @@ class RequestTest(unittest.TestCase):
         with tmp_home(), patch.object(forge, "sync", return_value=0) as sync:
             self.assertEqual(cli.main(["issues", "sync"]), 0)
             sync.assert_called_once_with()
+
+
+class IssuesInstallTest(unittest.TestCase):
+    def test_issues_install_writes_and_enables_timer_without_sync(self):
+        with tmp_home() as root, patch.dict(os.environ, {"FAB_HOST": "here"}):
+            sh = FakeRunner().on(["loginctl"], Result(0, "yes\n"))
+            known = {"here": hosts.Host("here", "fake", ("dispatcher",))}
+            directory = root / "units"
+            install = units.cli_install
+
+            def isolated(command, files, **options):
+                return install(command, files, sh=sh, directory=directory, known=known, **options)
+
+            with patch.object(units, "cli_install", side_effect=isolated) as installing, \
+                    patch.object(forge, "sync") as sync, redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.main(["issues", "--install"]), 0)
+                installing.assert_called_once_with("issues", units.issues_units(),
+                                                    primary="fab-issues.timer", restartable=False)
+                sync.assert_not_called()
+            for name, text in units.issues_units().items():
+                self.assertEqual((directory / name).read_text(), text)
+            self.assertEqual(out.getvalue(), f"{directory / 'fab-issues.timer'}\n"
+                             f"{directory / 'fab-issues.service'}\nenabled fab-issues.timer\n")
+            self.assertIn(["systemctl", "--user", "enable", "--now", "fab-issues.timer"], sh.argvs())
+
+    def test_issues_install_with_command_or_no_arguments_is_usage_error(self):
+        with tmp_home(), patch.object(forge, "sync") as sync, \
+                patch.object(units, "cli_install") as install:
+            for arguments in (["--install", "sync"], []):
+                with self.subTest(arguments=arguments), redirect_stderr(io.StringIO()):
+                    self.assertEqual(cli.main(["issues", *arguments]), 2)
+            sync.assert_not_called()
+            install.assert_not_called()
+
+    def test_issues_install_reports_invalid_home_without_side_effects(self):
+        with tmp_home() as root, patch.dict(os.environ, {"FAB_HOME": str(root / "bad%home")}), \
+                patch.object(units, "cli_install") as install, \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(forge.main(["--install"]), 1)
+            self.assertTrue(err.getvalue().startswith("fab issues: invalid unit argument "))
+            self.assertEqual(len(err.getvalue().splitlines()), 1)
+            install.assert_not_called()

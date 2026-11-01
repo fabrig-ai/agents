@@ -6,16 +6,17 @@ import re
 import tempfile
 import threading
 import unittest
-from contextlib import contextmanager, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPConnection
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import calls, channel, cli, log, serve
+from fab import calls, channel, cli, hosts, log, serve, units
 from fab.tests import qa_records as qa
-from fab.tests.support import tmp_home
+from fab.sh import Result
+from fab.tests.support import FakeRunner, tmp_home
 
 NOW = datetime(2026, 11, 1, 0, 30, tzinfo=timezone.utc)
 
@@ -1153,7 +1154,8 @@ class ServerTest(unittest.TestCase):
         for args, address in (([], ("127.0.0.1", 8370)),
                               (["--bind", "0.0.0.0", "--port", "0"], ("0.0.0.0", 0))):
             out = io.StringIO()
-            with patch.object(serve, "ThreadingHTTPServer") as factory, redirect_stdout(out):
+            with tmp_home(), patch.object(serve, "head_of", return_value="aaa"), \
+                    patch.object(serve, "ThreadingHTTPServer") as factory, redirect_stdout(out):
                 server = factory.return_value.__enter__.return_value
                 server.server_port = 12345
                 server.serve_forever.side_effect = KeyboardInterrupt
@@ -1161,3 +1163,105 @@ class ServerTest(unittest.TestCase):
                 factory.assert_called_once_with(address, serve._Request)
                 factory.return_value.__exit__.assert_called_once()
             self.assertEqual(out.getvalue(), f"serving on http://{address[0]}:12345\n")
+
+
+class ServeWatchTest(unittest.TestCase):
+    def test_serve_watch_returns_75_after_readable_head_changes(self):
+        for values in (("aaa", "bbb"), (None, None, "aaa", None, "bbb")):
+            with self.subTest(values=values), tmp_home(), \
+                    ThreadingHTTPServer(("127.0.0.1", 0), serve._Request) as server:
+                hashes = iter(values)
+                watchdog = threading.Timer(1, server.shutdown)
+                watchdog.start()
+                try:
+                    self.assertEqual(serve.serve(server, lambda: next(hashes, "bbb"), interval=0.05), 75)
+                finally:
+                    watchdog.cancel()
+                    watchdog.join()
+
+    def test_serve_watch_ignores_unreadable_heads_and_keeps_serving(self):
+        with tmp_home(), ThreadingHTTPServer(("127.0.0.1", 0), serve._Request) as server:
+            hashes = iter((None, None, "aaa", None, "aaa"))
+            sampled = threading.Event()
+            readings, codes = [], []
+
+            def head():
+                readings.append(next(hashes, None))
+                if len(readings) >= 5:
+                    sampled.set()
+                return readings[-1]
+
+            thread = threading.Thread(target=lambda: codes.append(serve.serve(server, head, interval=0.05)))
+            thread.start()
+            try:
+                self.assertTrue(sampled.wait(1))
+                self.assertTrue(thread.is_alive())
+                connection = HTTPConnection("127.0.0.1", server.server_port, timeout=1)
+                try:
+                    connection.request("GET", "/healthz")
+                    response = connection.getresponse()
+                    self.assertEqual((response.status, response.read()), (200, b"ok"))
+                finally:
+                    connection.close()
+            finally:
+                server.shutdown()
+                thread.join(timeout=1)
+            self.assertFalse(thread.is_alive())
+            self.assertEqual(codes, [0])
+
+    def test_serve_head_reader_uses_fake_git_and_ignores_failures(self):
+        with tmp_home() as root:
+            argv = ["git", "-C", str(root), "rev-parse", "HEAD"]
+            for result, expected in ((Result(0, "aaa\n"), "aaa"), (Result(1, "aaa"), None),
+                                     (Result(0, "\n"), None)):
+                sh = FakeRunner().on(argv, result)
+                self.assertEqual(serve.head_of(root, sh=sh), expected)
+                self.assertEqual(sh.argvs(), [argv])
+            sh = FakeRunner().on(argv, lambda call: (_ for _ in ()).throw(OSError("unreadable")))
+            self.assertIsNone(serve.head_of(root, sh=sh))
+
+    def test_serve_install_and_usage(self):
+        with tmp_home() as root, patch.dict(os.environ, {"FAB_HOST": "here"}):
+            sh = FakeRunner().on(["loginctl"], Result(0, "yes\n"))
+            known = {"here": hosts.Host("here", "fake", ("dispatcher",))}
+            directory = root / "units"
+            install = units.cli_install
+
+            def isolated(command, files, **options):
+                return install(command, files, sh=sh, directory=directory, known=known, **options)
+
+            with patch.object(units, "cli_install", side_effect=isolated) as installing, \
+                    redirect_stdout(io.StringIO()) as out:
+                self.assertEqual(cli.main(["serve", "--install"]), 0)
+                installing.assert_called_once_with("serve", units.status_units(),
+                                                    primary="fab-status.service", restartable=True)
+            self.assertEqual((directory / "fab-status.service").read_text(), units.status_service())
+            self.assertEqual(out.getvalue(), f"{directory / 'fab-status.service'}\nenabled fab-status.service\n")
+            for options in (["--port", "8370"], ["--bind", "127.0.0.1"]):
+                with redirect_stderr(io.StringIO()), patch.object(units, "cli_install") as installing:
+                    self.assertEqual(serve.main(["--install", *options]), 2)
+                    installing.assert_not_called()
+
+    def test_serve_main_returns_watch_code_and_uses_package_checkout(self):
+        with tmp_home(), patch.object(serve, "ThreadingHTTPServer") as factory, \
+                patch.object(serve, "head_of", return_value="aaa") as reading, \
+                redirect_stdout(io.StringIO()):
+            server = factory.return_value.__enter__.return_value
+
+            def changed(actual, head):
+                self.assertIs(actual, server)
+                self.assertEqual(head(), "aaa")
+                return 75
+
+            with patch.object(serve, "serve", side_effect=changed):
+                self.assertEqual(serve.main([]), 75)
+            reading.assert_called_once_with(Path(serve.__file__).resolve().parent.parent)
+
+    def test_serve_install_reports_invalid_home_without_side_effects(self):
+        with tmp_home() as root, patch.dict(os.environ, {"FAB_HOME": str(root / "bad%home")}), \
+                patch.object(units, "cli_install") as install, \
+                redirect_stderr(io.StringIO()) as err:
+            self.assertEqual(serve.main(["--install"]), 1)
+            self.assertTrue(err.getvalue().startswith("fab serve: invalid unit argument "))
+            self.assertEqual(len(err.getvalue().splitlines()), 1)
+            install.assert_not_called()

@@ -7,12 +7,16 @@ import html
 import json
 import math
 import re
+import sys
+import threading
 from collections import Counter
-from collections.abc import Collection
+from collections.abc import Callable, Collection
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 
-from fab import accounting, calls, channel, hosts as machines, log, logins, overlaps
+from fab import accounting, calls, channel, hosts as machines, log, logins, overlaps, units
+from fab.sh import Failed, Runner, run
 
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
@@ -576,16 +580,71 @@ class _Request(BaseHTTPRequestHandler):
             self._reply(404, "text/plain", "not found")
 
 
+def head_of(checkout: Path, *, sh: Runner = run) -> str | None:
+    """Read checkout's HEAD through git; failed or empty reads return None."""
+    try:
+        result = sh(["git", "-C", str(checkout), "rev-parse", "HEAD"], check=False)
+    except (OSError, Failed):
+        return None
+    return (result.out.strip() or None) if result.ok else None
+
+
+def serve(server: ThreadingHTTPServer, head: Callable[[], str | None], *,
+          interval: float = 60.0) -> int:
+    """Serve with a daemon HEAD watch, returning 75 after a change, otherwise 0.
+
+    Read head before serving and every interval seconds. None never signals a change;
+    the first readable hash becomes the baseline. Stop the watch when serving ends.
+    """
+    baseline = head()
+    stopped, changed = threading.Event(), threading.Event()
+
+    def watch() -> None:
+        nonlocal baseline
+        while not stopped.wait(interval):
+            current = head()
+            if current is None:
+                continue
+            if baseline is not None and current != baseline:
+                changed.set()
+                server.shutdown()
+                return
+            baseline = current
+
+    thread = threading.Thread(target=watch, daemon=True)
+    thread.start()
+    try:
+        server.serve_forever(poll_interval=min(interval, 0.5))
+    finally:
+        stopped.set()
+        thread.join()
+    return 75 if changed.is_set() else 0
+
+
 def main(argv: list[str]) -> int:
-    """Serve the read-only public page until interrupted; print the actual bound address."""
+    """Install the status unit, or serve until interrupted or the checkout changes."""
     parser = argparse.ArgumentParser(prog="fab serve", description=__doc__)
-    parser.add_argument("--port", type=int, default=8370)
-    parser.add_argument("--bind", default="127.0.0.1")
-    args = parser.parse_args(argv)
-    with ThreadingHTTPServer((args.bind, args.port), _Request) as server:
-        print(f"serving on http://{args.bind}:{server.server_port}", flush=True)
+    parser.add_argument("--install", action="store_true")
+    parser.add_argument("--port", type=int)
+    parser.add_argument("--bind")
+    try:
+        args = parser.parse_args(argv)
+        if args.install:
+            if args.port is not None or args.bind is not None:
+                parser.error("--install takes no --port or --bind")
+            return units.cli_install("serve", units.status_units(),
+                                     primary="fab-status.service", restartable=True)
+    except SystemExit as error:
+        return error.code
+    except (OSError, ValueError, Failed) as error:
+        print("fab serve: " + " ".join(str(error).splitlines()), file=sys.stderr)
+        return 1
+    bind = args.bind if args.bind is not None else "127.0.0.1"
+    port = args.port if args.port is not None else 8370
+    checkout = Path(__file__).resolve().parent.parent
+    with ThreadingHTTPServer((bind, port), _Request) as server:
+        print(f"serving on http://{bind}:{server.server_port}", flush=True)
         try:
-            server.serve_forever()
+            return serve(server, lambda: head_of(checkout))
         except KeyboardInterrupt:
-            pass
-    return 0
+            return 0

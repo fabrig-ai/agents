@@ -11,7 +11,7 @@ from collections.abc import Callable, Sequence
 from http.client import HTTPException
 from pathlib import Path
 
-from fab import calls, channel, log
+from fab import calls, channel, log, units
 from fab.sh import Failed, Runner, run
 
 API = "http://127.0.0.1:3000/api/v1"
@@ -243,8 +243,22 @@ def sync(repo: Path | None = None, *, api: Callable | None = None, sh: Runner = 
 
 
 def main(argv: list[str]) -> int:
-    """`fab issues sync`: one local pass; deployment on hel8 is by hand."""
+    """Install the issue timer, or run one local sync pass."""
     parser = argparse.ArgumentParser(prog="fab issues", description=__doc__)
-    parser.add_argument("command", choices=("sync",))
-    parser.parse_args(argv)
+    parser.add_argument("command", nargs="?", choices=("sync",))
+    parser.add_argument("--install", action="store_true")
+    try:
+        args = parser.parse_args(argv)
+        if args.install:
+            if args.command is not None:
+                parser.error("--install takes no command")
+            return units.cli_install("issues", units.issues_units(),
+                                     primary="fab-issues.timer", restartable=False)
+        if args.command is None:
+            parser.error("a command is required without --install")
+    except SystemExit as error:
+        return error.code
+    except (OSError, ValueError, Failed) as error:
+        print("fab issues: " + " ".join(str(error).splitlines()), file=sys.stderr)
+        return 1
     return sync()
