@@ -296,7 +296,7 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
         "runs_in_flight": {"total": sum(by_host.values()), "by_host": dict(sorted(by_host.items()))},
         "calls_in_flight": {"total": sum(by_role.values()), "by_role": dict(sorted(by_role.items()))},
         "waiting_on_user": {
-            "asks": len(asks), "by_kind": {kind: by_kind[kind] for kind in ("call", "parked")},
+            "asks": len(asks), "by_kind": {kind: by_kind[kind] for kind in ("call", "parked", "finding")},
             "oldest_age_s": int((now - min(waiting_since)).total_seconds()) if waiting_since else None,
         },
         "landed": landed,
@@ -455,7 +455,8 @@ def render(snapshot: dict) -> str:
         ]) + '</div>'
         content += ('<h2>Waiting on the user</h2><div class="panel">'
                     + _table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
-                                              ("Parked chains", waiting["by_kind"]["parked"])])
+                                              ("Parked chains", waiting["by_kind"]["parked"]),
+                                              ("Finding questions", waiting["by_kind"]["finding"])])
                     + f'<p class="facts">{_text("Oldest: " + _age(waiting["oldest_age_s"]))}</p>'
                     + f'<p><a href="{_text(ISSUES)}">Open the questions</a></p></div>')
         content += ('<h2>Subscriptions</h2><div class="panel">'

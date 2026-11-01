@@ -1,8 +1,9 @@
 """The user's channel: the user's questions and the daily reports on one page (docs/design/fab-channel.md, 2).
 
 What is the user's is decided by whoever asks, never here: a plan's `[[question]]` without
-an answer (the cut's), a call that ended `Question:`, and a chain referred by settle or
-parked when settlement failed. `asks` folds the open ones from the plans and the log. The page,
+an answer (the cut's), a call that ended `Question:`, a chain referred by settle or
+parked when settlement failed, or a QA finding with a triage question. `asks` folds the
+open ones from the plans and the log. The page,
 FAB_HOME/PAGE on hel8, lists them with what to read and how to answer, then each standing
 report's latest day with its signals. An answer comes back as `call.answered`, which names a
 call's subject and never a task; every later call of the subject carries it in its brief.
@@ -18,15 +19,16 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, log, plan, tier_reds, wake
+from fab import atomic, findings, log, plan, tier_reds, triage, wake, walks
 from fab.plan import Plan
 from fab.report import LANDING
+from fab.sh import Failed
 
 PAGE = "user.md"  # the page, under FAB_HOME
 PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (fab-tick.md 5)
-KINDS = ("plan", "call", "parked")  # what asked: a plan's question, a call, a parked chain
+KINDS = ("plan", "call", "parked", "finding")  # sources of the user's questions (fab-channel.md 2)
 QUESTION_LINES = 12  # lines of an asking report the page quotes
-ANSWERED = "call.answered"  # the user's answer to a subject's call or parked chain
+ANSWERED = "call.answered"  # the user's answer to a subject's open asks
 SIGNALS = "## Signals"  # the standing reports' signals heading (fab.code_report, fab.landing_report)
 SECTION = "# The user's answers"  # the brief section that carries a subject's answers
 
@@ -36,13 +38,13 @@ class Ask:
     """One open question of the user's, as asks folds it."""
 
     kind: str  # one of KINDS
-    draft: str  # the plan's draft; for call and parked, the subject before its first `/`
-    subject: str  # call and parked: the call's subject, which `fab page answer` names; plan: the question's id
-    text: str  # plan: the question's text; parked: the call.parked reason; call: "" (its report holds it)
+    draft: str  # the plan's draft; for log asks, the subject before its first `/`
+    subject: str  # log asks: what `fab page answer` names; plan: the question's id
+    text: str  # plan or finding: the question; parked: the reason; call: "" (in its report)
     since: str  # the ts it was asked (its call.ended or call.parked); "" for a plan's question
-    call: str = ""  # call: the call that asked; parked: the chain's root; plan: ""
+    call: str = ""  # call or finding: the asking call; parked: the chain's root; plan: ""
     report: str = ""  # what to read: call, FAB_HOME/calls/<call>/report.md; parked, the
-    # call.parked's report (the refusing review run's, may be ""); plan, the plan.toml's path
+    # call.parked's report (may be ""); finding, its walk report; plan, the plan.toml's path
     parts: tuple[str, ...] = ()  # plan: the parts that wait for it
 
 
@@ -83,7 +85,10 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
     - a call.parked with a subject opens Ask("parked", <draft>, subject, <reason>, ts,
       call=<its call>, report=<its report, or "">);
     - opening a key already open replaces its ask, which moves to the end of the order;
-    - an ANSWERED record closes both kinds of its subject;
+    - a finding.triaged with a user, brief or path question opens kind finding, subject
+      <draft>/triage/<finding>, text its question, call the triage call, report the walk
+      report under FAB_HOME/walks (docs/design/fab-qa.md, 2);
+    - an ANSWERED record closes every log kind of its subject;
     - a chain.settled record closes the parked kind of its subject;
     - a call.ended with outcome done and the same subject closes the call kind: the subject
       was designed after all (a call run by hand, or an answer logged before ANSWERED
@@ -356,7 +361,7 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
        - plan: `### <draft>: question <subject>`, the body, `- Waits: <parts, comma-
          separated>` and `- Answer: write its \\`answer\\` in \\`<report>\\` and land it
          with \\`fab land\\``;
-       - call: `### <subject>, asked <since>`, the body, `- Read: \\`<report>\\`` and
+       - call or finding: `### <subject>, asked <since>`, the body, `- Read: \\`<report>\\`` and
          `- Answer: \\`fab page answer <subject> TEXT\\``;
        - parked: `### <subject>, parked <since>`, the body, `- Read: \\`<report>\\`` (left
          out when report is "") and the same Answer line;
@@ -381,9 +386,9 @@ def render(entries: Sequence[tuple[Ask, str]], reports: Sequence[Report], now: s
             instructions = [f"- Waits: {', '.join(ask.parts)}",
                             f"- Answer: write its `answer` in `{ask.report}` and land it with `fab land`"]
         else:
-            verb = "asked" if ask.kind == "call" else "parked"
+            verb = "parked" if ask.kind == "parked" else "asked"
             heading = f"### {ask.subject}, {verb} {ask.since}"
-            instructions = [f"- Read: `{ask.report}`"] if ask.report or ask.kind == "call" else []
+            instructions = [f"- Read: `{ask.report}`"] if ask.report or ask.kind in ("call", "finding") else []
             instructions.append(f"- Answer: `fab page answer {ask.subject} TEXT`")
         sections.append("\n\n".join((heading, body, "\n".join(instructions))))
     if not entries:
@@ -420,26 +425,78 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     OSError adding `<directory>: <error, on one line>` to unread. asks over the loaded plans
     and events; each ask's body: plan, its text; call, excerpt(Path(report)); parked, its
     text, then a blank line and excerpt(Path(report)) when report is not "". The reports are
-    latest_reports(fab.log.home() / "reports"). Return render(entries, reports, now,
-    unread, landing_lines(events), signals(events)), sharing one tier_reds.reds fold."""
+    latest_reports(fab.log.home() / "reports"). Render entries, reports, landing lines
+    and signals, sharing one tier_reds.reds fold.
+    Finding bodies quote title, rung and QUESTION_LINES of reproduction before the
+    question. Loaded ladders add backlog signals at the current render and rung lines
+    from walks.editions and findings.rungs after After landing, before Unread (13.15).
+    An unreadable edition adds the plan directory to Unread."""
+    plans, unread = _load_plans(directories)
+    found = findings.findings(events)
+    entries = []
+    for ask in asks(plans, events):
+        body = excerpt(Path(ask.report)) if ask.kind == "call" else ask.text
+        if ask.kind == "finding":
+            finding = found[ask.subject.rsplit("/", 1)[-1]]
+            reproduction = "\n".join(finding.reproduction.splitlines()[:QUESTION_LINES])
+            body = (f"{finding.title}\n\nRung: {finding.rung}\n\n"
+                    f"{reproduction}\n\n{ask.text}")
+        if ask.kind == "parked" and ask.report:
+            body += "\n\n" + excerpt(Path(ask.report))
+        entries.append((ask, body))
+    ladder = []
+    for loaded, path in plans:
+        if not loaded.rungs:
+            continue
+        try:
+            editions = walks.editions(loaded, path.parent)
+        except (OSError, ValueError, Failed) as error:
+            unread.append(f"{path.parent}: {' '.join(str(error).splitlines())}")
+            continue
+        lines = [f"- {findings.line(state)}"
+                 for state in findings.rungs(loaded, list(events), editions, now)]
+        count = sum(f.draft == loaded.draft and f.state == "backlog" for f in found.values())
+        lines.append(f"- Backlog: {count} findings in `{loaded.ladder.backlog}`")
+        ladder.append(f"### {loaded.draft}\n\n" + "\n".join(lines))
+    folded = tier_reds.reds(events)
+    opened = sorted([*signals(events, folded=folded), *_backlog_signals(plans, events)],
+                    key=lambda signal: signal.since)
+    page = render(entries, latest_reports(log.home() / "reports"), now,
+                  landing=landing_lines(events, folded=folded), open_signals=opened)
+    if ladder:
+        page += "\n## The ladder\n\n" + "\n\n".join(ladder) + "\n"
+    if unread:
+        page += "\n## Unread\n\n" + "\n".join(f"- {line}" for line in unread) + "\n"
+    return page
+
+
+def _load_plans(directories: Sequence[Path]) -> tuple[list[tuple[Plan, Path]], list[str]]:
+    """Load page plans and collect one-line read failures (docs/design/fab.md, 13.6)."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
         try:
-            if not path.exists():
-                continue
-            plans.append((plan.load_plan(path), path))
+            if path.exists():
+                plans.append((plan.load_plan(path), path))
         except (plan.PlanError, OSError) as error:
             unread.append(f"{directory}: {' '.join(str(error).splitlines())}")
-    entries = []
-    for ask in asks(plans, events):
-        body = excerpt(Path(ask.report)) if ask.kind == "call" else ask.text
-        if ask.kind == "parked" and ask.report:
-            body += "\n\n" + excerpt(Path(ask.report))
-        entries.append((ask, body))
-    folded = tier_reds.reds(events)
-    return render(entries, latest_reports(log.home() / "reports"), now, unread,
-                  landing_lines(events, folded=folded), signals(events, folded=folded))
+    return plans, unread
+
+
+def _backlog_signals(plans: Sequence[tuple[Plan, Path]], events: Sequence[dict]) -> list[Signal]:
+    """The loaded ladders held at their current backlog render; pure (13.6, 13.15)."""
+    opened = []
+    records = list(events)
+    for loaded, _ in plans:
+        if not loaded.rungs:
+            continue
+        key = triage.render_key(triage.backlog_text(loaded, records))
+        held = triage.backlog_held(loaded, records, key)
+        if held is not None:
+            opened.append(Signal(f"backlog:{loaded.draft}", "backlog rejected twice", held["ts"],
+                          (f"- Branch: `{held['branch']}`", f"- Step: `{held['step']}`"),
+                          f"{held.get('gate', 'gate')}:{held['log']}", True))
+    return opened
 
 
 def write(text: str) -> Path:
@@ -451,14 +508,15 @@ def write(text: str) -> Path:
 
 def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
            log_path: Path | None = None) -> dict:
-    """Log the user's answer to subject's open asks of kind call or parked and return the
+    """Log the user's answer to subject's open call, parked or finding asks and return the
     record: fab.log.append(ANSWERED, path=log_path, subject=subject, call=<the ask's call>,
     by=by, question=<the question>, answer=<text stripped>), then wake the tick with
     `answer <subject>` beside log_path.
 
-    The ask is the last of asks((), events) whose subject equals subject (call or parked).
-    The question: for call, the first non-blank line of excerpt(Path(<its report>)); for
-    parked, `parked: <its text>`. ValueError, logging nothing, when text is blank,
+    The ask is the last of asks((), events) whose subject equals subject. The question:
+    for call, the first non-blank line of excerpt(Path(<its report>)); for parked,
+    `parked: <its text>`; for finding, its question text. ValueError, logging nothing,
+    when text is blank,
     or when no such ask is open: the message names the subject and the open subjects in
     order, comma-separated, or `none`. A plan's question is not answered here: its answer is
     written in its plan.toml (fab-calls.md 3)."""
@@ -469,10 +527,13 @@ def answer(subject: str, text: str, events: Sequence[dict], *, by: str = "user",
         raise ValueError(f"answer text for {subject!r} is blank; open subjects: {subjects}")
     matching = [ask for ask in opened if ask.subject == subject]
     if not matching:
-        raise ValueError(f"no open call or parked chain for {subject!r}; open subjects: {subjects}")
+        raise ValueError(f"no open call or parked chain or finding question for {subject!r}; open subjects: {subjects}")
     ask = matching[-1]
-    question = (next(line for line in excerpt(Path(ask.report)).splitlines() if line.strip())
-                if ask.kind == "call" else f"parked: {ask.text}")
+    question = ask.text
+    if ask.kind == "call":
+        question = next(line for line in excerpt(Path(ask.report)).splitlines() if line.strip())
+    elif ask.kind == "parked":
+        question = f"parked: {ask.text}"
     record = log.append(ANSWERED, path=log_path, subject=subject, call=ask.call, by=by,
                         question=question, answer=text)
     wake.want(f"answer {subject}", path=wake.want_path(log_path))
@@ -485,10 +546,14 @@ def clear(identifier: str, text: str, events: Sequence[dict], *, by: str = "user
 
     Store signal, by and stripped text beside log_path. Blank text, an unknown or closed
     signal, or a signal that cannot be cleared raises ValueError without logging or waking.
+    Backlog signals use the ladders registered in FAB_HOME/plans at their current render.
     The command rewrites the page after this record (docs/design/fab-channel.md, 2).
     """
     text = text.strip()
     opened = signals(events)
+    if identifier.startswith("backlog:"):
+        plans, _ = _load_plans(plan_dirs())
+        opened += _backlog_signals(plans, events)
     identifiers = ", ".join(signal.id for signal in opened) or "none"
     if not text:
         raise ValueError(f"clear text for {identifier!r} is blank; open signals: {identifiers}")
@@ -547,6 +612,8 @@ def main(argv: list[str]) -> int:
 
 
 def _log_asks(events: Iterable[dict]) -> list[Ask]:
+    events = list(events)
+    found = findings.findings(events)
     opened, roles = {}, {}
     for event in events:
         try:
@@ -558,10 +625,26 @@ def _log_asks(events: Iterable[dict]) -> list[Ask]:
                 continue
             if ev == ANSWERED:
                 subject = event["subject"]
-                for kind in ("call", "parked"):
+                for kind in ("call", "parked", "finding"):
                     opened.pop((kind, subject), None)
             elif ev == "chain.settled":
                 opened.pop(("parked", event["subject"]), None)
+            elif ev == "finding.triaged":
+                if (event.get("decision") not in ("user", "brief", "path")
+                        or not all(isinstance(event.get(key), str)
+                                   for key in ("finding", "question", "call", "ts"))
+                        or not event["question"].strip()):
+                    continue
+                finding = found.get(event["finding"])
+                if finding is None:
+                    continue
+                subject = f"{finding.draft}/triage/{finding.id}"
+                ask = Ask("finding", finding.draft, subject, event["question"], event["ts"],
+                          call=event["call"],
+                          report=str(log.home() / "walks" / finding.walk / "report.md"))
+                key = (ask.kind, subject)
+                opened.pop(key, None)
+                opened[key] = ask
             elif ev == "call.finished":
                 call = event["call"]
                 for key, ask in list(opened.items()):
