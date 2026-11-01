@@ -22,7 +22,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   already holds. Its report's first line is `Done: approve` or `Failed:
   <findings>`. Approved, the branch lands. Refused, the findings go back
   once, as an amend call (`fab/roles/amender.md`) on the same branch.
-  Refused twice, the call's subject parks for the user.
+  Refused after its amendment, the chain goes to a settle call.
 - **A chain** (`fab/call_review.py`) is a call that ended done, the amend
   calls on its branch, and their review runs; the tick folds it from the log
   and takes its next step:
@@ -34,10 +34,42 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   - The amend call is `fab call amend ROOT`, its `call.started` carrying
     `amends`. A run ending `Infra:` is reviewed again, up to three times.
   - A second refusal, an amend call that does not end done, or a third
-    `Infra:` logs `call.parked`.
-  - A `call.answered` naming the subject (fab-channel.md 2) starts the chain's counts
-    afresh: the branch's tip is reviewed again, and may be amended once
-    more.
+    `Infra:` holds the chain for one `settle` call (`fab call settle ROOT`,
+    `fab/roles/settle.md`, effort medium, as the answerer's). Its subject is
+    `<chain subject>/settle`; its `call.started` carries `settles`, the root.
+    It shares the plan's answer-call limit and reserves nothing else. It
+    runs report-only (fab-channel.md 3), changes no branch, and is not
+    itself reviewed. Its brief holds the root call's brief path, the
+    branch's diff from its merge base as the review brief does, every
+    refusing review's report and the amend calls' reports (paths and
+    excerpts), and the hold's reason.
+  - Its report's first line is exactly `Done: land`, `Done: amend` or
+    `Done: user`. Land names why the branch is good enough and any findings
+    left as later work; the branch lands as approved. Amend gives guidance,
+    resets the chain's counts as a user's answer does, and reviews the tip
+    again; `fab.channel.answers_text` carries the guidance into the next
+    amend brief. User gives one line saying why it is the user's: budgets,
+    machines, what is hard to reverse, or a change of direction. Only then
+    `call.parked` has reason `user: <that line>`. A failed call, missing
+    guidance or explanation, or any other report parks with `settle failed`.
+  - Each verdict logs `chain.settled`: call the root, its subject, settle
+    the deciding call's id, verdict land, amend or user, and text the report
+    after its first line. Land folds as approved; amend as a reset. A later
+    queue refusal still follows the chain's ordinary refusal rules.
+  - After settle says amend, a second hold gets one more settle, whose
+    brief says amend is no longer an option: land or user only. No third
+    settle starts before a user's reset; a forbidden amend or another hold
+    after both attempts parks with `settle failed`.
+  - A chain parked before settlement existed is held again when its last
+    `call.parked` reason is `refused after its amendment`,
+    `the amend call ended <outcome>`, or `3 review runs ended infra`, with
+    no `call.answered` after it and no `chain.settled`. Its next plan tick
+    settles it; its ask stays open until then. Reviews-off plans
+    (fab-integration.md 3) still finish unreviewed chains and never reach
+    a hold.
+  - A `call.answered` naming the subject (fab-channel.md 2) starts the
+    chain's counts and its settle allowance afresh: the branch's tip is
+    reviewed again, and may be amended once more.
   - While a subject's chain is open, no call starts for that subject; no
     answer call starts while an answer chain is open, and no review call
     while a review chain is open.

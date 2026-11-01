@@ -84,6 +84,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.started` / `call.ended` | call, role, subject; outcome, tokens, cache_write, peak, turns, minutes | a Claude call; its usage (fab-reports.md 3) |
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (fab-calls.md 2) |
+| `chain.settled` | call, subject, settle, verdict, text | a held chain judged by a settle call: land, amend or user (fab-calls.md 2) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (fab-channel.md 2) |
 | `issue.opened` | subject, kind, number, url | an open user ask has a forge issue (fab-channel.md 3) |
 | `issue.comment` | number, subject, comment | a user comment consumed before its reply call (fab-channel.md 3) |

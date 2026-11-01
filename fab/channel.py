@@ -1,8 +1,8 @@
 """The user's channel: the user's questions and the daily reports on one page (docs/design/fab-channel.md, 2).
 
 What is the user's is decided by whoever asks, never here: a plan's `[[question]]` without
-an answer (the cut's), a call that ended `Question:`, and a call's chain parked after its
-review refused twice. `asks` folds the open ones from the plans and the log. The page,
+an answer (the cut's), a call that ended `Question:`, and a chain referred by settle or
+parked when settlement failed. `asks` folds the open ones from the plans and the log. The page,
 FAB_HOME/PAGE on hel8, lists them with what to read and how to answer, then each standing
 report's latest day with its signals. An answer comes back as `call.answered`, which names a
 call's subject and never a task; every later call of the subject carries it in its brief.
@@ -77,12 +77,14 @@ def asks(plans: Sequence[tuple[Plan, Path]], events: Iterable[dict]) -> list[Ask
 
     The log's, walking events once in log order and keyed by (kind, subject), so a subject
     has at most one open ask of each kind:
-    - a call.ended with outcome question and a subject opens Ask("call", <draft>, subject, "",
-      ts, call=<call>, report=str(fab.log.home() / "calls" / <call> / "report.md"));
+    - a call.ended with outcome question and a subject, except amend and settle, opens
+      Ask("call", <draft>, subject, "", ts, call=<call>,
+      report=str(fab.log.home() / "calls" / <call> / "report.md"));
     - a call.parked with a subject opens Ask("parked", <draft>, subject, <reason>, ts,
       call=<its call>, report=<its report, or "">);
     - opening a key already open replaces its ask, which moves to the end of the order;
     - an ANSWERED record closes both kinds of its subject;
+    - a chain.settled record closes the parked kind of its subject;
     - a call.ended with outcome done and the same subject closes the call kind: the subject
       was designed after all (a call run by hand, or an answer logged before ANSWERED
       existed);
@@ -286,10 +288,15 @@ def answers_text(subject: str, events: Iterable[dict]) -> str:
         Answer (<by>): <answer>
 
     (the record's fields; a missing one is shown as `-`; a multi-line answer stays as it
-    is), the blocks joined by blank lines. "" when there are none. Pure."""
+    is), the blocks joined by blank lines. chain.settled amend contributes its guidance
+    as a Settlement (<settle>) block in the same order. "" when there are none. Pure."""
     blocks = []
     for event in events:
-        if event.get("ev") == ANSWERED and event.get("subject") == subject:
+        if (event.get("ev") == "chain.settled" and event.get("verdict") == "amend"
+                and event.get("subject") == subject):
+            blocks.append(f"### {event.get('ts', '-')}, to {event.get('call', '-')}\n"
+                          f"Settlement ({event.get('settle', '-')}): {event.get('text', '-')}")
+        elif event.get("ev") == ANSWERED and event.get("subject") == subject:
             blocks.append(f"### {event.get('ts', '-')}, to {event.get('call', '-')}\n"
                           f"Question: {event.get('question', '-')}\n"
                           f"Answer ({event.get('by', '-')}): {event.get('answer', '-')}")
@@ -540,14 +547,21 @@ def main(argv: list[str]) -> int:
 
 
 def _log_asks(events: Iterable[dict]) -> list[Ask]:
-    opened = {}
+    opened, roles = {}, {}
     for event in events:
         try:
             ev = event["ev"]
+            if ev == "call.started":
+                roles[event["call"]] = event.get("role")
+                continue
+            if ev == "call.ended" and event.get("role", roles.get(event.get("call"))) in ("amend", "settle"):
+                continue
             if ev == ANSWERED:
                 subject = event["subject"]
                 for kind in ("call", "parked"):
                     opened.pop((kind, subject), None)
+            elif ev == "chain.settled":
+                opened.pop(("parked", event["subject"]), None)
             elif ev == "call.finished":
                 call = event["call"]
                 for key, ask in list(opened.items()):

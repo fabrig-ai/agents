@@ -1256,6 +1256,74 @@ class MainTest(unittest.TestCase):
             self.assertEqual(start.call_args.args[:3], ("amend", "demo", root))
             self.assertEqual(start.call_args.kwargs, dict(sh=fake, base="main", branch="calls/root", amends="root"))
 
+    def test_main_settle_is_report_only_medium_and_uses_chain_repository(self):
+        for repo_name in ("agents", "fabrig"):
+            with self.subTest(repo=repo_name), tmp_home() as root:
+                fixture(root)
+                path = root / "docs/plan/demo/plan.toml"
+                write(path, path.read_text().replace('repo = "agents"', f'repo = "{repo_name}"'))
+                self.amend_chain()
+                log.append("call.started", call="amend", role="amend", amends="root")
+                log.append("call.ended", call="amend", outcome="failed")
+                repository = log.home() / "repos/fabrig" if repo_name == "fabrig" else root
+
+                def rev(call):
+                    return Result(0, str(root) if call.argv[-1] == "--show-toplevel" else "tip")
+
+                def claude(call):
+                    directory = Path(call.cwd).parent
+                    text = (directory / "brief.md").read_text()
+                    self.assertIn(calls.ROLES["settle"].read_text(), text)
+                    self.assertIn("- Hold: the amend call ended failed", text)
+                    self.assertIn("+held diff", text)
+                    write(directory / "report.md", "Done: land\nKeep the branch.\n")
+                    return Result(0, "{}")
+
+                fake = FakeRunner().on(["git", "rev-parse"], rev)
+                fake.on(["git", "merge-base"], Result(0, "base"))
+                fake.on(["git", "diff"], Result(0, "+held diff\n")).on(["claude"], claude)
+                with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()):
+                    self.assertEqual(calls.main(["settle", "root", "--plan", str(path.parent)]), 0)
+                started, ended = log.read()[-2:]
+                self.assertEqual((started["role"], started["subject"], started["settles"]),
+                                 ("settle", "demo/settle", "root"))
+                self.assertNotIn("branch", started)
+                command = next(call for call in fake.calls if call.argv[0] == "claude")
+                self.assertEqual(command.argv[command.argv.index("--effort") + 1], "medium")
+                worktree = str(Path(command.cwd))
+                self.assertIn(["git", "worktree", "add", "--detach", worktree, "origin/main"], fake.argvs())
+                self.assertFalse(any(call.argv[:2] == ["git", "push"] for call in fake.calls))
+                self.assertTrue(all(call.cwd == str(repository) for call in fake.calls
+                                    if call.argv[:2] in (["git", "merge-base"], ["git", "diff"])))
+                self.assertEqual(ended["outcome"], "done")
+                self.assertEqual(list(call_review.chains(log.read())), ["root"])
+                with patch.object(calls, "run", fake), patch.object(calls, "start") as start, \
+                     redirect_stderr(io.StringIO()):
+                    self.assertEqual(calls.main(["settle", "root", "--plan", str(path.parent)]), 1)
+                start.assert_not_called()
+
+    def test_settle_amend_guidance_reaches_next_real_amend_brief(self):
+        with tmp_home() as root:
+            fixture(root)
+            self.amend_chain()
+            log.append("chain.settled", call="root", subject="demo", settle="settle-1",
+                       verdict="amend", text="Include extern blocks.\nKeep the parser.")
+            log.append("run.started", run="root-2", task="root", kind="review")
+            log.append("run.ended", run="root-2", outcome="failed")
+
+            def claude(call):
+                directory = Path(call.cwd).parent
+                text = (directory / "brief.md").read_text()
+                self.assertIn("Settlement (settle-1): Include extern blocks.\nKeep the parser.", text)
+                self.assertLess(text.index(channel.SECTION), text.index("# The call you amend"))
+                write(directory / "report.md", "Done: amended\n")
+                return Result(0, "{}")
+
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root))).on(["claude"], claude)
+            with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()):
+                self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo")]), 0)
+            self.assertEqual(log.read()[-2]["amends"], "root")
+
     def test_main_amend_refuses_unknown_root_and_every_other_state(self):
         for status in ("unknown", *[state for state in call_review.STATES if state != "amend"]):
             with self.subTest(status=status), tmp_home() as root:

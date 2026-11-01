@@ -4,7 +4,15 @@
 
 ## Present
 
-- (nothing yet)
+- **Held call chains go to settle** (2; 11-01, the user: second refusals are
+  not the user's): a second refusal, failed amend or three infra reviews
+  starts a report-only medium-effort `settle` call under the plan's answer
+  limit. Land approves, amend resets review counts and carries guidance into
+  later briefs, user parks with its reason; failed settlement parks. After
+  amend, one final settlement permits only land or user. `chain.settled`
+  closes older parked asks for forge sync; legacy automatic parks settle when
+  their plan next ticks. Tested with temporary homes, fake runners and log
+  folds; not run live.
 
 ## Gaps and departures
 

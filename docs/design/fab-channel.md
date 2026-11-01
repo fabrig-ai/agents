@@ -18,7 +18,12 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   are (`fab.channel.asks`, folded from the plans and the log):
   - a plan's `[[question]]` with no answer, the cut's (fab-calls.md 3);
   - a call that ended `Question:` (fab-gates.md 2);
-  - a call's chain parked after its review refused twice (fab-calls.md 2);
+  - a call's chain referred by settle as `user: ...`, or parked because
+    settlement failed (fab-calls.md 2); an ordinary second refusal or failed
+    amend goes to settle first. Amend and settle calls' own `Question:`
+    reports open no ask. Older parked asks stay open until their chain
+    settles; a later `chain.settled` for the subject closes its parked ask,
+    so its forge issue closes at the next `fab issues sync` (fab-channel.md 3);
   - a QA finding's question from its triage call (fab-qa.md 2: a `user` or
     `brief` decision, or a `path` line's `; user:`): Ask kind `finding`,
     subject `<draft>/triage/<finding>`, its text the question, what to read
