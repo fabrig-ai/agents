@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of call-rebase: docs/design/calls.md 2's bullet "A `fab land`
 # refusal counts as a refusal of the chain", as designed. One direct part of

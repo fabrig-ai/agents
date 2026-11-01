@@ -48,13 +48,31 @@
   red foreman's form through `fab/fix.py`; its fix makes the specless
   `<draft>/finding-<n>`, whose questions skip the foreman and queue for
   the answerer as a red task's do.
+- **A `fab land` refusal counts as a refusal of the chain** (2; plan
+  `docs/plan/call-rebase`, retired 11-01; baaf496, ab3a6d5). The tick's
+  finish (`fab/dispatch.py`, `_finish_outcome` through `_record_finish`)
+  logs no `call.finished` when `fab land` logged a `branch.rejected` for
+  the branch during it, at any step; it logs done for a branch a
+  `branch.landed` already names (running `_finish`), failed for a `fetch`
+  refusal whose branch `git ls-remote` no longer finds, and failed, as
+  before, when nothing was logged. Fabrig and integration plans keep their
+  path. `fab.call_review.land_refusal` tells `fab land`'s record (no
+  `queue_ts`, a step in `LAND_STEPS`) from queue and trunk rejections; the
+  amend brief heads it `` `fab land` refused at <step> `` with the log, and
+  a retire's amend (`_retire_designs`, `fab/calls.py`) lists the designs
+  changed at `origin/main` and not at `origin/<branch>`. The hold's reason
+  is `LAND_HOLD`; its settle brief allows amend or user, then user only,
+  and `_judge_chain` parks a land verdict on it with `settle failed`.
+  Tested with temporary homes, fake runners and log folds; not yet run
+  live.
 
 ## Gaps and departures
 
-- **A `fab land` refusal counts as a refusal of the chain** (2, 11-01):
-  designed, to be built by plan `docs/plan/call-rebase`. Until then such a
-  chain ends `call.finished` failed and an operator rebases and lands it by
-  hand (paper-cuts' retire, 11-01).
+- **A `fab land` refusal amended from its own heading** (2, 11-01): the
+  amender's rebase, its `--force-with-lease` push and a retire's listed
+  designs are role text (`fab/roles/amender.md`), not checked by code; a
+  failing `git fetch` in `_retire_designs` fails the amend's start like
+  any brief that cannot be compiled (5, its first bullet).
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
