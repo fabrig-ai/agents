@@ -383,8 +383,18 @@ only as tweaks once a replay matches its run.
     lists the repairs' questions too (`fab.integration.with_repairs`), and
     it records a repair's answer as a report line `Answer <task>: <text>`,
     which the tick logs as that question's `answer`.
-- **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan options
-  that differ from the defaults (`ready=false` for a replay) to the cut: its brief says to write them into plan.toml verbatim, and its
+- **The cut's inputs.** `fab call cut --set KEY=VALUE ...` passes plan
+  options that differ from the defaults (`ready=false` for a replay). Code
+  writes them, not the cut (the user, 11-01): before the cut call starts,
+  `fab call cut` commits a plan.toml holding only those keys, one per
+  line as `parse_options` read them, under a comment `# Plan options,
+  written by fab call cut --set; keep them`, on the call's branch in its
+  worktree; the brief's `Plan options` says the file exists and the cut
+  writes the rest of the plan below those lines, leaving them as they are.
+  Before each delivery of the cut's branch (its early releases too), the
+  tick compares the options in the branch's plan.toml with the
+  call.started's; a key missing or changed is written back by code (a
+  commit `<draft>: plan options restored`, pushed) before the delivery. Its
   `call.started` carries them (`options`), so the tick reads `landing` and
   `reviews` for the cut's own chain before plan.toml exists. For a replay
   the operator gives the cut the manual run's inputs as `--source`: the
