@@ -13,50 +13,48 @@
   closes older parked asks for forge sync; legacy automatic parks settle when
   their plan next ticks. Tested with temporary homes, fake runners and log
   folds; not run live.
+- **Retire's brief is bounded** (3, 11-01): built by plan
+  `docs/plan/paper-cuts` (`retire-diffs`, 38f8e66, landed 13:16Z).
+  `fab.designer.plan_start` and `design_diff` sit beside `changed_designs`,
+  whose paths and signature are unchanged; `retire_brief` (now with `rev`
+  and `sh`) quotes each changed design as the shorter of its diff and its
+  text with status file at rev, fills in path order within `BRIEF_LIMIT`
+  less the other sections and one list line reserved for every changed
+  design up front (the cut's decision 3: no second pass, a few hundred
+  characters of budget lost), and lists the rest under `Did not fit:`.
+  `fab/roles/retire.md` says designs come as diffs or text and that it
+  reads a design whole when it needs more. Tested against real git
+  repositories (`fab/tests/test_designer.py`). Live once: paper-cuts' own
+  retire (11-01, ~106k characters, every design quoted, none listed).
+- **The tick drives the calls of 2 and 3:** call reviews and amend calls
+  (`fab/call_review.py`), the foreman's answers (`fab/foreman.py`), the
+  refusal foreman's repairs and rebases (`fab/repairs.py`,
+  `fab/spec_edit.py`), and the designer's contract and retire calls, a
+  retire chain reviewed by the consistency pass (`fab/designer.py`,
+  `fab/roles/consistency.md`); the tick skips a retired plan and ticks a
+  plan being cut. Until 11-01 these lines still called them skeletons.
 
 ## Gaps and departures
 
+- **Retire's changed designs are main's window, not the plan's** (3,
+  11-01, seen at paper-cuts' retire): `changed_designs` takes every design
+  a commit on main changed since the cut's parent. paper-cuts' designs
+  (fab-calls.md 3, fab-integration.md 4) landed before its cut (9842398),
+  so its brief quoted neither, and quoted fab-machines.md and fab-tick.md,
+  which another session's builder-install work changed meanwhile. The
+  retire call found its own designs from plan.toml's `design` fields.
+  Code and design agree; the gap is with the role's "the designs this plan
+  changed" (5, Later).
 - **Designs a retire brief lists are read by the call** (3, 11-01), as the
   cut's design index names designs the cut reads itself: a departure from
   `execution-modes.md`'s "compiled by code" only for what the budget leaves
   out.
-- **Retire's brief is bounded** (3, 11-01): designed, to be built by plan
-  `docs/plan/paper-cuts`. Until then a retire brief quotes changed designs
-  whole, and one over the limit is started again every tick (trunk-overlaps
-  was retired by hand; findings-loop's, started before the split, would
-  quote ~404k characters).
 - **Claude calls** are made by the tick (skeleton, review, amend, answer);
   the cut still starts by hand.
-- **The review of calls' output is a skeleton:** `fab/call_review.py`
-  (chains, the review run's brief and start, the amend brief) and
-  `fab.run.fetch_clone` and `fab.run.launch` hold 2's contracts.
-  `fab/roles/call-reviewer.md` and `fab/roles/amender.md` are written. The
-  task `call-review` fills them; `call-review-tick` makes the tick review
-  calls' branches and run amend calls, after `review-call` and
-  `gates-tick`. Until it lands, a call's branch lands unreviewed.
-- **The foreman is a skeleton:** `fab/foreman.py` (where each question
-  stands, the foreman run's brief and start, the answer written into the
-  spec) and `fab.run.launch_detached`, the read-only start review and
-  foreman runs share, hold 2's contracts; `fab/roles/foreman.md` is
-  written. The task `foreman` fills them, after `call-review`;
-  `foreman-tick` sends questions to the foreman from the tick, after
-  `call-review-tick`. Until it lands, every question waits for the
-  answerer. Answers land through `fab land`, so a plan whose specs live
-  outside this repository cannot be settled by its foreman yet.
-- **The foreman's repairs are a skeleton:** `fab/repairs.py` (where each
-  open refusal stands, the refusal foreman's brief and start, its verdict,
-  the `## Repair` or `## Rebase` section written into the spec),
-  `fab/spec_edit.py` (a spec changed on a branch to land, which
-  `fab.foreman.commit` is to use), `fab.run.excerpt` and
-  `fab.run.refusal_text`, and `fab.dispatch.repair_actions` hold 2's
-  contracts; `fab/roles/foreman-repair.md` is written. The task `repairs`
-  fills the modules; `repairs-tick` makes the tick start refusal foremen,
-  act on their verdicts, hold a refused task's repair run until its foreman
-  has decided, and carry the section into that run's brief. Until it lands
-  the dispatcher starts rebase and repair runs on the refused task itself,
-  with the refusal alone. The model lists the foreman without read-only;
-  2 makes it read-only, and code writes its answers and sections into
-  the spec.
+- **The foreman is read-only by design, not by the model:** the model
+  lists the foreman without read-only; 2 makes it read-only, and code
+  writes its answers and sections into the spec. A plan whose specs live
+  outside this repository cannot be settled by its foreman yet (5).
 - **Subjects can share a task's id:** a skeleton call's subject
   `<draft>/<part>` equals the id of a task named after its part (`gates`).
   A `question.answered` that unparks the subject also makes that task
@@ -64,13 +62,3 @@
   apart from tasks (`call.answered`); until `channel-tick` lands, a
   subject still unparks on a `question.answered` naming it, and call
   questions are answered that way by hand.
-- **The designer's calls are a skeleton:** `fab/designer.py` holds 3's
-  briefs, the changed-designs and retire checks and `fab call cut|contract|
-  decision|retire`; `fab.state.part_statuses` and the plan's `contract`,
-  `retired` and `[[question]]` fields are declared but not read yet. The
-  role texts `cut.md`, `contract.md`, `decision.md`, `retire.md` and
-  `consistency.md` are written. The task `designer` fills the module, the
-  plan's fields and the commands; `designer-tick` makes the tick start
-  contract and retire calls, tick a plan being cut, skip a retired plan and
-  review a retire call with the consistency pass. Until then every part is
-  designed by a skeleton call, and plans are cut by hand.

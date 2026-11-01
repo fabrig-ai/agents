@@ -12,14 +12,25 @@
   `trunks.overlap` has been logged. Retired by hand: its retire call's brief
   exceeded `BRIEF_LIMIT` (fab.md and fab.status.md, ~216k characters before
   the split).
+- **The overlap probe's paper cuts** (4, 11-01, from its acceptance review):
+  built by plan `docs/plan/paper-cuts` (landed 13:13-13:19Z). The cache
+  holds `trees`, `pairs` and `conflicts` (a conflicting catch-up is not
+  merged again while nothing moved), reads the first format without
+  `conflicts`, keeps only the keys a probe looked up or stored, drops a
+  tree a failed pair used, and is written only when it changed
+  (`overlaps-cache`, 048cabd). `fab.overlaps.well_formed` is the one rule
+  for a `trunks.overlap` record; `is_news`, `open_pairs` and through it
+  `gone_pairs` and the page's `_public_overlaps` read only well-formed
+  records, and `fab/serve.py` did not change (`overlaps-records`,
+  1f8666b). `fab/tests/test_overlaps_git.py` runs the probe on real git
+  (`git_pair()`): two trunks off main with a conflicting path holding a
+  space, main moved ahead, the path logged; a planted cached tree missing
+  from the object store is a failure, not an overlap (`overlaps-git`,
+  08afbf7). The checkout wording of 4 was matched to the code with the
+  design.
 
 ## Gaps and departures
 
-- **The overlap probe's paper cuts** (4, 11-01, from its acceptance review):
-  the cache pruned to this tick's keys and written only on change, catch-up
-  conflicts cached, malformed `trunks.overlap` records ignored, the checkout
-  wording matched to the code; designed, to be built by plan
-  `docs/plan/paper-cuts`, with a real-git test of the probe.
 - **An integration trunk through the queue is untried live:** the catch-up
   with main (before a check and along the way), catch-up repairs, the
   re-check after a rejection and the stops are tested against fakes and real
