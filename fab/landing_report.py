@@ -3,6 +3,8 @@
 The metrics are the landing draft's (docs/design/draft/landing-pipeline.md, 3) that the
 queue's record holds: its `batch`, `landed` and `rejected` records (fab.queue.Queue.attempt),
 joined with the log's branch.ready for latency, and heavy's records on the gate machine.
+The log also supplies after-landing red routes, settlements, repairs and closures, and
+hand-pushed rejections; their open signals follow the user's page.
 Every function here is pure; `render` puts them together for one window.
 """
 
@@ -12,6 +14,7 @@ from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 
+from fab import channel, tier_reds
 from fab.gate import NO_TESTS
 from fab.hosts import Host
 from fab.report import (Figure, Signal, Sources, Window, figure_table, heavy_waits, minutes,
@@ -44,6 +47,19 @@ FIGURES = (  # (key, label), in the report's order
     ("repair_minutes", "minutes from last rejection to landing, median"),
     ("lane_wait", "heavy lane wait minutes, gate"),
     ("disk_wait", "heavy disk wait minutes, gate"),
+    ("reds_opened", "after-landing reds opened"),
+    ("reds_foreman", "after-landing reds sent to a foreman"),
+    ("reds_page", "after-landing reds sent to the page"),
+    ("reds_fix", "after-landing reds settled fix"),
+    ("reds_none", "after-landing reds settled none"),
+    ("reds_left", "after-landing reds settled left"),
+    ("red_repairs_landed", "red repairs landed"),
+    ("reds_closed", "after-landing reds closed"),
+    ("reds_closed_recovered", "after-landing reds closed recovered"),
+    ("reds_closed_absent", "after-landing reds closed absent"),
+    ("reds_closed_cleared", "after-landing reds closed cleared"),
+    ("red_recovery_hours", "hours opened to recovered, median"),
+    ("hand_rejected", "hand-pushed rejections"),
 )
 
 
@@ -185,6 +201,88 @@ def _repairs(landed: list[dict], rejections: dict[str, list[str]]) -> tuple[int,
     return rounds, repairs
 
 
+def _red_figures(events: list[dict], window: Window) -> dict[str, Figure]:
+    """Count the tick's red decisions in the window, retaining earlier opening times.
+
+    Page routes include openings, left settlements and unfixed repairs. The red fold
+    supplies each unfixed repair's covering tip; its first fault-free run at or after
+    coverage that still lists a key is the page transition, even if the red later closed.
+    Recovery uses the reports' nearest-rank median, in hours. Future records do not count.
+    """
+    events = [event for event in events if isinstance(event.get("ts"), str)
+              and event["ts"] < window.end]
+    folded = tier_reds.reds(events)
+    by_id = {red.id: red for red in folded}
+    opened = [red for red in folded if window.holds(red.at)]
+    page_at = {red.id: red.at for red in folded if red.route == "signal"}
+    covering = {}
+    for red in folded:
+        if red.covered and red.signal_reason.startswith("unfixed: "):
+            covering.setdefault(red.covered, []).append(red)
+    covered = {}
+    for event in events:
+        if event.get("ev") == tier_reds.SETTLED:
+            red = by_id.get(event.get("red"))
+            if red is not None and red.verdict == "left" and event.get("run") == red.foreman:
+                page_at.setdefault(red.id, event["ts"])
+        elif event.get("ev") == tier_reds.TIERS_RUN and not event.get("faults"):
+            for red in covering.pop(event.get("tip"), ()):
+                covered[red.id] = red
+            keys = set(event.get("reds", ()))
+            for identifier, red in list(covered.items()):
+                if keys.intersection(red.keys):
+                    page_at[identifier] = event["ts"]
+                    del covered[identifier]
+    records = within(events, window)
+    settled = Counter(event.get("verdict") for event in records
+                      if event.get("ev") == tier_reds.SETTLED)
+    closed = Counter(event.get("reason") for event in records
+                     if event.get("ev") == tier_reds.CLOSED)
+    recoveries = [minutes(by_id[event["red"]].at, event["ts"]) / 60
+                  for event in records if event.get("ev") == tier_reds.CLOSED
+                  and event.get("reason") == "recovered" and event.get("red") in by_id]
+    repairs = {red.task for red in folded if red.repair}
+    return {
+        "reds_opened": len(opened),
+        "reds_foreman": sum(red.route == "foreman" for red in opened),
+        "reds_page": sum(window.holds(stamp) for stamp in page_at.values()),
+        "reds_fix": settled["fix"],
+        "reds_none": settled["none"],
+        "reds_left": settled["left"],
+        "red_repairs_landed": sum(event.get("ev") == "branch.landed"
+                                  and event.get("task") in repairs for event in records),
+        "reds_closed": sum(closed.values()),
+        "reds_closed_recovered": closed["recovered"],
+        "reds_closed_absent": closed["absent"],
+        "reds_closed_cleared": closed["cleared"],
+        "red_recovery_hours": quantile(recoveries, 0.5),
+        "hand_rejected": sum(event.get("ev") == "queue.rejected" for event in records),
+    }
+
+
+def _open_signals(events: list[dict], window: Window) -> list[Signal]:
+    """Ownerless reds and hand-pushed rejections still open at the window's end.
+
+    Reuse the page's lifecycle fold, including hand clears. The landing draft's first
+    actions are sending confirmed reds with evidence (section 2) and teaching precheck
+    about real rejections (section 4). Faults belong to the page, not this red signal.
+    """
+    opened = channel.signals(event for event in events if isinstance(event.get("ts"), str)
+                             and event["ts"] < window.end)
+    result = []
+    for signal in opened:
+        if signal.id.startswith("red-"):
+            result.append(Signal(f"after-landing red {signal.id} has no owner fab knows",
+                                 "a confirmed red goes to its owner with its evidence; "
+                                 f"see the user's page ({signal.id})", "the branch's owner"))
+        elif signal.id.startswith("queue:"):
+            result.append(Signal(f"hand-pushed rejection {signal.id.removeprefix('queue:')} "
+                                 "has no owner fab knows",
+                                 "the precheck learns it (a tool check), not a role's text (a rule); "
+                                 f"see the user's page ({signal.id})", "ops"))
+    return result
+
+
 def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict[str, Figure]:
     """Every FIGURES key for the window, from sources.queue and sources.log records whose ts it
     holds (except where said):
@@ -207,7 +305,10 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
       repair_minutes: the median of the minutes from each such branch's last rejection to its
       landing, over those rejected at least once; None when none.
     - lane_wait, disk_wait: fab.report.heavy_waits over the hosts with role gate.
-    Counts are ints, minutes, rates and percentages floats."""
+    - reds_opened, reds_foreman, reds_page, reds_fix/none/left, red_repairs_landed,
+      reds_closed (also by reason), red_recovery_hours and hand_rejected: the log's
+      after-landing and hand-pushed decisions, from _red_figures.
+    Counts are ints; minutes, hours, rates and percentages are floats."""
     records = within(sources.queue, window)
     all_batches = [record for record in records if record.get("ev") == "batch"]
     batches = [batch for batch in all_batches if batch.get("branches")]
@@ -260,6 +361,7 @@ def figures(sources: Sources, hosts: Mapping[str, Host], window: Window) -> dict
         "repair_minutes": quantile(repairs, 0.5),
         "lane_wait": heavy["lane_wait"],
         "disk_wait": heavy["disk_wait"],
+        **_red_figures(sources.log, window),
     }
 
 
@@ -313,7 +415,8 @@ def render(sources: Sources, hosts: Mapping[str, Host], window: Window) -> str:
       beside the previous window's.`
     - `## Figures`: fab.report.figure_table(FIGURES, figures for the window, figures for
       window.previous()).
-    - `## Signals`: fab.report.signal_lines(signals(...)).
+    - `## Signals`: fab.report.signal_lines(signals(...)), then ownerless reds and
+      hand-pushed rejections still open at the window's end, with the draft's actions.
     - `## Red classes`: a table Step, Rejections of the window's `rejected` records by step,
       most first, then by step.
     - `## Steps`: a table Step, Runs, Failures, Timeouts, Median s, P90 s, Max s from step_rows.
@@ -331,7 +434,8 @@ def render(sources: Sources, hosts: Mapping[str, Host], window: Window) -> str:
         [f"# Landing report, {window.start[:10]}",
          f"{window.start} to {window.end}; each figure beside the previous window's."],
         ["## Figures", *figure_table(FIGURES, current, previous)],
-        ["## Signals", *signal_lines(signals(current, previous, sources.unread))],
+        ["## Signals", *signal_lines([*signals(current, previous, sources.unread),
+                                     *_open_signals(sources.log, window)])],
         ["## Red classes", *table(("Step", "Rejections"), red_rows)],
         ["## Steps", *table(("Step", "Runs", "Failures", "Timeouts", "Median s", "P90 s", "Max s"),
                             step_rows(sources.queue, window))],

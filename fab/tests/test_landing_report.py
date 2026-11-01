@@ -5,11 +5,15 @@ from fab import landing_report as landing
 from fab.gate import NO_TESTS
 from fab.hosts import Host
 from fab.report import Signal, Sources, Window
+from fab.tests.support import tmp_home
 
 
 START = "2026-10-29T00:00:00.000Z"
 END = "2026-10-29T01:00:00.000Z"
 WINDOW = Window(START, END)
+RED_COUNTS = {"reds_opened", "reds_foreman", "reds_page", "reds_fix", "reds_none", "reds_left",
+              "red_repairs_landed", "reds_closed", "reds_closed_recovered", "reds_closed_absent",
+              "reds_closed_cleared", "hand_rejected"}
 
 
 def ts(time, day="2026-10-29"):
@@ -35,6 +39,54 @@ def landed(time, branch, tip, **fields):
 def rejected(time, branch, tip, step="build", **fields):
     return {"ts": ts(time), "ev": "rejected", "branch": branch, "tip": tip,
             "step": step, "log": "/queue/batch.log", **fields}
+
+
+def red_opened(time, identifier, route="foreman", **fields):
+    return {"ts": ts(time), "ev": "red.opened", "red": identifier, "tip": "main-tip",
+            "keys": [identifier + "-case"], "suspects": ["demo/a"], "tasks": ["demo/a"],
+            "draft": "demo", "route": route, "reason": "no suspects" if route == "signal" else "",
+            **fields}
+
+
+def red_decisions(time, identifier, verdict, **fields):
+    stamp = fields.get("ts", ts(time))
+    return [red_opened(time, identifier, **fields),
+            {"ts": stamp, "ev": "run.started", "kind": "foreman", "red": identifier,
+             "task": f"demo/{identifier}/foreman", "tip": "main-tip", "run": identifier + "-foreman"},
+            {"ts": stamp, "ev": "run.ended", "run": identifier + "-foreman", "outcome": "done"},
+            {"ts": stamp, "ev": "red.settled", "red": identifier, "run": identifier + "-foreman",
+             "verdict": verdict, "reason": "the tier needs a login"}]
+
+
+def red_sources():
+    events = red_decisions("23:00", "red-old", "fix", ts=ts("23:00", "2026-10-28"))
+    for time, identifier, verdict in (("00:00", "red-1", "fix"), ("00:01", "red-2", "none"),
+                                       ("00:02", "red-3", "left"), ("00:04", "red-5", "fix")):
+        events.extend(red_decisions(time, identifier, verdict))
+    events.extend([red_opened("00:03", "red-4", route="signal"),
+                   red_opened("00:05", "red-6", route="signal"),
+                   red_opened("01:00", "red-future", route="signal")])
+    for time, identifier in (("00:06", "red-old"), ("00:07", "red-1"), ("00:08", "red-5")):
+        events.append({"ts": ts(time), "ev": "branch.landed", "task": f"demo/{identifier}"})
+    events.append({"ts": ts("00:09"), "ev": "tiers.run", "tip": "covering-tip", "faults": [],
+                   "branches": ["demo/red-5-r2"], "reds": ["red-5-case"]})
+    for time, identifier, reason in (("00:10", "red-2", "absent"), ("00:11", "red-3", "cleared"),
+                                      ("00:12", "red-4", "absent"), ("00:20", "red-5", "recovered"),
+                                      ("00:30", "red-old", "recovered"), ("00:30", "red-1", "recovered")):
+        events.append({"ts": ts(time), "ev": "red.closed", "red": identifier, "reason": reason})
+    events.extend([
+        {"ts": ts("00:01"), "ev": "queue.rejected", "queue_ts": ts("00:01"),
+         "branch": "hand/open", "tip": "open-tip"},
+        {"ts": ts("00:02"), "ev": "queue.rejected", "queue_ts": ts("00:02"),
+         "branch": "hand/landed", "tip": "landed-tip"},
+        {"ts": ts("00:10"), "ev": "queue.landed", "branch": "hand/landed"},
+        {"ts": ts("00:03"), "ev": "branch.rejected", "task": "demo/a"},
+        {"ts": ts("01:00"), "ev": "queue.rejected", "queue_ts": ts("01:00"),
+         "branch": "hand/future", "tip": "future-tip"},
+        {"ts": ts("01:00"), "ev": "queue.landed", "branch": "hand/open"},
+        {"ts": ts("01:00"), "ev": "red.closed", "red": "red-6", "reason": "cleared"},
+    ])
+    return Sources(sorted(events, key=lambda event: event["ts"]), [], {})
 
 
 def metric_sources():
@@ -176,13 +228,21 @@ class LandingReportTest(unittest.TestCase):
             "latency_median": 3.0, "latency_p90": 5.0, "waiting": 2, "oldest_wait": 70.0,
             "bisections": 1, "bisection_runs": 2, "bisection_minutes": 2.0,
             "repair_rounds": 1.5, "repair_minutes": 4.0, "lane_wait": 2.0, "disk_wait": 1.0,
+            "reds_opened": 0, "reds_foreman": 0, "reds_page": 0, "reds_fix": 0, "reds_none": 0,
+            "reds_left": 0, "red_repairs_landed": 0, "reds_closed": 0, "reds_closed_recovered": 0,
+            "reds_closed_absent": 0, "reds_closed_cleared": 0, "red_recovery_hours": None,
+            "hand_rejected": 0,
         })
         self.assertEqual(set(actual), {key for key, _ in landing.FIGURES})
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
                   "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
+        counts |= RED_COUNTS
         for key, value in actual.items():
             with self.subTest(key=key):
-                self.assertIs(type(value), int if key in counts else float)
+                if key == "red_recovery_hours":
+                    self.assertIsNone(value)
+                else:
+                    self.assertIs(type(value), int if key in counts else float)
 
     def test_landing_report_figures_on_empty_and_zero_length_windows(self):
         sources = Sources([], [], {})
@@ -190,7 +250,8 @@ class LandingReportTest(unittest.TestCase):
         counts = {"batches", "green", "red", "conflict", "error", "landed", "rejected",
                   "collateral", "retried", "reused", "waiting", "bisections", "bisection_runs"}
         absent = {"branches_per_batch", "red_share", "false_red_rate", "latency_median",
-                  "latency_p90", "oldest_wait", "repair_rounds", "repair_minutes"}
+                  "latency_p90", "oldest_wait", "repair_rounds", "repair_minutes", "red_recovery_hours"}
+        counts |= RED_COUNTS
         for key, _ in landing.FIGURES:
             with self.subTest(key=key):
                 if key in absent:
@@ -199,6 +260,75 @@ class LandingReportTest(unittest.TestCase):
                     self.assertEqual(empty[key], 0)
                     self.assertIs(type(empty[key]), int if key in counts else float)
         self.assertEqual(landing.figures(sources, {}, Window(START, START)), empty)
+
+    def test_landing_report_counts_red_routes_settlements_repairs_and_closures_from_log(self):
+        sources = red_sources()
+        actual = landing.figures(sources, {}, WINDOW)
+        self.assertEqual({key: actual[key] for key in RED_COUNTS | {"red_recovery_hours"}}, {
+            "reds_opened": 6, "reds_foreman": 4, "reds_page": 4,
+            "reds_fix": 2, "reds_none": 1, "reds_left": 1,
+            "red_repairs_landed": 3, "reds_closed": 6, "reds_closed_recovered": 3,
+            "reds_closed_absent": 2, "reds_closed_cleared": 1, "red_recovery_hours": 0.5,
+            "hand_rejected": 2,
+        })
+        previous = landing.figures(sources, {}, WINDOW.previous())
+        self.assertEqual({key: previous[key] for key in RED_COUNTS if previous[key]},
+                         {"reds_opened": 1, "reds_foreman": 1, "reds_fix": 1})
+        self.assertIsNone(previous["red_recovery_hours"])
+        with tmp_home():
+            rendered = landing.render(sources, {}, WINDOW)
+        for label, value in (("after-landing reds opened", "6"),
+                             ("after-landing reds sent to a foreman", "4"),
+                             ("after-landing reds sent to the page", "4"),
+                             ("red repairs landed", "3"),
+                             ("after-landing reds closed recovered", "3"),
+                             ("hours opened to recovered, median", "0.5"),
+                             ("hand-pushed rejections", "2")):
+            with self.subTest(label=label):
+                self.assertIn(f"| {label} | {value} (prev ", rendered)
+
+    def test_landing_report_signals_show_ownerless_reds_and_rejections_at_window_end(self):
+        with tmp_home():
+            rendered = landing.render(red_sources(), {}, WINDOW)
+        signals = rendered.split("## Signals\n", 1)[1].split("\n\n", 1)[0]
+        self.assertIn("**after-landing red red-6 has no owner fab knows:** "
+                      "a confirmed red goes to its owner with its evidence; "
+                      "see the user's page (red-6) (the branch's owner)", signals)
+        self.assertIn("**hand-pushed rejection hand/open has no owner fab knows:** "
+                      "the precheck learns it (a tool check), not a role's text (a rule); "
+                      "see the user's page (queue:hand/open) (ops)", signals)
+        for absent in ("red-1 ", "red-2 ", "red-3 ", "red-4 ", "red-5 ", "red-future", "hand/landed", "hand/future"):
+            with self.subTest(absent=absent):
+                self.assertNotIn(absent, signals)
+
+    def test_landing_report_hand_clears_hide_red_and_queue_signals_before_tick(self):
+        events = [red_opened("00:00", "red-1", route="signal"),
+                  {"ts": ts("00:01"), "ev": "queue.rejected", "queue_ts": ts("00:01"),
+                   "branch": "hand/pushed", "tip": "tip"},
+                  {"ts": ts("00:02"), "ev": "signal.cleared", "signal": "red-1"},
+                  {"ts": ts("00:03"), "ev": "signal.cleared", "signal": "queue:hand/pushed"},
+                  {"ts": ts("00:04"), "ev": "tiers.run", "faults": ["live-temper: exit 4"]}]
+        with tmp_home():
+            rendered = landing.render(Sources(events, [], {}), {}, WINDOW)
+        self.assertIn("## Signals\n- none\n\n", rendered)
+        actual = landing.figures(Sources(events, [], {}), {}, WINDOW)
+        self.assertEqual((actual["reds_page"], actual["hand_rejected"], actual["reds_closed"]), (1, 1, 0))
+
+    def test_landing_report_counts_unfixed_route_when_opened_and_landed_before_window(self):
+        events = red_decisions("23:00", "red-1", "fix", ts=ts("23:00", "2026-10-28"))
+        events += [
+            {"ts": ts("23:30", "2026-10-28"), "ev": "branch.landed", "task": "demo/red-1"},
+            {"ts": ts("23:45", "2026-10-28"), "ev": "tiers.run", "tip": "cover", "faults": [],
+             "branches": ["demo/red-1-r2"], "reds": [], "starved": 1},
+            {"ts": ts("00:00"), "ev": "tiers.run", "tip": "faulted", "faults": ["p: exit 4"],
+             "reds": ["red-1-case"]},
+            {"ts": ts("00:10"), "ev": "tiers.run", "tip": "unfixed", "faults": [], "reds": ["red-1-case"]},
+            {"ts": ts("00:20"), "ev": "tiers.run", "tip": "standing", "faults": [], "reds": ["red-1-case"]},
+            {"ts": ts("00:30"), "ev": "red.closed", "red": "red-1", "reason": "cleared"},
+        ]
+        actual = landing.figures(Sources(events, [], {}), {}, WINDOW)
+        self.assertEqual((actual["reds_opened"], actual["reds_foreman"], actual["red_repairs_landed"]), (0, 0, 0))
+        self.assertEqual((actual["reds_page"], actual["reds_closed_cleared"]), (1, 1))
 
     def test_landing_report_collateral_requires_a_later_landing_of_the_same_tip(self):
         sources = Sources([], [landed("00:01", "a", "a1"), rejected("00:02", "a", "a1"),
