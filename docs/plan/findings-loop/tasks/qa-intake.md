@@ -84,3 +84,12 @@ Tests in `fab/tests/test_walks.py` (13.15's "Tests", the intake cases):
 ## Report
 
 The verbs built, their refusals, and the lock's scope.
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/qa-intake/foreman-1)
+
+shorten result() and distinguish the intake finding’s field layout.
+Both gate findings belong to `fab/walks.py`; repair within that file.
+- `gate:size`: `result()` at line 233 spans 61 lines, exceeding 60. Combine the adjacent `appended = []` and `identifiers = []` initializations as `appended, identifiers = [], []`, preserving behavior.
+- `gate:clones`: `_Finding` lines 31–38 repeat `fab/findings.py:43`. Move intake-specific `same` before `title`, separating identity from the reported fields. Construction uses keyword arguments, so this preserves parsing and emitted record fields while breaking the repeated eight-line block.
+Preserve `docs/design/fab.md`, §13.15: validation before writes, lock scope, resumable indices and merges, and `walk.ended` last.
+Run `bin/fab test` and the landing structure gates to verify both findings clear.
