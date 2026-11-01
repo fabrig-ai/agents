@@ -1059,6 +1059,26 @@ def _record_finish(action: Action, plan: Plan, checkout: Path, before: list[dict
                role=action.run_kind, outcome=outcome, **fields)
 
 
+def _finish_retired(plan: Plan, events: list[dict], *, log_path: Path | None) -> None:
+    """Finish this retired draft's retire chains once their queue landings are imported.
+
+    Use the latest done call and its last checked tip, when present. Any finish naming
+    a call in the chain closes it; only branch.landed records with queue_ts qualify.
+    """
+    finished = {event.get("call") for event in events if event.get("ev") == "call.finished"}
+    landed = {event.get("branch") for event in events
+              if event.get("ev") == "branch.landed" and "queue_ts" in event}
+    for chain in call_review.chains(events).values():
+        if (chain.role != "retire" or not drafts.under(plan.draft, chain.subject)
+                or finished.intersection(chain.calls) or chain.branch not in landed):
+            continue
+        checked = next((event for event in reversed(events)
+                        if event.get("ev") == "call.checked" and event.get("call") == chain.latest), {})
+        fields = {"tip": checked["tip"]} if checked.get("tip") else {}
+        log.append("call.finished", path=log_path, call=chain.latest,
+                   role="retire", outcome="done", **fields)
+
+
 def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], plan_dir: Path, *,
           plan: Plan, checkout: Path, sh: Runner, log_path: Path | None) -> None:
     """Take task, question, refusal or call-chain actions, logging failures as notes.
@@ -1154,11 +1174,12 @@ def tick(*plan_dirs: Path, sh: Runner = run, hosts: Mapping[str, Host] | None = 
 
 def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
                     load_actions: Sequence[Action], hosts: Mapping[str, Host], *, sh: Runner,
-                    log_path: Path | None, only: bool) -> tuple[list[dict], list[tier_reds.Red], bool]:
+                    log_path: Path | None, only: bool,
+                    plan_drafts: Sequence[str]) -> tuple[list[dict], list[tier_reds.Red], bool]:
     """Import queue and after-landing records, then reconcile reds (docs/design/fab-landing.md, 3).
 
     Return fresh events, folded reds and whether failed loads defer openings.
-    With only, close recovered reds but open none.
+    Retired drafts in plan_drafts own queue records only. With only, open no reds.
     """
     after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
     openings_deferred = bool(load_actions) and after_host is not None
@@ -1169,7 +1190,7 @@ def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
                                **fixes.tasks(plan, events)}.items()}
     imported_from = len(events)
     _import_queue(tasks, events, hosts, sh=sh, log_path=log_path,
-                  plan_drafts=[plan.draft for plan, _, _, _ in loaded])
+                  plan_drafts=plan_drafts)
     _import_after_landing(events, hosts, sh=sh, log_path=log_path)
     events = log.read(log_path)
     # Queue imports and after-landing runs can advance repairs before their verdicts arrive.
@@ -1192,7 +1213,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
            log_path: Path | None, only: bool = False) -> list[Action]:
     """Load and run listed then given plans, sharing imports and builder measurements.
 
-    Fetch each checkout once; print load failures and skip retired plans. Import queue
+    Fetch each checkout once; print load failures and skip retired plans except for
+    queue ownership and finishing their landed retire chains. Import queue
     and after-landing records, close recovered reds, then open new reds against all loaded
     owners, unless any plan failed to load; with an after-landing host, fabrig retirement
     waits in that round too. With only, open no reds and do not hold retirement for them.
@@ -1206,11 +1228,15 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     directories = [Path(path).resolve() for path in plan_dirs] if only else channel.plan_dirs(plan_dirs)
     if not directories:
         print("plans - none")
-    loaded, load_actions = _load_plans(directories, log.read(log_path), sh=sh)
+    retired: list[Plan] = []
+    loaded, load_actions = _load_plans(directories, log.read(log_path), sh=sh, retired=retired)
     actions = list(load_actions)
     hosts = machines.load() if hosts is None else hosts
     events, folded, openings_deferred = _reconcile_reds(
-        loaded, load_actions, hosts, sh=sh, log_path=log_path, only=only)
+        loaded, load_actions, hosts, sh=sh, log_path=log_path, only=only,
+        plan_drafts=[plan.draft for plan, _, _, _ in loaded] + [plan.draft for plan in retired])
+    for plan in retired:
+        _finish_retired(plan, log.read(log_path), log_path=log_path)
     if loaded:
         plan_tasks = {key: task for plan, tasks, _, _ in loaded
                       for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded),
@@ -1275,11 +1301,13 @@ def _checkout(plan_dir: Path, fetched: dict[Path, Exception | None], events: Seq
 
 
 def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
-                fetch: bool = True) -> tuple[list[tuple[Plan, dict[str, Task], Path, Path]], list[Action]]:
+                fetch: bool = True, retired: list[Plan] | None = None
+                ) -> tuple[list[tuple[Plan, dict[str, Task], Path, Path]], list[Action]]:
     """Load plans in order, skipping retirement and reporting failures without log notes.
 
     Reject duplicate drafts. With fetch, share one checkout fetch including its failure;
     without it, use the same plan/cut loading path without fetching or locating normal plans.
+    Append skipped retired plans to retired when supplied, still printing each draft.
     Return loaded (plan, tasks, directory, checkout) tuples and failed load actions.
     """
     loaded, actions, seen, fetched = [], [], {}, {}
@@ -1288,6 +1316,8 @@ def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
             checkout = _checkout(directory, fetched, events, sh=sh) if fetch else None
             plan, tasks = _load_plan(directory, events, checkout=checkout, sh=sh)
             if plan.retired:
+                if retired is not None:
+                    retired.append(plan)
                 print(f"retired {plan.draft}")
                 continue
             if plan.draft in seen:

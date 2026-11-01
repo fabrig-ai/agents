@@ -3667,6 +3667,84 @@ class MultiPlanTickTest(unittest.TestCase):
         self.assertEqual(self.out.getvalue().splitlines()[0], "retired one")
         self.assertEqual(units(self.fake), [drafts.unit("skeleton", "two/core")])
 
+    def retired_fabrig(self, *, landing="queue"):
+        directory = self.fabrig_plan(draft="retired", tasks=("a",))
+        path = directory / "plan.toml"
+        write(path, "retired = true\n" + path.read_text().replace(
+            'landing = "queue"', f'landing = "{landing}"'))
+        self.append(call_started("retire-last", "retire", "retired/retire"),
+                    call_ended("retire-last"),
+                    dict(ev="call.checked", call="retire-last", tip="checked-tip", outcome="green"),
+                    dict(ev="branch.ready", task="calls/retire-last", branch="calls/retire-last",
+                         tip="ready-tip"))
+        self.queue_records = [dict(ev="landed", ts="010", branch="calls/retire-last",
+                                   tip="ready-tip", main="main")]
+        return directory
+
+    def assert_retired_landing(self, *, active, landing="queue"):
+        retired = self.retired_fabrig(landing=landing)
+        directories = [retired]
+        if active:
+            directories.append(self.plan_dir("active", tasks=("a",)))
+            self.append(dict(ev="branch.landed", task="active/old", branch="active/old",
+                             queue_ts="020"))
+        else:
+            self.enterContext(patch.object(flow, "measure", side_effect=AssertionError("measured")))
+        designer.enlist(retired)
+        self.append(dict(ev="queue.landed", branch="hand/pushed", queue_ts="999", gate="gate"))
+        before = log.read()
+        with patch.object(dispatch, "_tick_loaded", wraps=dispatch._tick_loaded) as tick_loaded, \
+                patch.object(dispatch, "_merge_branch") as merge, \
+                patch.object(overlaps, "probe", wraps=overlaps.probe) as probe:
+            first = self.tick(*directories)
+            gained = log.read()[len(before):]
+            delivery = [entry for entry in gained if entry["ev"] in ("branch.landed", "call.finished")]
+            self.assertEqual([entry["ev"] for entry in delivery], ["branch.landed", "call.finished"])
+            self.assertEqual((delivery[0]["branch"], delivery[0]["queue_ts"]), ("calls/retire-last", "010"))
+            self.assertEqual({key: value for key, value in delivery[1].items() if key != "ts"},
+                             dict(ev="call.finished", call="retire-last", role="retire",
+                                  outcome="done", tip="checked-tip"))
+            count = len(log.read())
+            second = self.tick(*directories)
+            self.assertFalse(any(entry["ev"] in ("branch.landed", "call.finished")
+                                 for entry in log.read()[count:]))
+            self.assertEqual([call.args[0].draft for call in tick_loaded.call_args_list],
+                             ["active", "active"] if active else [])
+            self.assertTrue(all([entry[0].draft for entry in call.args[0]] ==
+                                (["active"] if active else []) for call in probe.call_args_list))
+            merge.assert_not_called()
+        self.assertEqual(self.queries()[0], ssh("fake@gate", ["fab", "queue", "log", "--since", ""]))
+        self.assertEqual(self.queries()[1], ssh("fake@gate", ["fab", "queue", "log", "--since", "010"]))
+        self.assertFalse(any(action.task.startswith("retired") for action in first + second))
+        self.assertFalse(any(entry["ev"] == "call.started" or entry["ev"] == "trunks.overlap"
+                             for entry in gained))
+        self.assertTrue(all(call.args[0].draft == "active" for call in self.starts.call_args_list))
+        self.assertTrue(all(call.args[0].startswith("active/") for call in self.collects.call_args_list))
+        self.lands.assert_not_called()
+        self.assertEqual(self.out.getvalue().count("retired retired\n"), 2)
+        if not active:
+            self.assertEqual([entry["ev"] for entry in gained], ["branch.landed", "call.finished"])
+            self.assertEqual(first + second, [])
+
+    def test_retired_landing_imports_and_finishes_beside_an_active_plan_once(self):
+        self.assert_retired_landing(active=True)
+
+    def test_retired_landing_imports_and_finishes_with_no_loaded_plan_once(self):
+        self.assert_retired_landing(active=False)
+
+    def test_retired_landing_imports_and_finishes_an_integration_plan(self):
+        self.assert_retired_landing(active=False, landing="integration")
+
+    def test_retired_landing_keeps_an_existing_finish(self):
+        directory = self.retired_fabrig()
+        self.append(dict(ev="branch.landed", task="calls/retire-last", branch="calls/retire-last",
+                         queue_ts="010", tip="ready-tip", main="main"),
+                    dict(ev="call.finished", call="retire-last", role="retire", outcome="done",
+                         tip="checked-tip"))
+        before = log.read()
+        self.assertEqual(self.tick(directory), [])
+        self.assertEqual(log.read(), before)
+
     def test_fetch_failure_is_shared_by_checkout_and_other_checkout_still_ticks(self):
         one, two, three = (self.plan_dir(draft, tasks=("a",)) for draft in ("one", "two", "three"))
         self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], lambda call:
@@ -4749,6 +4827,21 @@ class CheckoutFollowTest(unittest.TestCase):
         self.assertEqual(self.fake.argvs().count(detach), 2)
         self.assertEqual(self.fake.argvs().count(["git", "fetch", "origin"]), 2)
 
+    def test_load_plans_returns_retired_plans_only_through_the_optional_list(self):
+        retired = write_plan(self.home / "retired", "retired")
+        active = write_plan(self.home / "active", "active")
+        path = retired / "plan.toml"
+        write(path, "retired = true\n" + path.read_text())
+        skipped = []
+        out = io.StringIO()
+        with redirect_stdout(out):
+            loaded, failures = dispatch._load_plans([retired, active], [], sh=self.fake, retired=skipped)
+        self.assertEqual(failures, [])
+        self.assertEqual([entry[0].draft for entry in loaded], ["active"])
+        self.assertEqual([(entry.draft, entry.retired) for entry in skipped], [("retired", True)])
+        self.assertEqual(out.getvalue(), "retired retired\n")
+        self.assertEqual(self.fake.argvs().count(["git", "fetch", "origin"]), 1)
+
     def test_other_landings_still_follow_upstream(self):
         one = write_plan(self.home / "one", "one")
         self.fake.on(self.upstream, Result(0, "origin/one/integration\n"))
@@ -5405,6 +5498,61 @@ class CutOptionsFinishTest(unittest.TestCase):
         self.take()
         self.deliver.assert_called_once()
         self.assertEqual(log.read(self.path)[-1]["outcome"], "done")
+
+
+class RetiredFinishTest(unittest.TestCase):
+    def setUp(self):
+        self.home = self.enterContext(tmp_home())
+        self.path = self.home / "events.jsonl"
+        self.plan = replace(make_plan(part("core")), retired=True)
+        self.events = [call_started("retire", "retire", "draft/retire"), call_ended("retire")]
+        self.landing = dict(ev="branch.landed", branch="calls/retire", queue_ts="010")
+
+    def test_retired_finish_requires_its_retire_chain_and_a_queue_landing(self):
+        histories = {
+            "no landing": self.events,
+            "local landing": self.events + [dict(ev="branch.landed", branch="calls/retire")],
+            "other branch": self.events + [dict(self.landing, branch="calls/other")],
+            "other draft": [dict(self.events[0], subject="draft-other/retire"), self.events[1], self.landing],
+            "other role": [dict(self.events[0], role="answer"), self.events[1], self.landing],
+            "unfinished call": [self.events[0], self.landing],
+        }
+        for reason, events in histories.items():
+            with self.subTest(reason=reason):
+                dispatch._finish_retired(self.plan, events, log_path=self.path)
+                self.assertEqual(log.read(self.path), [])
+
+    def test_retired_finish_uses_latest_done_amend_and_its_latest_checked_tip(self):
+        self.events += [dict(ev="call.checked", call="retire", tip="root-tip"),
+                        call_started("amend", "amend", "draft/retire", amends="retire",
+                                     branch="calls/retire"), call_ended("amend"),
+                        dict(ev="call.checked", call="amend", tip="old-tip"),
+                        dict(ev="call.checked", call="amend", tip="latest-tip"), self.landing]
+        dispatch._finish_retired(self.plan, self.events, log_path=self.path)
+        self.assertEqual([{key: value for key, value in entry.items() if key != "ts"}
+                          for entry in log.read(self.path)],
+                         [dict(ev="call.finished", call="amend", role="retire", outcome="done",
+                               tip="latest-tip")])
+        self.assertEqual(log.read(), [])
+
+    def test_retired_finish_omits_tip_when_the_latest_call_has_no_check(self):
+        self.events += [dict(ev="call.checked", call="retire", tip="root-tip"),
+                        call_started("amend", "amend", "draft/retire", amends="retire",
+                                     branch="calls/retire"), call_ended("amend"), self.landing]
+        dispatch._finish_retired(self.plan, self.events, log_path=self.path)
+        finished = log.read(self.path)
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["call"], "amend")
+        self.assertNotIn("tip", finished[0])
+
+    def test_retired_finish_does_not_reopen_a_chain_finished_by_any_of_its_calls(self):
+        self.events += [call_started("amend", "amend", "draft/retire", amends="retire",
+                                     branch="calls/retire"), call_ended("amend"), self.landing]
+        for call in ("retire", "amend"):
+            with self.subTest(call=call):
+                events = self.events + [dict(ev="call.finished", call=call, outcome="failed")]
+                dispatch._finish_retired(self.plan, events, log_path=self.path)
+                self.assertEqual(log.read(self.path), [])
 
 
 class IntegrationDeliveryTest(unittest.TestCase):
