@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of trunk-overlaps: docs/design/fab.md 13.17 (drafts beside each
 # other) whole, report only. Every part is direct; its task specs are in

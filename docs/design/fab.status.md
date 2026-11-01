@@ -5,9 +5,14 @@
 
 ## Present
 
-- **Drafts beside each other** (13.17, 11-01): designed; the overlap probe,
-  its page line and the cut's `Drafts beside this one` are to be cut as
-  plan `docs/plan/trunk-overlaps` and built by fab's loop.
+- **Drafts beside each other** (13.17, 11-01): built by fab's loop as plan
+  `docs/plan/trunk-overlaps` (four tasks, landed 12:09-12:27Z): the overlap
+  probe (`fab/overlaps.py`, its cache, its call after every plan ticks), the
+  page's `overlaps` panel, and the cut brief's `Drafts beside this one`.
+  Untried live: no integration plan with `ready` runs yet, so no
+  `trunks.overlap` has been logged. Retired by hand: its retire call's brief
+  exceeds `BRIEF_LIMIT` (fab.md alone is ~216k characters), as
+  `retire_brief` says such a plan is.
 - **Reds reach their owners** (11-01; the user, after the night of 10-31,
   when every after-landing red and a hand-pushed rejection were handled by
   sessions noticing them by chance). Built and wired into the tick:
