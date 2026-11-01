@@ -28,6 +28,23 @@ def checked(n=1, outcome="done", tip="tip"):
 
 
 class IntegrationTest(unittest.TestCase):
+    def test_trunk_landed_requires_its_queue_landing(self):
+        with tmp_home():
+            self.assertFalse(integration.trunk_landed(PLAN, []))
+            ignored = [merged(), merged(task="demo/integration"),
+                       dict(ev="branch.landed", task="demo/a", queue_ts="task-landed"),
+                       dict(ev="branch.landed", task="other/integration", queue_ts="other-landed"),
+                       dict(ev="branch.rejected", task="demo/integration", queue_ts="rejected"),
+                       dict(ev="branch.ready", task="demo/integration", queue_ts="ready")]
+            for event in ignored:
+                with self.subTest(event=event):
+                    self.assertFalse(integration.trunk_landed(PLAN, [event]))
+            for queue_ts in ("landed", "", None):
+                with self.subTest(queue_ts=queue_ts):
+                    landed = dict(ev="branch.landed", task="demo/integration", queue_ts=queue_ts)
+                    self.assertTrue(integration.trunk_landed(PLAN, [*ignored, landed, *ignored]))
+                    self.assertIsNone(integration.queue_step(PLAN, [landed], "tip"))
+
     def test_red_tasks_do_not_hold_the_end_check_or_appear_as_pending_work(self):
         red = replace(TASK, id="demo/red-1", kind="red", part="after-landing", path="")
         tasks = {TASK.id: TASK, red.id: red}

@@ -34,6 +34,17 @@ CATCH_AFTER = 30  # minutes since the last catch-up (or first task merge) before
 MID_WITHOUT = ("fuzzy",)  # a check along the way runs the end check's steps but these
 
 
+def trunk_landed(plan: Plan, events: Sequence[dict]) -> bool:
+    """Whether the queue logged this draft's integration trunk landed on main.
+
+    Only branch.landed for <draft>/integration carrying queue_ts counts; merges
+    into the trunk and its landed tasks do not (docs/design/fab.md, 13.17).
+    """
+    return any(event.get("ev") == "branch.landed"
+               and event.get("task") == f"{plan.draft}/integration" and "queue_ts" in event
+               for event in events)
+
+
 def trunk_tip(plan: Plan, events: Sequence[dict]) -> str | None:
     """The main of the last branch.landed into this plan's trunk, or None."""
     return next((event.get("main") for event in reversed(events)
@@ -278,7 +289,7 @@ def queue_step(plan: Plan, events: Sequence[dict], tip: str) -> Step | None:
     that check has started, ready again. Otherwise the queue has it: wait."""
     subject = f"{plan.draft}/integration"
     mine = [(position, event) for position, event in enumerate(events) if event.get("task") == subject]
-    if any(event.get("ev") == "branch.landed" and "queue_ts" in event for _, event in mine):
+    if trunk_landed(plan, events):
         return None
     rejections = [(position, event) for position, event in mine
                   if event.get("ev") == "branch.rejected" and "queue_ts" in event]
