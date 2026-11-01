@@ -2,6 +2,7 @@ import copy
 import io
 import json
 import os
+import re
 import tempfile
 import threading
 import unittest
@@ -184,9 +185,9 @@ class SnapshotTest(unittest.TestCase):
             "draft": {"runs_in_flight": 1, "landed_today": 1, "merged_today": 2},
         })
         page = serve.render(current)
-        self.assertIn("Landed on main: today</dt><dd>2", page)
-        self.assertIn("Merged into a trunk: today</dt><dd>3", page)
-        self.assertIn("Merged today</dt><dd>2", page)
+        self.assertIn('<div class="label">Landed on main today</div><div class="value">2</div>', page)
+        self.assertIn('<div class="label">Merged into a trunk today</div><div class="value">3</div>', page)
+        self.assertIn('<td class="num">1</td><td class="num">2</td><td class="num">1</td>', page)
 
     def test_serve_drafts_are_bounded_public_names(self):
         valid = ["a", "release-1.2", "a" * 64, "other"]
@@ -248,18 +249,145 @@ class SnapshotTest(unittest.TestCase):
         self.assertIn("&lt;host &amp; &quot;name&quot;&gt;", page)
         self.assertIn('<title>fab status</title>', page)
         self.assertIn('<meta http-equiv="refresh" content="30">', page)
-        self.assertIn("prefers-color-scheme: dark", page)
+        self.assertIn("prefers-color-scheme:dark", page)
         self.assertIn("width=device-width", page)
         self.assertNotIn("<script", page)
-        for title in ("Now", "Waiting on the user", "Today", "Drafts"):
+        for title in ("Drafts", "Today", "In flight", "Waiting on the user"):
             self.assertIn(f"<h2>{title}</h2>", page)
         for age, expected in ((42, "42 s"), (420, "7 min"), (10800, "3 h"), (None, "none")):
             current["last_event_age_s"] = age
             current["waiting_on_user"]["oldest_age_s"] = age
-            self.assertIn(f"<dd>{expected}</dd>", serve.render(current))
+            rendered = serve.render(current)
+            last_event = f"last event {expected} ago" if age is not None else "no events yet"
+            self.assertIn(f'Updated 00:30 UTC · {last_event}</span>', rendered)
+            self.assertIn(f'<div class="sub">oldest {expected}</div>', rendered)
+            self.assertIn(f'<p class="facts">Oldest: {expected}</p>', rendered)
         failure = serve.render({"updated": "now", "log": "unreadable"})
-        self.assertIn("Log unreadable", failure)
+        self.assertIn('<p class="empty">The event log is unreadable.</p>', failure)
         self.assertNotIn("Runs in flight", failure)
+
+
+class RenderTest(unittest.TestCase):
+    def setUp(self):
+        self.current = serve.snapshot([], NOW, [])
+        self.current.update({
+            "last_event_age_s": 420,
+            "runs_in_flight": {"total": 5, "by_host": {"hetzner6": 2, "hetzner9": 3}},
+            "calls_in_flight": {"total": 4, "by_role": {"answer": 1, "review": 3}},
+            "waiting_on_user": {"asks": 3, "by_kind": {"call": 1, "parked": 2}, "oldest_age_s": 10800},
+            "landed": {"last_hour": 2, "today": 7},
+            "merged": {"last_hour": 3, "today": 9},
+            "rejected_today": 4,
+            "runs_ended_today": {"done": 11, "question": 2, "infra": 3, "failed": 4, "other": 5},
+            "weight_today": {"codex_m": 12.3, "claude_m": 4.0},
+            "drafts": {
+                "active": {"runs_in_flight": 5, "merged_today": 6, "landed_today": 3},
+                "idle": {"runs_in_flight": 0, "merged_today": 3, "landed_today": 4},
+            },
+        })
+
+    def test_serve_render_layout_tiles_and_header(self):
+        before = copy.deepcopy(self.current)
+        page = serve.render(self.current)
+        self.assertEqual(self.current, before)
+        self.assertIn('<body><main><header><h1>Fabrig status</h1>', page)
+        self.assertIn('<span class="meta">Updated 00:30 UTC · last event 7 min ago</span></header>', page)
+        self.assertEqual(re.findall(r'<h2>(.*?)</h2>', page),
+                         ["Drafts", "Today", "In flight", "Waiting on the user"])
+        self.assertEqual(page.count('<div class="panel">'), 2)
+        self.assertEqual(page.count('<div class="cards">'), 2)
+        self.assertEqual(page.count('<div class="card">'), 5)
+        self.assertEqual(page.count('<div class="scroll"><table>'), 7)
+        self.assertEqual(re.findall(r'<div class="tile">(.*?)</div></div>', page), [
+            '<div class="label">Runs in flight</div><div class="value">5</div>'
+            '<div class="sub">hetzner6 2 · hetzner9 3',
+            '<div class="label">Calls in flight</div><div class="value">4</div>'
+            '<div class="sub">answer 1 · review 3',
+            '<div class="label">Waiting on the user</div><div class="value">3</div>'
+            '<div class="sub">oldest 3 h',
+            '<div class="label">Landed on main today</div><div class="value">7</div>'
+            '<div class="sub">last hour 2',
+            '<div class="label">Merged into a trunk today</div><div class="value">9</div>'
+            '<div class="sub">last hour 3',
+            '<div class="label">Weight today, Codex</div><div class="value">12.3M',
+            '<div class="label">Weight today, Claude</div><div class="value">4.0M',
+        ])
+        self.assertIn('main{max-width:1280px;', page)
+        self.assertIn('<style>' + serve.STYLE + '</style>', page)
+        self.assertTrue(page.endswith('</footer></main></body></html>'))
+        self.assertIn("<footer>Counts only, from fab's event log on hel8; refreshes every 30 s. "
+                      'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>', page)
+
+    def test_serve_render_drafts_and_outcome_badges(self):
+        page = serve.render(self.current)
+        self.assertIn('<h2>Drafts</h2><div class="panel"><div class="scroll"><table><thead><tr>'
+                      '<th>Draft</th><th>State</th><th class="num">Runs in flight</th>'
+                      '<th class="num">Merged today</th><th class="num">Landed today</th>', page)
+        self.assertIn('<tr><td>active</td><td><span class="badge info"><i></i>running</span></td>'
+                      '<td class="num">5</td><td class="num">6</td><td class="num">3</td></tr>', page)
+        self.assertIn('<tr><td>idle</td><td><span class="badge neutral"><i></i>idle</span></td>'
+                      '<td class="num">0</td><td class="num">3</td><td class="num">4</td></tr>', page)
+        for outcome, state, count in (("done", "good", 11), ("question", "warning", 2),
+                                      ("infra", "neutral", 3), ("failed", "critical", 4),
+                                      ("other", "neutral", 5)):
+            with self.subTest(outcome=outcome):
+                self.assertIn(f'<tr><td><span class="badge {state}"><i></i>{outcome}</span></td>'
+                              f'<td class="num">{count}</td></tr>', page)
+
+    def test_serve_render_tables_keep_counts_and_numeric_columns(self):
+        page = serve.render(self.current)
+        self.assertIn('<h3>Landings</h3><div class="scroll"><table><thead><tr><th></th>'
+                      '<th class="num">Last hour</th><th class="num">Today</th>', page)
+        for label, hour, today in (("Landed on main", 2, 7), ("Merged into a trunk", 3, 9),
+                                   ("Rejected", "–", 4)):
+            self.assertIn(f'<tr><td>{label}</td><td class="num">{hour}</td>'
+                          f'<td class="num">{today}</td></tr>', page)
+        for title, first, second in (("Weight", "", "Millions"),
+                                     ("Codex runs by host", "Host", "Runs"),
+                                     ("Claude calls by role", "Role", "Calls")):
+            self.assertIn(f'<h3>{title}</h3><div class="scroll"><table><thead><tr><th>{first}</th>'
+                          f'<th class="num">{second}</th>', page)
+        self.assertIn('<h2>Waiting on the user</h2><div class="panel"><div class="scroll"><table>'
+                      '<thead><tr><th>Kind</th><th class="num">Open</th>', page)
+        for label, value in (("Codex", "12.3"), ("Claude", "4.0"), ("hetzner6", 2), ("hetzner9", 3),
+                             ("answer", 1), ("review", 3), ("Call questions", 1), ("Parked chains", 2)):
+            self.assertIn(f'<tr><td>{label}</td><td class="num">{value}</td></tr>', page)
+        self.assertIn('<p class="facts">Oldest: 3 h</p>', page)
+
+    def test_serve_render_empty_states(self):
+        page = serve.render(serve.snapshot([], NOW, []))
+        self.assertIn('Updated 00:30 UTC · no events yet</span>', page)
+        self.assertIn('<h2>Drafts</h2><div class="panel">'
+                      '<p class="empty">No draft active today.</p></div>', page)
+        for title in ("Codex runs by host", "Claude calls by role"):
+            self.assertIn(f'<div class="card"><h3>{title}</h3><p class="empty">None.</p></div>', page)
+        self.assertIn('<div class="label">Runs in flight</div><div class="value">0</div></div>', page)
+        self.assertIn('<div class="label">Calls in flight</div><div class="value">0</div></div>', page)
+        self.assertIn('<div class="sub">oldest none</div>', page)
+        self.assertIn('<p class="facts">Oldest: none</p>', page)
+        self.assertEqual(page.count('<span class="badge '), 5)
+
+    def test_serve_render_unreadable_log_keeps_header_and_footer(self):
+        page = serve.render({"updated": "2026-11-01T00:30:00.000Z", "log": "unreadable"})
+        self.assertIn('<header><h1>Fabrig status</h1><span class="meta">Updated 00:30 UTC · '
+                      'no events yet</span></header><p class="empty">The event log is unreadable.</p>'
+                      '<footer>', page)
+        self.assertIn('<a href="/v0.1.0.html">v0.1.0</a>', page)
+        self.assertIn('<meta http-equiv="refresh" content="30">', page)
+        for markup in ('<div class="tiles">', '<h2>', '<table>', '<div class="card">'):
+            self.assertNotIn(markup, page)
+
+    def test_serve_render_escapes_all_snapshot_labels(self):
+        label = '<label & "quoted">'
+        self.current["runs_in_flight"]["by_host"] = {label: 5}
+        self.current["calls_in_flight"]["by_role"] = {label: 4}
+        self.current["drafts"] = {label: {"runs_in_flight": 1, "merged_today": 2, "landed_today": 3}}
+        page = serve.render(self.current)
+        self.assertNotIn(label, page)
+        self.assertEqual(page.count('&lt;label &amp; &quot;quoted&quot;&gt;'), 5)
+        failure = serve.render({"updated": label, "log": "unreadable"})
+        self.assertNotIn(label, failure)
+        self.assertIn('&lt;label &amp; &quot;quoted&quot;&gt;', failure)
 
 
 class ServerTest(unittest.TestCase):
@@ -331,7 +459,7 @@ class ServerTest(unittest.TestCase):
             self.assertEqual(current["log"], "unreadable")
             code, _, body = self.request(port, "/")
             self.assertEqual(code, 200)
-            self.assertIn("Log unreadable", body)
+            self.assertIn("The event log is unreadable.", body)
             self.assertNotIn(str(path), body)
             self.assertEqual(self.request(port, "/healthz")[::2], (200, "ok"))
 

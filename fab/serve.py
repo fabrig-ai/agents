@@ -16,6 +16,53 @@ from fab import accounting, calls, channel, hosts as machines, log
 DRAFT = re.compile(r"[a-z0-9][a-z0-9.-]{0,63}")
 OUTCOMES = ("done", "question", "infra", "failed", "other")
 
+STYLE = """:root{color-scheme:light;--page:#f9f9f7;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#6f6d68;
+--grid:#e1e0d9;--axis:#c3c2b7;--ring:rgba(11,11,11,.10);--run:#2a78d6;--wait:#eb6834;--info:#2a78d6;
+--good:#0ca30c;--warning:#fab219;--critical:#d03b3b;--neutral:#898781;--code:#f0efec}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){color-scheme:dark;--page:#0d0d0d;
+--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;--muted:#9a988f;--grid:#2c2c2a;--axis:#383835;
+--ring:rgba(255,255,255,.10);--run:#3987e5;--wait:#d95926;--info:#3987e5;--code:#262624}}
+:root[data-theme="dark"]{color-scheme:dark;--page:#0d0d0d;--surface:#1a1a19;--ink:#f0efec;--ink2:#c3c2b7;
+--muted:#9a988f;--grid:#2c2c2a;--axis:#383835;--ring:rgba(255,255,255,.10);--run:#3987e5;--wait:#d95926;
+--info:#3987e5;--code:#262624}
+*{box-sizing:border-box}
+body{margin:0;background:var(--page);color:var(--ink);font:14px/1.45 system-ui,-apple-system,"Segoe UI",sans-serif}
+main{max-width:1280px;margin:0 auto;padding:20px 16px 48px}
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:6px 16px;margin-bottom:16px}
+h1{font-size:22px;margin:0;font-weight:650}
+h2{font-size:17px;margin:32px 0 10px;font-weight:650}
+h3{font-size:14px;margin:20px 0 8px;font-weight:650}
+h4{font-size:12px;margin:12px 0 4px;color:var(--ink2);font-weight:600;text-transform:uppercase;letter-spacing:.04em}
+p{margin:6px 0}
+.meta,.muted,.empty{color:var(--ink2)}
+.empty{font-style:italic}
+code{background:var(--code);padding:0 4px;border-radius:4px;font-size:12.5px;overflow-wrap:anywhere}
+.tiles{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:10px}
+.tile,.card,.panel{background:var(--surface);border:1px solid var(--ring);border-radius:10px}
+.tile{padding:12px 14px}
+.tile .label{color:var(--ink2);font-size:12.5px}
+.tile .value{font-size:28px;font-weight:650;margin:2px 0}
+.tile .sub{color:var(--ink2);font-size:12px}
+.panel{padding:4px 14px 12px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:10px}
+.card{padding:4px 14px 12px}
+.card ul{margin:2px 0;padding-left:0;list-style:none}
+.card li{margin:3px 0}
+.facts{color:var(--ink2);font-size:12.5px}
+.scroll{overflow-x:auto}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th,td{text-align:left;padding:6px 12px 6px 0;border-bottom:1px solid var(--grid);vertical-align:top;
+white-space:nowrap}
+td.wrap{white-space:normal;min-width:220px}
+th{color:var(--ink2);font-weight:600;font-size:12.5px;white-space:nowrap}
+td.num,th.num{text-align:right}
+.badge{display:inline-flex;align-items:center;gap:5px;white-space:nowrap;font-size:12px;color:var(--ink);
+border:1px solid var(--ring);border-radius:999px;padding:0 8px 0 6px;line-height:20px}
+.badge i{width:8px;height:8px;border-radius:50%;background:var(--neutral)}
+.badge.good i{background:var(--good)}.badge.warning i{background:var(--warning)}
+.badge.critical i{background:var(--critical)}.badge.info i{background:var(--info)}
+footer{margin-top:36px;color:var(--ink2);font-size:12.5px}"""
+
 
 def _stamp(value: object) -> datetime | None:
     if not isinstance(value, str):
@@ -148,53 +195,98 @@ def render(snapshot: dict) -> str:
     def text(value: object) -> str:
         return html.escape(str(value))
 
-    def rows(figures) -> str:
-        return "<dl>" + "".join(f"<dt>{text(label)}</dt><dd>{text(value)}</dd>"
-                               for label, value in figures) + "</dl>"
+    def badge(label: str, state: str) -> str:
+        return f'<span class="badge {text(state)}"><i></i>{text(label)}</span>'
 
-    def section(title: str, body: str) -> str:
-        return f"<section><h2>{text(title)}</h2>{body}</section>"
+    def tile(label: str, value: object, sub: str = "") -> str:
+        return (f'<div class="tile"><div class="label">{text(label)}</div>'
+                f'<div class="value">{text(value)}</div>'
+                + (f'<div class="sub">{text(sub)}</div>' if sub else "") + "</div>")
 
-    content = "<p>Log unreadable</p>"
+    def table(labels: tuple[str, ...], figures, *, badges: dict[str, str] | None = None) -> str:
+        headings = []
+        for index, label in enumerate(labels):
+            headings.append(f'<th class="num">{text(label)}</th>' if index else f"<th>{text(label)}</th>")
+        rows = []
+        for values in figures:
+            cells = []
+            for index, value in enumerate(values):
+                cell = badge(value, badges[value]) if index == 0 and badges else text(value)
+                cells.append(f'<td class="num">{cell}</td>' if index else f"<td>{cell}</td>")
+            rows.append("<tr>" + "".join(cells) + "</tr>")
+        return ('<div class="scroll"><table><thead><tr>' + "".join(headings) + '</tr></thead><tbody>'
+                + "".join(rows) + '</tbody></table></div>')
+
+    def card(title: str, body: str) -> str:
+        return f'<div class="card"><h3>{text(title)}</h3>{body}</div>'
+
+    updated = _stamp(snapshot["updated"])
+    clock = updated.strftime("%H:%M UTC") if updated else snapshot["updated"]
+    age = snapshot.get("last_event_age_s")
+    last_event = f"last event {_age(age)} ago" if age is not None else "no events yet"
+    header = ('<header><h1>Fabrig status</h1><span class="meta">'
+              + text(f"Updated {clock} · {last_event}") + '</span></header>')
+    content = '<p class="empty">The event log is unreadable.</p>'
     if snapshot.get("log") == "ok":
         runs, active_calls = snapshot["runs_in_flight"], snapshot["calls_in_flight"]
         waiting = snapshot["waiting_on_user"]
-        content = section("Now", rows([
-            ("Last event", _age(snapshot["last_event_age_s"])),
-            ("Runs in flight", runs["total"]), *runs["by_host"].items(),
-            ("Calls in flight", active_calls["total"]), *active_calls["by_role"].items(),
-        ]))
-        content += section("Waiting on the user", rows([
-            ("Open asks", waiting["asks"]),
-            ("Calls", waiting["by_kind"]["call"]), ("Parked calls", waiting["by_kind"]["parked"]),
-            ("Oldest", _age(waiting["oldest_age_s"])),
-        ]))
-        content += section("Today", rows([
-            ("Landed on main: last hour", snapshot["landed"]["last_hour"]),
-            ("Landed on main: today", snapshot["landed"]["today"]),
-            ("Merged into a trunk: last hour", snapshot["merged"]["last_hour"]),
-            ("Merged into a trunk: today", snapshot["merged"]["today"]),
-            ("Rejected", snapshot["rejected_today"]),
-            *((f"Runs ended: {outcome}", snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES),
-            ("Codex weight (millions)", f'{snapshot["weight_today"]["codex_m"]:.1f}'),
-            ("Claude weight (millions)", f'{snapshot["weight_today"]["claude_m"]:.1f}'),
-        ]))
-        content += section("Drafts", "".join(
-            f"<h3>{text(name)}</h3>" + rows([("Runs in flight", counts["runs_in_flight"]),
-                                            ("Landed today", counts["landed_today"]),
-                                            ("Merged today", counts["merged_today"])])
-            for name, counts in snapshot["drafts"].items()) or "<p>none</p>")
-    return """<!doctype html>
+        weights = snapshot["weight_today"]
+        content = '<div class="tiles">' + "".join([
+            tile("Runs in flight", runs["total"],
+                 " · ".join(f"{host} {count}" for host, count in runs["by_host"].items())),
+            tile("Calls in flight", active_calls["total"],
+                 " · ".join(f"{role} {count}" for role, count in active_calls["by_role"].items())),
+            tile("Waiting on the user", waiting["asks"], f'oldest {_age(waiting["oldest_age_s"])}'),
+            tile("Landed on main today", snapshot["landed"]["today"],
+                 f'last hour {snapshot["landed"]["last_hour"]}'),
+            tile("Merged into a trunk today", snapshot["merged"]["today"],
+                 f'last hour {snapshot["merged"]["last_hour"]}'),
+            tile("Weight today, Codex", f'{weights["codex_m"]:.1f}M'),
+            tile("Weight today, Claude", f'{weights["claude_m"]:.1f}M'),
+        ]) + '</div>'
+        drafts = []
+        for name, counts in snapshot["drafts"].items():
+            state = badge("running", "info") if counts["runs_in_flight"] else badge("idle", "neutral")
+            drafts.append(f'<tr><td>{text(name)}</td><td>{state}</td>'
+                          f'<td class="num">{text(counts["runs_in_flight"])}</td>'
+                          f'<td class="num">{text(counts["merged_today"])}</td>'
+                          f'<td class="num">{text(counts["landed_today"])}</td></tr>')
+        draft_table = ('<div class="scroll"><table><thead><tr><th>Draft</th><th>State</th>'
+                       '<th class="num">Runs in flight</th><th class="num">Merged today</th>'
+                       '<th class="num">Landed today</th></tr></thead><tbody>'
+                       + "".join(drafts) + '</tbody></table></div>')
+        content += ('<h2>Drafts</h2><div class="panel">'
+                    + (draft_table if drafts else '<p class="empty">No draft active today.</p>') + '</div>')
+        ended = [(outcome, snapshot["runs_ended_today"][outcome]) for outcome in OUTCOMES]
+        content += '<h2>Today</h2><div class="cards">' + "".join([
+            card("Runs ended", table(("Outcome", "Runs"), ended,
+                                    badges={"done": "good", "question": "warning", "infra": "neutral",
+                                            "failed": "critical", "other": "neutral"})),
+            card("Landings", table(("", "Last hour", "Today"), [
+                ("Landed on main", snapshot["landed"]["last_hour"], snapshot["landed"]["today"]),
+                ("Merged into a trunk", snapshot["merged"]["last_hour"], snapshot["merged"]["today"]),
+                ("Rejected", "–", snapshot["rejected_today"]),
+            ])),
+            card("Weight", table(("", "Millions"), [
+                ("Codex", f'{weights["codex_m"]:.1f}'), ("Claude", f'{weights["claude_m"]:.1f}'),
+            ])),
+        ]) + '</div>'
+        content += '<h2>In flight</h2><div class="cards">' + "".join([
+            card("Codex runs by host", table(("Host", "Runs"), runs["by_host"].items())
+                 if runs["by_host"] else '<p class="empty">None.</p>'),
+            card("Claude calls by role", table(("Role", "Calls"), active_calls["by_role"].items())
+                 if active_calls["by_role"] else '<p class="empty">None.</p>'),
+        ]) + '</div>'
+        content += ('<h2>Waiting on the user</h2><div class="panel">'
+                    + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
+                                             ("Parked chains", waiting["by_kind"]["parked"])])
+                    + f'<p class="facts">{text("Oldest: " + _age(waiting["oldest_age_s"]))}</p></div>')
+    footer = ("<footer>Counts only, from fab's event log on hel8; refreshes every 30 s. "
+              'Release page: <a href="/v0.1.0.html">v0.1.0</a>.</footer>')
+    return ("""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="refresh" content="30"><title>fab status</title>
-<style>
-:root { color-scheme: light dark; background: #fafafa; color: #222; }
-body { font: 1rem/1.5 system-ui, sans-serif; max-width: 42rem; margin: auto; padding: 1rem; }
-section { border-top: 1px solid #888; margin-top: 1.5rem; }
-dl { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: .4rem 1rem; }
-dt, h3 { overflow-wrap: anywhere; } dd { margin: 0; font-variant-numeric: tabular-nums; }
-@media (prefers-color-scheme: dark) { :root { background: #181818; color: #eee; } }
-</style></head><body><h1>fab status</h1>""" + f"<p>Updated {text(snapshot['updated'])}</p>{content}</body></html>"
+<style>""" + STYLE + '</style></head><body><main>' + header + content + footer + '</main></body></html>')
 
 
 class _Request(BaseHTTPRequestHandler):

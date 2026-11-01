@@ -1807,6 +1807,7 @@ login that still works reused across them before more are signed in.
   the prefix before this public classification. No task, run, call or login
   ids, branches, shas, paths, question or answer text, notes, reports or
   holders in HTML or JSON.
+- The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
   refresh every 30 seconds, phone width and light and dark colours. Now,
   Waiting on the user, Today and Drafts; ages in seconds, minutes or hours.
