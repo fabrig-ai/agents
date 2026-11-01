@@ -1182,9 +1182,11 @@ login that still works reused across them before more are signed in.
   app-server (`account/read`, `account/rateLimits/read`: the account, the
   plan, the weekly window's percent used) or `claude auth status`. A lent
   machine login is checked in place, on its machine; a free one is lent to
-  hel8 in a private directory, checked with a real request (a Claude call
-  of a few tokens; Codex refreshes its token) and returned, so an expired
-  login says so. The weekly percent is the signal for a swap.
+  hel8 in a private directory and returned. Every check makes a real
+  request (a Claude call of a few tokens; Codex refreshes its token), so an
+  expired login says so and a swapped Claude login does not report the
+  account its predecessor left cached (11-01: three swapped builders said
+  gmail until their first call). The weekly percent is the signal for a swap.
 - **Left out:** the old tools' pending journals and backups, QA's waiting
   queue, reservations and admission caps (the dispatcher decides who gets a
   login, as it does places), and checks of `chatgpt` records, which only a

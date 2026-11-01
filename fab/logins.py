@@ -302,15 +302,16 @@ rm -rf -- {shlex.quote(login.path)}
 
     def check(self, name: str) -> dict:
         """The account and weekly use of login name, by its product, recorded as login.checked.
-        A machine login lent to its machine is checked there in place; a free one is lent to
-        this machine in a private directory, checked with a real request (which may refresh
-        it) and returned. A run's login is not checked."""
+        Every check makes a real request (which may refresh the login): `claude auth status`
+        alone answers from the account a previous login left cached. A machine login lent to
+        its machine is checked there in place; a free one is lent to this machine in a private
+        directory and returned. A run's login is not checked."""
         login = self.login(name)
         spec = KINDS[login.kind]
         if login.kind not in ("codex", "claude", "claude-box"):
             raise Refused(f"a {login.kind} login has no check; its runs show whether it works")
         if login.holder is not None and login.host is not None and login.path == spec.machine:
-            found = self._account(login.host, login.kind)
+            found = self._account(login.host, login.kind, validate=True)
         elif login.free:
             scratch = log.home() / "logins-check" / name
             path = str(scratch / spec.item) if login.kind != "claude-box" else str(scratch)

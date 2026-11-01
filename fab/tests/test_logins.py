@@ -215,7 +215,7 @@ class LoginsTest(unittest.TestCase):
         self.secret("b1", ".codex/auth.json")
         self.shelf.capture("b1", "codex")
         self.assertEqual(self.shelf.check("codex-1")["used"], 40)
-        self.assertEqual(self.accounts[-1][-1], "bash -lc 'fab logins account codex'")
+        self.assertEqual(self.accounts[-1][-1], "bash -lc 'fab logins account codex --validate'")
         login = self.shelf.login("codex-1")
         self.assertEqual((login.email, login.plan, login.used), ("a@example.invalid", "pro", 40))
         self.shelf.give_back("codex-1")
