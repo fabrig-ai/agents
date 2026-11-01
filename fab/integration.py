@@ -27,6 +27,11 @@ class Step:
     detail: str
 
 
+MID_EVERY = 10  # task merges since the last check that call for a check along the way (13.12)
+MID_AFTER = 45  # minutes since the last check (or the first merge) that call for one, with a merge since
+MID_WITHOUT = ("fuzzy",)  # a check along the way runs the end check's steps but these
+
+
 def trunk_tip(plan: Plan, events: Sequence[dict]) -> str | None:
     """The main of the last branch.landed into this plan's trunk, or None."""
     return next((event.get("main") for event in reversed(events)
@@ -55,34 +60,47 @@ def _checks(plan: Plan, events: Sequence[dict]) -> list[dict]:
             and event.get("kind") == "check" and event.get("task") == f"{plan.draft}/integration"]
 
 
-def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str]) -> dict[str, Task]:
+def repair_tasks(plan: Plan, events: Sequence[dict], reports: Mapping[str, str],
+                 plan_tasks: Mapping[str, Task] | None = None) -> dict[str, Task]:
     """One integration repair per failed check, in log order, quoting at most 120 report lines.
 
     Repairs have no spec file and may change any file. Their acceptance requires the
     failed step green on the trunk with the change, running the narrowest checks first.
-    An answer to a repair's question (a question.answered with `answer`) has no spec to go
+    A repair of a check along the way (mid) lists, given plan_tasks, the tasks not merged when it
+    started and their files, to leave what they own. An answer to a repair's question (a question.answered with `answer`) has no spec to go
     into, so it is folded into the body's Answers section, in log order.
     """
     if plan.landing != "integration":
         return {}
-    tasks = {}
+    repairs = {}
     for check in _checks(plan, events):
         if check["outcome"] != "failed":
             continue
-        identifier = f"{plan.draft}/repair-{len(tasks) + 1}"
+        identifier = f"{plan.draft}/repair-{len(repairs) + 1}"
         report = "\n".join(reports.get(check["run"], "").splitlines()[:120])
         body = (f"# Repair the integration check\n\n"
                 f"- Tip: `{check['base']}`\n- Run: `{check['run']}`\n\n"
                 f"{report}\n\n## Acceptance\n\n"
                 "The failing step must be green on the trunk with this change. "
                 "Run the narrowest checks first, then the failing step itself.\n")
+        if check.get("mid") and plan_tasks:
+            landed = {event.get("task") for event in events if event.get("ev") == "branch.landed"
+                      and event.get("ts", "") <= check.get("ts", "")}
+            pending = [task for name, task in plan_tasks.items()
+                       if name not in landed and task.kind != "repair"]
+            if pending:
+                body += ("\n## Not merged yet\n\nThis was a check along the way: these tasks had not "
+                         "merged. Leave a red that lies in what one of them owns, or that one of them "
+                         "will fix by its spec; repair the rest.\n\n"
+                         + "\n".join(f"- {task.id}: {', '.join(task.files) or '(no files named)'}"
+                                      for task in pending) + "\n")
         answers = [event["answer"] for event in events if event.get("ev") == "question.answered"
                    and event.get("task") == identifier and event.get("answer")]
         if answers:
             body += "\n## Answers\n\n" + "\n".join(f"- {answer}" for answer in answers) + "\n"
-        tasks[identifier] = Task(identifier, "integration", "repair", plan.repo, (),
+        repairs[identifier] = Task(identifier, "integration", "repair", plan.repo, (),
                                  ("**",), "high", 20, body, "")
-    return tasks
+    return repairs
 
 
 def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> dict[str, Task]:
@@ -96,7 +114,7 @@ def with_repairs(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) 
                 reports[event["run"]] = (log.home() / "runs" / event["run"] / "report.md").read_text()
             except (OSError, UnicodeError):
                 reports[event["run"]] = ""
-    return {**tasks, **repair_tasks(plan, events, reports)}
+    return {**tasks, **repair_tasks(plan, events, reports, tasks)}
 
 
 def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> Step | None:
@@ -116,20 +134,50 @@ def next_step(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict]) -> 
     if tip is None or _first_merge(plan, events) is None or any(
             check["outcome"] is None for check in checks):
         return None
-    if sum(check["outcome"] == "failed" for check in checks) >= 3:
+    if sum(check["outcome"] == "failed" and not check.get("mid") for check in checks) >= 3:
         return Step("stop", tip, "red 3 times; needs judgement")
-    if any(view.status != "landed" for view in state.fold(tasks, events).values()):
-        return None
+    views = state.fold(tasks, events)
+    if any(view.status != "landed" for view in views.values()):
+        return _mid_step(plan, tasks, views, events, tip, checks)
     if any(event.get("ev") == "branch.rejected" and event.get("step") == CATCH_UP
            and event.get("task") == f"{plan.draft}/integration" and event.get("tip") == tip
            for event in events):
         return Step("stop", tip, "main conflicts with the trunk; needs judgement")
-    checked = next((check for check in reversed(checks) if check.get("base") == tip), None)
+    checked = next((check for check in reversed(checks) if check.get("base") == tip and not check.get("mid")), None)
     if checked is None:
         return Step("check", tip, tip)
     if checked["outcome"] == "done" and plan.ready:
         return queue_step(plan, events, tip)
     return None
+
+
+def _mid_step(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
+              events: Sequence[dict], tip: str, checks: Sequence[dict]) -> Step | None:
+    """A check along the way (13.12) while tasks remain: once MID_EVERY task merges came since
+    the last check, or MID_AFTER minutes passed since it (or since the first merge) with one
+    merge since; never while a repair is open or for a tip already checked. Its reds never count
+    toward the three that stop a plan. Now is the last event's time. Pure."""
+    if any(task.kind == "repair" and views[identifier].status != "landed"
+           for identifier, task in tasks.items() if identifier in views):
+        return None
+    if any(check.get("base") == tip for check in checks):
+        return None
+    last = checks[-1] if checks else None
+    since = last.get("ts", "") if last else next(
+        (event.get("ts", "") for event in events if event.get("ev") == "branch.landed"
+         and event.get("into") == plan.trunk and str(event.get("task", "")).startswith(f"{plan.draft}/")), "")
+    merges = sum(1 for event in events if event.get("ev") == "branch.landed" and event.get("into") == plan.trunk
+                 and event.get("task") in tasks and (last is None or event.get("ts", "") > since))
+    now = max((event.get("ts", "") for event in events), default=since)
+    minutes = (_time(now) - _time(since)).total_seconds() / 60 if now and since else 0
+    if merges >= MID_EVERY or (merges and minutes >= MID_AFTER):
+        return Step("mid-check", tip, f"{merges} merges, {minutes:.0f} min since the last check")
+    return None
+
+
+def _time(stamp: str):
+    from datetime import datetime
+    return datetime.fromisoformat(stamp.replace("Z", "+00:00"))
 
 
 def queue_step(plan: Plan, events: Sequence[dict], tip: str) -> Step | None:
@@ -189,6 +237,7 @@ def main(argv: list[str]) -> int:
     starting = commands.add_parser("start")
     starting.add_argument("--tip", required=True)
     starting.add_argument("--onto", required=True)
+    starting.add_argument("--default", action="store_true", help="a check along the way: no fuzzy")
     starting.add_argument("brief", type=Path)
     starting.add_argument("workdir", type=Path)
     starting.add_argument("report", type=Path)
@@ -211,7 +260,7 @@ def main(argv: list[str]) -> int:
                     break
                 except FileExistsError:
                     continue
-            meta = {"tip": args.tip, "onto": args.onto, "brief": str(args.brief),
+            meta = {"tip": args.tip, "onto": args.onto, "brief": str(args.brief), "default": args.default,
                     "dir": str(args.workdir), "report": str(args.report), "started": log.now()}
             atomic.write(directory / "meta.json", json.dumps(meta) + "\n")
             launcher = Path(__file__).resolve().parent.parent / "bin/fab"
@@ -224,7 +273,8 @@ def main(argv: list[str]) -> int:
         directory = log.home() / "check" / args.id
         meta = json.loads((directory / "meta.json").read_text())
         try:
-            receipt = precheck.precheck(Path(meta["dir"]), meta["tip"], onto=meta["onto"], full=True)
+            receipt = precheck.precheck(Path(meta["dir"]), meta["tip"], onto=meta["onto"], full=True,
+                                        without=MID_WITHOUT if meta.get("default") else ())
             green = receipt["outcome"] == "green"
             red = next((step.rsplit(":", 2)[0] for step in receipt["steps"]
                         if step.rsplit(":", 2)[1] != "0"), receipt["outcome"])

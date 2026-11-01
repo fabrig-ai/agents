@@ -16,7 +16,7 @@ import tempfile
 from collections import Counter
 from collections.abc import Sequence, Iterable, Mapping
 from contextlib import redirect_stdout
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
@@ -158,6 +158,7 @@ class Action:
     branch: str | None = None
     detail: str = ""
     rejection: dict | None = None
+    early: tuple[tuple[str, str], ...] = ()  # for start: (need, branch) of an early start
 
 
 def foreman_actions(tasks: Mapping[str, Task], events: list[dict]) -> list[Action]:
@@ -221,7 +222,7 @@ def places(hosts: Mapping[str, Host], flight: Iterable[dict],
 
 
 def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[str, Host],
-           calm: Mapping[str, bool] | None = None) -> list[Action]:
+           calm: Mapping[str, bool] | None = None, pushed: frozenset[str] = frozenset()) -> list[Action]:
     """The actions for now, in this order:
 
     0. flow: one Action("flow", task=plan.draft, detail="target <n>, <m> in flight"), n being
@@ -266,17 +267,46 @@ def decide(plan: Plan, tasks: Mapping[str, Task], events: list[dict], hosts: Map
     refused = {identifier for identifier in candidates
                if _start_kind(views[identifier], events)[1] is not None}
     candidates = buffer.order(plan, tasks, rebases + candidates, refused | set(rebases))
+    early = early_starts(plan, tasks, views, events, pushed)
+    candidates += [identifier for identifier in buffer.order(plan, tasks, list(early), set())
+                   if identifier not in candidates]
     refusals = {refusal.task: refusal for refusal in repairs.refusals(tasks, events)
                 if refusal.task not in rebases}
     step = integration.next_step(plan, tasks, events)
     if step is None or step.kind != "stop":
-        actions.extend(_starts(candidates, views, events, free, limit - occupied, refusals))
+        actions.extend(replace(action, early=early.get(action.task, ())) if action.kind == "start" else action
+                       for action in _starts(candidates, views, events, free, limit - occupied, refusals))
 
     if len(candidates) < plan.low * limit:
         design = _design_action(plan, tasks, views, hosts, len(candidates))
         if design is not None:
             actions.append(design)
     return actions
+
+
+def early_starts(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
+                 events: list[dict], pushed: frozenset[str]) -> dict[str, tuple[tuple[str, str], ...]]:
+    """The waiting tasks that may start early, each with (need, branch) for its needs not merged
+    (docs/design/fab.md, 13.12). An integration plan with early: every need is landed, or is
+    running or done with its branch in pushed (origin's branches, read by the tick) and every
+    need of its own landed (one level only). A task whose early start was refused
+    (early.refused) waits as usual. Pure."""
+    if plan.landing != "integration" or not plan.early:
+        return {}
+    refused = {event.get("task") for event in events if event.get("ev") == "early.refused"}
+    result = {}
+    for identifier, view in views.items():
+        if view.status != "waiting" or identifier in refused:
+            continue
+        open_needs = [need for need in tasks[identifier].needs
+                      if need not in views or views[need].status != "landed"]
+        if not open_needs or not all(
+                need in views and views[need].status in ("running", "done") and views[need].branch in pushed
+                and all(views.get(own) is not None and views[own].status == "landed" for own in tasks[need].needs)
+                for need in open_needs):
+            continue
+        result[identifier] = tuple((need, views[need].branch) for need in open_needs)
+    return result
 
 
 def _design_action(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, state.TaskView],
@@ -841,7 +871,7 @@ def _tick_plan(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout:
     if released:
         plan, tasks = _load_plan(directory, log.read(log_path), checkout=checkout, sh=sh)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, log.read(log_path)), log.read(log_path))
-    actions = decide(plan, tasks, log.read(log_path), hosts, calm)
+    actions = decide(plan, tasks, log.read(log_path), hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     events = log.read(log_path)
@@ -961,9 +991,14 @@ def _start(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host],
         try:
             runs.start(tasks[action.task], hosts[name], kind=action.run_kind,
                        events=events, sh=sh, log_path=log_path, rejection=action.rejection,
-                       trunk=plan.trunk, checkout=checkout)
+                       trunk=plan.trunk, checkout=checkout, early=action.early)
             return
         except ValueError as error:
+            if str(error).startswith("early:"):
+                # It waits for its needs to merge, as any task.
+                log.append("early.refused", path=log_path, task=action.task,
+                           needs=[need for need, _ in action.early], text=str(error))
+                return
             if not str(error).endswith("no idle slot") or position == len(order) - 1:
                 raise
 
@@ -1031,6 +1066,16 @@ def _settle(action: Action, tasks: Mapping[str, Task], plan_dir: Path, *,
               and _pushed(question, events, checkout, sh=sh))
     log.append("question.answered", path=log_path, task=question.task, by=action.run,
                run=question.run, answer=answer.splitlines()[0], **({"accept": True} if accept else {}))
+
+
+def _pushed_branches(plan: Plan, checkout: Path, *, sh: Runner) -> frozenset[str]:
+    """The draft's branches on origin as the plan checkout last fetched them, for early starts;
+    none outside an integration plan with early, or when the checkout cannot say."""
+    if plan.landing != "integration" or not plan.early:
+        return frozenset()
+    listed = sh(["git", "for-each-ref", "--format=%(refname:lstrip=3)", f"refs/remotes/origin/{plan.draft}/"],
+                cwd=str(checkout))
+    return frozenset(line.strip() for line in listed.out.splitlines() if line.strip()) if listed.ok else frozenset()
 
 
 def _pushed(question: foreman.Question, events: list[dict], checkout: Path, *, sh: Runner) -> bool:
@@ -1330,6 +1375,10 @@ def _landing_actions(plan: Plan, tasks: Mapping[str, Task], views: Mapping[str, 
                            and event.get("outcome") == "done" for event in events)
             if not finished:
                 continue
+        if view.status == "done" and plan.landing == "integration" and any(
+                views.get(need) is None or views[need].status != "landed" for need in tasks[identifier].needs):
+            # An early start merges only after what it built on has (13.12).
+            continue
         if view.status == "done":
             amendment = call_review.task_rebase(tasks[identifier], events)
             if amendment is not None:
@@ -1374,6 +1423,14 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
                    if plan.ready else step.tip)
             if tip is not None:
                 _integration_check(plan, tip, hosts, events, sh=sh, log_path=log_path)
+        elif step.kind == "mid-check":
+            # A check along the way takes only a slot no task wanted; none idle, it waits.
+            try:
+                _integration_check(plan, step.tip, hosts, events, sh=sh, log_path=log_path, mid=True)
+            except ValueError as error:
+                if not str(error).endswith("no idle slot"):
+                    raise
+                detail = "waits for an idle slot"
         elif step.kind == "ready":
             if any(event.get("ev") == "branch.rejected" and "queue_ts" in event
                    and event.get("task") == subject and event.get("tip") == step.tip for event in events):
@@ -1391,7 +1448,7 @@ def _integration(plan: Plan, tasks: Mapping[str, Task], checkout: Path,
 
 
 def _integration_check(plan: Plan, tip: str, hosts: Mapping[str, Host], events: list[dict], *,
-                       sh: Runner, log_path: Path | None) -> None:
+                       sh: Runner, log_path: Path | None, mid: bool = False) -> None:
     """Claim an idle slot on the builder with most free places and launch the full check.
     A failure after claiming releases the slot before propagating."""
     host = _builder(hosts, events)
@@ -1415,9 +1472,12 @@ def _integration_check(plan: Plan, tip: str, hosts: Mapping[str, Host], events: 
         worktree = Path(runs.remote_home(host)).parent / "slots" / str(slot)
         sh(ssh(host.ssh, ["git", "-C", str(worktree), "fetch", "origin"]), check=True)
         runs.launch(host, run_id, task=subject, kind="check", workdir=str(worktree),
-                    branch=plan.trunk, base=tip, brief=f"Full integration check of {tip}\n",
+                    branch=plan.trunk, base=tip,
+                    brief=f"{'Default' if mid else 'Full'} integration check of {tip}\n",
                     effort="high", slot=slot, sh=sh, log_path=log_path,
-                    command=["fab", "check", "start", "--tip", tip, "--onto", f"origin/{plan.trunk}"])
+                    command=["fab", "check", "start", "--tip", tip, "--onto", f"origin/{plan.trunk}",
+                             *(["--default"] if mid else [])],
+                    **({"mid": True} if mid else {}))
     except Exception:
         sh(ssh(host.ssh, ["fab", "slot", "release", str(slot), run_id]), check=True)
         raise

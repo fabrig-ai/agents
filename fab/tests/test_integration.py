@@ -65,6 +65,27 @@ class IntegrationTest(unittest.TestCase):
         self.assertNotIn("Not this one", body)
         self.assertNotIn("## Answers", integration.repair_tasks(PLAN, events[:-3], {})["demo/repair-1"].body)
 
+    def test_checks_along_the_way(self):
+        tasks = {f"demo/t{n}": replace(TASK, id=f"demo/t{n}") for n in range(12)}
+        def landed(n, ts):
+            return dict(merged(f"tip{n}", task=f"demo/t{n}"), ts=ts)
+        ten = [landed(n, f"2026-11-01T10:{n:02d}:00Z") for n in range(10)]
+        step = integration.next_step(PLAN, tasks, ten)
+        self.assertEqual((step.kind, step.tip), ("mid-check", "tip9"))
+        self.assertIsNone(integration.next_step(PLAN, tasks, ten[:3]))
+        later = ten[:3] + [dict(ev="note", ts="2026-11-01T10:50:00Z")]
+        self.assertEqual(integration.next_step(PLAN, tasks, later).kind, "mid-check")
+        # A mid check's reds never stop the plan, and its repair says what is not merged yet.
+        reds = list(ten)
+        for n in range(1, 4):
+            reds += [dict(run_started("demo/integration", n, kind="check", base=f"tip{9}", mid=True,
+                                      ts="2026-11-01T10:20:00Z")), run_ended("demo/integration", n, "failed")]
+        self.assertIsNone(integration.next_step(PLAN, tasks, reds))  # repairs are open, not a stop
+        repair = integration.repair_tasks(PLAN, reds, {}, tasks)["demo/repair-1"]
+        self.assertIn("## Not merged yet", repair.body)
+        self.assertIn("- demo/t11:", repair.body)
+        self.assertNotIn("- demo/t3:", repair.body)
+
     def test_a_check_before_any_task_merged_is_ignored(self):
         cut = merged("cut-tip", task="calls/cut-1")
         self.assertIsNone(integration.next_step(PLAN, {}, [cut]))
@@ -227,7 +248,7 @@ class IntegrationCommandTest(unittest.TestCase):
                 with patch.object(integration.precheck, "precheck", return_value=receipt) as precheck, \
                         patch.object(integration.atomic, "write", side_effect=record):
                     self.assertEqual(cli.main(["check", "_exec", "check-id"]), int(outcome != "green"))
-                precheck.assert_called_once_with(self.home, "tip", onto="origin/demo/integration", full=True)
+                precheck.assert_called_once_with(self.home, "tip", onto="origin/demo/integration", full=True, without=())
                 self.assertEqual(writes, ["report.md", "result.json", "ended"])
                 self.assertEqual(self.report.read_text().splitlines(), [first, *steps, "/check.log"])
                 result = json.loads((directory / "result.json").read_text())

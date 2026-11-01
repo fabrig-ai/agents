@@ -214,7 +214,7 @@ class OptionsTest(unittest.TestCase):
                 entries = [f'landing="{landing}"',
                            *[f"{key}={str(enabled).lower()}" for key in OPTIONS[1:]]]
                 self.assertEqual(parse_options(entries),
-                                 dict(landing=landing, ready=enabled, reviews=enabled, direct=enabled))
+                                 dict(landing=landing, ready=enabled, reviews=enabled, direct=enabled, early=enabled))
 
     def test_options_keep_entry_order_and_last_value(self):
         entries = ["reviews = false", "landing='integration'", "direct=true", "reviews=true"]

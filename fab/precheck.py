@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from fab import atomic, gate, log
@@ -13,7 +13,7 @@ from fab.sh import Runner, run
 
 def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = False,
              home: Path | None = None, sh: Runner = run,
-             load: Callable[[Path], dict] | None = None) -> dict:
+             load: Callable[[Path], dict] | None = None, without: Sequence[str] = ()) -> dict:
     """Check tip as the queue would and return the receipt.
 
     In slot: remember where HEAD is; fetch origin; detach at onto and merge tip (--no-ff;
@@ -61,6 +61,7 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
             steps = gate.ratchet_steps(slot, ratchet_paths, write=False)
             meta = load_metadata(slot) if isinstance(selected, set) else None
             steps += gate.check_steps(slot, selected, paths, meta, lane="build")
+            steps = [step for step in steps if step.name not in without]  # a check along the way
             results = gate.run_steps(steps, log_path, sh=sh)
             receipt["steps"] = gate.step_texts(results)
             receipt["outcome"] = "green" if all(step.green for step in results) else "red"

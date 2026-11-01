@@ -178,8 +178,14 @@ def refusal_text(record: dict, repo: str, *, sh: Runner = run) -> str:
 
 def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[dict] = (),
           sh: Runner = run, log_path: Path | None = None, rejection: dict | None = None,
-          trunk: str = "main", checkout: Path | None = None) -> str:
+          trunk: str = "main", checkout: Path | None = None,
+          early: Sequence[tuple[str, str]] = ()) -> str:
     """Start a run of task on host and log run.started; return the run id.
+
+    early names (need, branch) for each need not merged yet whose pushed work the run starts
+    from (an early start, docs/design/fab.md 13.12): each origin/<branch> is merged into the
+    run's checkout after it is set up, in order, and the brief says so; a merge that conflicts
+    aborts the start with a ValueError beginning `early:`. run.started carries early (the needs).
 
     With checkout, an absolute task.path inside it is repository-relative in the brief;
     paths outside it, paths already relative and checkout=None keep their given spelling.
@@ -230,6 +236,8 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
     rejection = _rejection(rejection, sh=sh)
     text = brief(task, role_text(task.repo, trunk), run_id=run_id, branch=branch, base=base,
                  report=str(report_path), rejection=rejection, trunk=trunk)
+    if early:
+        text += early_section(early)
 
     def remote(argv, *, input=None):
         return sh(ssh(host.ssh, argv), input=input, check=True)
@@ -242,7 +250,7 @@ def start(task: Task, host: Host, *, kind: str = "implement", events: Iterable[d
         return _prepare_and_launch(task, host, kind, sh, run_id=run_id, branch=branch,
                                    base=base, root=root, repo=repo, worktree=worktree,
                                    brief_path=brief_path, report_path=report_path, text=text,
-                                   log_path=log_path)
+                                   log_path=log_path, early=early)
     except BaseException:
         # A start that fails part way gives back what it took, so the next start finds it free.
         _undo_start(task, remote, run_id=run_id, branch=branch, repo=repo, worktree=worktree)
@@ -267,7 +275,8 @@ def _undo_start(task: Task, remote, *, run_id: str, branch: str, repo: Path, wor
 
 def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: str, branch: str,
                         base: str, root: Path, repo: Path, worktree: Path, brief_path: Path,
-                        report_path: Path, text: str, log_path: Path | None) -> str:
+                        report_path: Path, text: str, log_path: Path | None,
+                        early: Sequence[tuple[str, str]] = ()) -> str:
     sh = remote
 
     def remote(argv, *, input=None):
@@ -301,10 +310,28 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["git", "-C", str(worktree), "checkout", "--ignore-other-worktrees", "-B", branch, source])
     else:
         remote(["git", "-C", str(repo), "worktree", "add", "-b", branch, str(worktree), base])
+    for need, need_branch in early:
+        merged = sh(ssh(host.ssh, ["git", "-C", str(worktree), "-c", "user.name=fab", "-c",
+                                   "user.email=fab@localhost", "merge", "--no-edit", f"origin/{need_branch}"]))
+        if not merged.ok:
+            sh(ssh(host.ssh, ["git", "-C", str(worktree), "merge", "--abort"]))
+            raise ValueError(f"early: {need}'s pushed work conflicts with the base")
     held = {} if slot is None else {"slot": slot}
+    if early:
+        held["early"] = [need for need, _ in early]
     return launch(host, run_id, task=task.id, kind=kind, workdir=str(worktree), branch=branch,
                   base=base, brief=text, effort=EFFORTS.get(kind, task.effort), read_only=kind == "review",
                   sh=sh, log_path=log_path, **held)
+
+
+def early_section(early: Sequence[tuple[str, str]]) -> str:
+    """The brief's section for an early start: the needs whose pushed work is in its base."""
+    lines = "\n".join(f"- {need}: `origin/{branch}`" for need, branch in early)
+    return ("\n\n# Started early\n\nThese needs have not merged yet; the work each has pushed so far "
+            f"is merged into your base:\n\n{lines}\n\nWhat you build on may still change. When you "
+            "need more of it, and before you push, `git fetch origin` and merge each branch again "
+            "(`git merge --no-edit origin/<branch>`); a conflict there is yours to resolve. fab merges "
+            "your branch into the trunk only after these needs have merged.\n")
 
 
 def fetch_clone(host: Host, repo: str, *, sh: Runner = run) -> Path:

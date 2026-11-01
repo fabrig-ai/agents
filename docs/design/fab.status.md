@@ -247,8 +247,8 @@
   a repair's question queues, answer calls see and record it, and its answer
   folds into its body; after the playground replay, the answerer leaves what
   is not the task's, reruns start from their pushed branch, the cut writes
-  plan.md and its report early, and a full builder hands a start on (not run
-  live yet);
+  plan.md and its report early, and a full builder hands a start on; early
+  starts and checks along the way (13.12) are built (not run live yet);
   a run may leave what is not its own (13.12: the implementer's allowed
   edits and `## Left`, the foreman's `Accept:`, the cut's contracts note;
   not run live yet);

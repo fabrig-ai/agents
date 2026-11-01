@@ -4112,7 +4112,8 @@ class IntegrationCheckTickTest(unittest.TestCase):
         notes = [entry for entry in log.read(self.path) if entry["ev"] == "note"]
         self.assertEqual(len(notes), 1)
         self.assertEqual((notes[0]["text"], notes[0]["tip"]), ("red 3 times; needs judgement", "trunk-tip"))
-        self.assertEqual(self.fake.calls, [])
+        # Only the read of origin's branches for early starts; nothing is started.
+        self.assertEqual([call.argv[:2] for call in self.fake.calls], [["git", "for-each-ref"]] * 2)
 
     def test_import_queue_accepts_integration_landing_without_a_spec(self):
         gate = Host("gate", "fake@gate", ("gate",))
@@ -4164,3 +4165,55 @@ class ReplayFindingsTest(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     dispatch._start(action, tasks, hosts, plan=loaded, checkout=Path("."),
                                     sh=FakeRunner(), log_path=None)
+
+
+class EarlyStartTest(unittest.TestCase):
+    """Early starts (docs/design/fab.md 13.12): a task may start from the pushed work of a need
+    that is still running, one level deep, and merges only after its needs have."""
+
+    PLAN = plan.Plan("draft", "fabrig", (), 1, 2, {}, (), landing="integration")
+    HOSTS = {"builder": Host("builder", "fake@builder", ("builder",), places=4)}
+
+    def setUp(self):
+        self.tasks = {t.id: t for t in (task("a", repo="fabrig"), task("b", repo="fabrig", needs=("draft/a",)),
+                                         task("c", repo="fabrig", needs=("draft/b",)))}
+
+    def test_a_task_starts_early_on_a_running_need_that_pushed(self):
+        events = [started(branch="draft/a")]
+        views = state.fold(self.tasks, events)
+        self.assertEqual(dispatch.early_starts(self.PLAN, self.tasks, views, events, frozenset({"draft/a"})),
+                         {"draft/b": (("draft/a", "draft/a"),)})
+        self.assertEqual(dispatch.early_starts(self.PLAN, self.tasks, views, events, frozenset()), {})
+        self.assertEqual(dispatch.early_starts(replace(self.PLAN, early=False), self.tasks, views, events,
+                                               frozenset({"draft/a"})), {})
+        refused = events + [event("early.refused", "b", needs=["draft/a"])]
+        self.assertEqual(dispatch.early_starts(self.PLAN, self.tasks, state.fold(self.tasks, refused), refused,
+                                               frozenset({"draft/a"})), {})
+        actions = dispatch.decide(self.PLAN, self.tasks, events, self.HOSTS, pushed=frozenset({"draft/a"}))
+        start, = [action for action in actions if action.kind == "start"]
+        self.assertEqual((start.task, start.early), ("draft/b", (("draft/a", "draft/a"),)))
+
+    def test_one_level_only(self):
+        # b runs early on a; c may not start on b while b still waits for a.
+        events = [started(branch="draft/a"), started("b", branch="draft/b")]
+        views = state.fold(self.tasks, events)
+        self.assertEqual(dispatch.early_starts(self.PLAN, self.tasks, views, events,
+                                               frozenset({"draft/a", "draft/b"})), {})
+
+    def test_an_early_task_merges_only_after_its_needs(self):
+        events = [started(branch="draft/a"), started("b", branch="draft/b"), ended("b")]
+        kinds = [action.kind for action in dispatch.decide(self.PLAN, self.tasks, events, self.HOSTS)]
+        self.assertNotIn("merge", kinds)
+        events += [ended("a"), event("branch.landed", "a", tip="t", main="m", into="draft/integration")]
+        merges = [action.task for action in dispatch.decide(self.PLAN, self.tasks, events, self.HOSTS)
+                  if action.kind == "merge"]
+        self.assertEqual(merges, ["draft/b"])
+
+    def test_a_refused_early_start_is_logged_and_waits(self):
+        action = Action("start", task="draft/b", host="builder", run_kind="implement",
+                        early=(("draft/a", "draft/a"),))
+        with tmp_home(), patch.object(runs, "start", side_effect=ValueError("early: draft/a's pushed work conflicts")):
+            dispatch._start(action, self.tasks, self.HOSTS, plan=self.PLAN, checkout=Path("."), sh=FakeRunner(),
+                            log_path=None)
+            refused, = log.read()
+        self.assertEqual((refused["ev"], refused["task"], refused["needs"]), ("early.refused", "draft/b", ["draft/a"]))

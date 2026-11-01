@@ -393,6 +393,32 @@ class RunStartTest(unittest.TestCase):
             self.assertEqual(len(log.read(path)), 1)
             self.assertEqual(log.read(), [])
 
+    def test_an_early_start_merges_its_needs_pushed_work_and_says_so(self):
+        with tmp_home():
+            fake = starter()
+            run_id = run.start(replace(TASK, repo="fabrig"), HOST, kind="implement", sh=fake,
+                               early=(("draft/need", "draft/need"),))
+            commands = [command(call) for call in fake.calls]
+            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "-c", "user.name=fab", "-c",
+                           "user.email=fab@localhost", "merge", "--no-edit", "origin/draft/need"], commands)
+            self.assertIn("# Started early", (log.home() / "runs" / run_id / "brief.md").read_text())
+            self.assertEqual(log.read()[-1]["early"], ["draft/need"])
+
+    def test_an_early_start_whose_need_conflicts_is_refused(self):
+        def answer(call):
+            argv = command(call)
+            if "merge" in argv and "--no-edit" in argv:
+                return Result(1, err="conflict")
+            return base(call)
+        base = starter().rules[0][1]
+        fake = FakeRunner().on(["ssh"], answer)
+        with tmp_home():
+            with self.assertRaisesRegex(ValueError, "^early: draft/need"):
+                run.start(replace(TASK, repo="fabrig"), HOST, kind="implement", sh=fake,
+                          early=(("draft/need", "draft/need"),))
+            self.assertIn(["git", "-C", str(ROOT.parent / "slots/2"), "merge", "--abort"],
+                          [command(call) for call in fake.calls])
+
     def test_an_implement_rerun_continues_from_its_pushed_branch(self):
         with tmp_home():
             fake = starter(pushed=True)

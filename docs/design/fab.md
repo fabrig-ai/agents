@@ -1154,6 +1154,29 @@ only as tweaks once a replay matches its run.
   - A start whose builder has no idle slot moves to the next builder with
     free places, since slots other work claimed are not fab's runs: r4
     retried a full hetzner6 every tick while other sessions held its slots.
+- **Early starts** (the user, 11-01; `coord/fab-replay/design-early-starts.md`).
+  r4's forge records were a chain of 11 tasks, each waiting for the last
+  one's merge; playground-kit's lead started dependents from the
+  integration branch and merged their needs as they landed. An integration
+  plan with `early` (the default) lets a waiting task start when each need
+  not merged is running or done and has pushed its branch, and has no
+  unmerged needs of its own (one level). Its slot is set up from the trunk,
+  then each such need's `origin/<branch>` is merged in, in needs order; a
+  conflict aborts the start and logs `early.refused` (it then waits as any
+  task). Its brief gains `# Started early`, naming those branches and saying
+  to merge them again before it pushes; `run.started` carries `early`. A
+  done task of an integration plan merges only after every need has merged.
+  The tick reads origin's branches of the draft from the plan checkout after
+  its fetch (`fab.dispatch.early_starts`).
+- **Checks along the way** (the same). r4's reds collected for the end: 101
+  of 24,207 tests at its second end check. While tasks remain, after
+  `MID_EVERY` (10) task merges since the last check, or `MID_AFTER` (45)
+  minutes since it with one merge since, the tick checks the trunk's tip
+  with the end check's steps less fuzzy (`fab check start --default`),
+  when a slot is idle and no repair is open; `run.started` carries `mid`.
+  A red makes a repair as at the end, whose body lists the tasks not merged
+  then with their files, to leave what they own; mid reds never count
+  toward the three that stop a plan, and the end check is never one of them.
 - **The flow stays wide.** An integration plan keeps its target for runs
   in flight at its builders' places throughout: no halving on a refusal or
   an `Infra:` outcome and no growth (13.11's start-wide rule is the queue

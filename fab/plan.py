@@ -10,7 +10,7 @@ from pathlib import Path
 from fab import log
 
 LANDINGS = ("queue", "integration")
-OPTIONS = ("landing", "ready", "reviews", "direct")
+OPTIONS = ("landing", "ready", "reviews", "direct", "early")
 MODES = ("feature", "migration", "fix", "probe", "direct")
 KINDS = ("feature", "interface", "migration", "repair", "rebase", "docs")
 EFFORTS = ("medium", "high")
@@ -69,6 +69,7 @@ class Plan:
     ready: bool = True
     reviews: bool = False
     direct: bool = True
+    early: bool = True  # an integration plan's tasks may start early (docs/design/fab.md, 13.12)
 
     @property
     def trunk(self) -> str:
