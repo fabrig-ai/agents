@@ -126,11 +126,32 @@ only as tweaks once a replay matches its run.
   foreman's and the refusal foreman's checkouts, the spec edits of answers
   and repair sections, and the implementer's precheck (`fab precheck SLOT
   TIP --onto origin/<trunk>`; the brief's facts name the trunk).
-- **The plan lives on its trunk.** The operator makes the integration
-  branch at the run's base and a worktree of hel8's fabrig clone on it,
-  tracking it (`FAB_HOME/integration/<draft>`), and lists the plan
-  directory inside that worktree. Its first commit holds the run's inputs
-  that are not in the tree (below). The tick follows a
+- **The plan lives on its trunk.** The integration branch is made at the
+  run's base with a worktree of hel8's fabrig clone on it, tracking it
+  (`FAB_HOME/integration/<draft>`), and the plan directory inside that
+  worktree is listed (the cut lists it). Its first commit holds the run's
+  inputs that are not in the tree (below). Two commands do it (the user,
+  11-01; until then an operator did it by hand, every replay and the
+  first `ready` probe):
+  - `fab trunk make PLAN_PATH [--base REV]` on hel8: PLAN_PATH is the
+    plan's path in fabrig (`temper/docs/plan/<draft>`, the draft its last
+    segment). It fetches `FAB_HOME/repos/fabrig`, makes
+    `<draft>/integration` at REV (default `origin/main`), pushes it, adds
+    the worktree `FAB_HOME/integration/<draft>` on it with its upstream
+    `origin/<draft>/integration`, logs `trunk.made` (draft, base, tip),
+    and prints the plan directory to give `fab call cut --plan`. It
+    refuses, changing nothing, when the branch exists on origin or the
+    worktree path exists.
+  - `fab plan inputs PLAN_DIR FILE...` (any plan): copies each file to
+    `PLAN_DIR/inputs/<its name>` (refusing a name already there unless
+    `--replace`), commits them (`<draft>: inputs`, author fab) and
+    delivers them as the plan's checkout takes them: on an integration
+    trunk's worktree, pushed to the trunk (fast-forward only); in this
+    repository, as branch `inputs/<draft>` through `fab land`; in fabrig
+    on main, as `ready/inputs/<draft>` to the queue, printing that the cut
+    waits for its landing. It prints the repository paths to give `fab
+    call cut --source`.
+  The tick follows a
   plan checkout that tracks a branch: after its fetch it fast-forwards the
   checkout to its upstream, so it always reads the plan and specs at the
   trunk's tip.

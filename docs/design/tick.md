@@ -217,7 +217,9 @@ things fab follows, whatever the clock says:
 
 - **Intake:** the user starts a draft by hand (at the user's word of
   10-31): today with its cut, `fab call cut --plan PLAN_DIR --source PATH
-  ...` (calls.md 3), which lists the plan in `FAB_HOME/plans`. A draft
+  ...` (calls.md 3), which lists the plan in `FAB_HOME/plans`, after `fab
+  plan inputs` for inputs not in the tree and, for a fabrig integration
+  plan, `fab trunk make` (integration.md 2). A draft
   landing in `docs/design/draft/` starts nothing by itself; the timeline's
   T+0:00 is the user's start. `fab draft start PATH`, which would run the
   draft's surveys and then its cut, is not built (8).

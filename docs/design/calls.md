@@ -419,6 +419,19 @@ before it lands (2).
 - **Where they land:** as every call, through `fab land` for this
   repository, so they may change only what it allows (landing.md 2).
 
+- **A call whose brief cannot be compiled parks its subject** (the user,
+  11-01; it was started again every tick, as trunk-overlaps' retire was
+  nine times in three minutes). When a `fab call` the tick started fails
+  before `call.started` (past `BRIEF_LIMIT`, a missing file, any error
+  while compiling the brief), it logs `call.parked` with the subject, the
+  role, `call` "" and the reason `brief failed: <the error's first
+  line>`. The tick's parked set (`_parked_subjects`) holds such a subject
+  as it holds a call's question, so no call of that subject starts (an
+  answer, triage or amend start included) until `call.answered` names it
+  (`fab page answer SUBJECT TEXT`, channel.md 2); then the next tick
+  tries once more, and a second failure parks it again. The page and the
+  forge show it as a `parked` ask, its text the reason.
+
 ## 4. Probes
 
 - **A probe** is a read-only Codex run with a time box (the part's
@@ -427,12 +440,6 @@ before it lands (2).
 
 ## 5. Later
 
-- A call whose brief cannot be compiled (past `BRIEF_LIMIT`, or any
-  other deterministic failure before `call.started`) is started again every
-  tick. Retire's brief is bounded (3); a park for such a start (a
-  `call.parked` with no call, lifted by an answer, seen by the tick's
-  parked set, triage and amend starts) waits until another call kind meets
-  it.
 - Retire's changed designs taken from the plan, not from main's window:
   the designs its parts cite (`design`) and those its own branches changed,
   rather than every design main changed since the cut, so a plan designed
