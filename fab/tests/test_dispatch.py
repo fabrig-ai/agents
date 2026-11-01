@@ -3904,6 +3904,23 @@ class AfterLandingImportTest(unittest.TestCase):
                          [("tiers.red", "a"), ("tiers.red", "b"), ("tiers.run", None)])
         self.assertIn("--since t2", self.fake.calls[-1].argv[-1])
 
+    def test_same_test_in_distinct_binaries_is_imported_once_per_binary(self):
+        for state, event in (("new", "tiers.red"), ("unattributed", "tiers.red"),
+                             ("recovered", "tiers.recovered")):
+            with self.subTest(state=state):
+                self.path = self.home / f"{state}.jsonl"
+                self.lines = [dict(ts="t1", ev="test", state=state, tip="x", profile="p",
+                                   binary=binary, test="same") for binary in ("a", "b")]
+                dispatch._import_after_landing([], self.hosts, sh=self.fake, log_path=self.path)
+                self.assertEqual([(entry["ev"], entry["binary"]) for entry in log.read(self.path)],
+                                 [(event, "a"), (event, "b")])
+                self.lines.append(dict(self.lines[0], binary="c"))
+                for _ in range(2):
+                    dispatch._import_after_landing(log.read(self.path), self.hosts,
+                                                   sh=self.fake, log_path=self.path)
+                self.assertEqual([(entry["ev"], entry["binary"]) for entry in log.read(self.path)],
+                                 [(event, "a"), (event, "b"), (event, "c")])
+
     def test_no_machine_with_the_role_reads_nothing_and_a_failed_read_is_a_note(self):
         dispatch._import_after_landing([], {"c": Host("c", "fake@c", ("builder",))}, sh=self.fake,
                                        log_path=self.path)

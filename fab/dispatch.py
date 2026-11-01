@@ -452,14 +452,14 @@ def _import_after_landing(events: list[dict], hosts: Mapping[str, Host], *, sh: 
         failure = " ".join((result.err or result.out).strip().splitlines()[-3:])
         log.append("note", path=log_path, text=f"after-landing import failed: {failure}")
         return
-    seen = {(event["al_ts"], event.get("ev"), event.get("profile"), event.get("test"))
+    seen = {(event["al_ts"], event.get("ev"), event.get("profile"), event.get("binary"), event.get("test"))
             for event in events if "al_ts" in event}
     for entry in log.records(result.out):
         record = after_landing.imported(entry)
         if record is None or "ts" not in entry:
             continue
         ev = record.pop("ev")
-        key = (entry["ts"], ev, record.get("profile"), record.get("test"))
+        key = (entry["ts"], ev, record.get("profile"), record.get("binary"), record.get("test"))
         if key not in seen:
             events.append(log.append(ev, path=log_path, al_ts=entry["ts"], **record))
             seen.add(key)
