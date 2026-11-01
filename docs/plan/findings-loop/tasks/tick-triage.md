@@ -56,3 +56,15 @@ through `tick(...)`:
 
 The steps added and where in `_tick_plan`, and whether `_call` needed a
 change.
+
+## Rebase (2026-11-01, step rebase, foreman findings-loop/tick-triage/foreman-1)
+
+Resolve both import conflicts by retaining main’s overlaps imports alongside the branch’s triage imports.
+Rebase 1e81eed onto main; c4fcd12 added overlapping import edits in both conflicting files.
+In fab/dispatch.py, combine main’s `overlaps` import with the branch’s `findings`, `triage`, and `walks` imports.
+In fab/tests/test_dispatch.py, retain main’s `overlaps` and `Failed` imports alongside the branch’s `atomic`, `triage`, `walks`, `qa_records as qa`, and `write_ladder` imports.
+Preserve both `LadderTickTest` and main’s overlap tests in `MultiPlanTickTest`.
+Keep main’s `_round` overlap probing and e2755b6’s `_reconcile_reds` extraction.
+Keep the branch’s `call_actions` triage scheduling and `_tick_loaded` decisions-then-passes sequence before `decide`, per docs/design/fab.md section 13.15, “The tick, each round”.
+`_call` already launches triage with the subject-named unit and `--plan`; no change is needed.
+Limit the resolution to fab/dispatch.py and fab/tests/test_dispatch.py, then continue the rebase and run `bin/fab test`.
