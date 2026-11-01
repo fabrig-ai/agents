@@ -219,15 +219,15 @@ def execute(command, env, directory, profile, limits):
     assert limits == {}
     assert '--retries' in command and command[command.index('--retries') + 1] == '0'
     assert command[:4] == ['heavy', 'cargo', 'nextest', 'run']
-    atomic.write(directory / 'run.json', json.dumps(dict(starved=False, wall_s=2)))
+    atomic.write(directory / 'run.json', json.dumps(dict(starved=starved, wall_s=2, returncode=returncode)))
     atomic.write(directory / 'fixture.json', json.dumps(dict(items=[], timeouts=[], failures=[])))
     atomic.write(directory / 'heavy-output.txt', '')
     summary(directory, {}, profile)  # execute calls the installed adapter, too
     return 0
 ''', namespace)
         def summarize(items, pair, limits, run, timeouts, failures):
-            return dict(suite=dict(cpu_s=1, wall_s=2, starved_run=False, starved=0),
-                        tests=[], failures=[], over_budget=[])
+            return dict(suite=dict(cpu_s=1, wall_s=2, starved_run=namespace["starved"], starved=0),
+                        tests=[], failures=namespace["failures"], over_budget=[])
         namespace['summarize_records'] = summarize
         config = self.home / "config.toml"
         atomic.write(config, '[profile.qa-tree]\n')
@@ -238,9 +238,15 @@ def execute(command, env, directory, profile, limits):
         request = dict(profile="qa-tree", directory=str(directory), wrapper=str(self.home / "wrapper"),
                        wall_hard_s=None, command=["heavy", "cargo", "nextest", "run", "-p", "pkg",
                                                 "--config-file", str(config), "--no-fail-fast"])
-        with patch.object(cpu.runpy, "run_path", return_value=namespace), \
-                patch.object(cpu.subprocess, "run", return_value=listing) as service:
-            self.assertEqual(cpu.worker(request), 0)
+        for raw, starved, failures, expected in ((0, False, [], 0), (100, True, [], 0),
+                (75, True, [], 75), (102, True, [], 102), (100, True, ["b t"], 100)):
+            namespace.update(returncode=raw, starved=starved, failures=failures)
+            request["directory"] = str(self.home / f"fresh-{raw}-{bool(failures)}")
+            with self.subTest(raw=raw, failures=failures), \
+                    patch.object(cpu.runpy, "run_path", return_value=namespace), \
+                    patch.object(cpu.subprocess, "run", return_value=listing) as service:
+                self.assertEqual(cpu.worker(request), expected)
+        directory = Path(request["directory"])
         self.assertEqual(json.loads((directory / "summary.json").read_text())["suite"]["cpu_s"], 1)
         self.assertEqual(json.loads((directory / "inventory.json").read_text()), [["pkg", "b", "t"]])
         self.assertEqual(service.call_args.args[0][:4], ["heavy", "cargo", "nextest", "list"])

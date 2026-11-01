@@ -16,10 +16,10 @@ import sys
 import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
-from fab import atomic, gate, heavy, hosts as machines, log, receipts, reds, slots, units, wake as events
+from fab import atomic, gate, heavy, hosts as machines, log, queue_cpu, receipts, reds, slots, units, wake as events
 from fab.sh import Runner, run
 
 UNIT = "fab-queue.service"  # the queue's user unit on the gate machine
@@ -215,8 +215,12 @@ class Queue:
         receipt's path) and the batch counts toward the next full one (batches_since_full + 1,
         whatever the selection).
 
-        Otherwise the test steps write their JUnit (fab.reds.with_junit, directory FAB_HOME/queue,
-        name the batch id). A red is classed (fab.reds.classify on the red result and its report,
+        Otherwise default/fuzzy use fab.queue_cpu and fab.cpu, with a wrapper built once
+        in FAB_HOME/queue/<batch>/ and collector records/JUnit under each profile there.
+        cpu_trees in the batch is a list of JSON strings with per-tree CPU, test wall,
+        counts, selection completeness, optional budgets and top ten tests by CPU.
+        Budget excesses are report only; starvation alone is green. A red is classed
+        (fab.reds.classify on the red result and its report,
         with fab.receipts.load of each merged tip in merge order) unless a merged branch already
         has fab.reds.LIMIT collateral reds at its tip in state["collateral"] ({name: {"tip",
         "count"}}); the retries' results join the record's steps. Collateral: the outcome is
@@ -237,11 +241,11 @@ class Queue:
         """Keep an attempt's state, cleanup and outcome together, including errors."""
         started_ns = time.time_ns()
         started = log.now()
-        batch_id = datetime.strptime(started, "%Y-%m-%dT%H:%M:%S.%fZ").strftime("%Y%m%dT%H%M%SZ")
+        stamp = datetime.fromtimestamp(started_ns // 1_000_000_000, timezone.utc).strftime("%Y%m%dT%H%M%S")
+        batch_id = f"{stamp}{started_ns % 1_000_000_000:09d}Z"
         detail = self.home / "queue" / (batch_id + ".log")
-        # Bisection can start several attempts in one second; retain all their output.
-        if not detail.exists():
-            atomic.write(detail, "")
+        # Each bisection attempt needs fresh collector directories, even in the same second.
+        atomic.write(detail, "")
         record = {"branches": [branch.name for branch in branches], "parent": "",
                   "selection": None, "steps": [], "outcome": "error", "log": str(detail)}
         tried_before = dict(self.state["tried"])
@@ -329,9 +333,8 @@ class Queue:
             checks = gate.check_steps(self.repo, selected, paths, meta, lane="gate")
             if reuse:
                 checks = [step for step in checks if step.name == "fmt"]
-            else:
-                checks, reports = reds.with_junit(checks, self.repo, detail.parent, detail.stem)
-            outcomes += gate.run_steps(checks, detail, sh=self.sh)
+            checked, reports = queue_cpu.run_steps(checks, detail, record, sh=self.sh)
+            outcomes += checked
             green = all(step.green for step in outcomes)
             if not green and outcomes[-1].code == heavy.EX_TEMPFAIL:
                 # Short of disk is the gate's fault, not the batch's: an error, tried again.

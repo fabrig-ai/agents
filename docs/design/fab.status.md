@@ -5,6 +5,19 @@
 
 ## Present
 
+- **Queue CPU and starvation** (11-01): default/fuzzy reuse `fab/cpu.py`
+  with the queue's package scope and gate lane, one wrapper per batch, and
+  separate collector directories per step. Batch records and logs report
+  package-mapped per-tree CPU, summed test wall, pass/fail/starved/unobserved
+  counts, full versus partial selection, and the ten highest-CPU tests per
+  tree. Optional `[gate.<tree>.<profile>]` limits start unset; excesses are
+  report only, suite totals evaluated only for full selections. Starvation
+  alone is green; real failures and other exit-code checks stand. Fake
+  services/JUnit/records cover both. A real slot-5 scoped gate-lane run on
+  fabrig `eb6c40aaf5` passed 265 default and 7 fuzzy tests, reporting smith
+  and jig CPU separately. The lead lands and deploys this change; no live
+  queue unit was changed. Turning budget excesses red remains in Later (6, 14).
+
 - **After-landing CPU and starvation** (11-01): every pair and rerun uses
   the tested checkout's CPU collector, with one heavy-built wrapper per tip.
   Pair/test/run records and the page report CPU, wall, starvation and possible

@@ -163,6 +163,48 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `FAB_HOME/queue.jsonl` there (`batch`, `landed`, `rejected`,
   `collateral`), which the dispatcher reads; the tips it has tried and
   their collateral reds (13.8) are its only other state.
+- **Queue CPU, report only:** `fab/queue_cpu.py` runs the queue's `default`
+  and `fuzzy` steps through the shared `fab/cpu.py` collector (section 11),
+  keeping `check_steps`' package selection and `heavy --gate` lane. A static
+  wrapper is built once per batch through heavy in that lane, only when a
+  test step is reached. Each attempt has a nanosecond-stamped batch directory
+  `FAB_HOME/queue/<batch>/`, with `default/` and `fuzzy/` holding the collector's
+  records, inventory, private config and JUnit; its detail log is the sibling
+  `<batch>.log`. Other steps retain `gate.run_steps`' exit checks.
+  Inventory package names assign tests to the root nextest config's tree
+  clauses: `skein-*`, `forgejo-conformance`, `github-conformance`; `smith`
+  and `smith-*`; `jig` and `jig-*`; `temper`, `temper-*`, `git-transcripts`;
+  and `fabrig-boundary`. Binary ids are not package names, and there is no
+  enumerated workspace package list.
+- **The batch's CPU figures:** `queue.jsonl`'s `batch` gains `cpu_trees`, a
+  list of JSON strings (the event log's fields remain scalars or lists of
+  scalars). Each string names `profile`, `tree`, `full` (only a `full`
+  selection), `cpu_s` (test user plus system CPU, descendants included),
+  `test_wall_s` (sum of tests' wall, excluding compilation and admission),
+  `tests`, `passed`, `failed`, `starved`, `unobserved`, `incomplete`,
+  `budget`, `over`, `verdict`, and `top_cpu` (at most ten tests, descending
+  CPU). Each step logs those totals and counts. Unstarted inventory entries
+  are unobserved, never passes; incomplete accounting is a lower bound.
+  Raw per-test records stay in the batch directory, without a per-test event.
+- **Starvation stays green in the gate:** nextest slow-timeout terminations,
+  global-timeout cancellation and collector-starved tests count separately
+  from passes and failures. Starvation alone can clear nextest's test-failed
+  exit; assertions and independently observed bad exits remain red. Other
+  nextest exit codes keep their checks, even alongside starvation. Red
+  classification (13.8) reads a derived `gate-junit.xml` with those reconciled
+  cases, so a cancelled test is not retried as a failure beside a real red;
+  the collector's original JUnit stays intact. The checkout's existing wall headroom is unchanged (`120s` default, `480s`
+  fuzzy today). This implements fabrig's
+  `skein/docs/foundation/testing-strategy.md`, 2.10 and 8–8.1, with CPU
+  enforcement deferred below.
+- **Optional gate budgets, no figures supplied:** the checkout's
+  `tools/tiers/budgets.toml` may have `[gate.<tree>.default]` and
+  `[gate.<tree>.fuzzy]` tables with `cpu_suite_s` and/or `cpu_test_s`, finite
+  positive seconds. Only the user sets them. An unset budget has no verdict;
+  only a full selection evaluates a tree's suite total, while a per-test
+  limit can be reported on partial selections too. Excesses appear as `over`
+  in the batch and detail log, without rejecting it. Receipt reuse (13.8)
+  still runs only its existing fmt checks, without new CPU measurements.
 - **Retiring a landed branch:** `ready/<name>` is deleted with a lease on
   its tip, and `<name>` only when it is still that tip; a branch readied by
   hand (its ready ref alone, or a task ref that moved on) lands cleanly.
@@ -367,8 +409,8 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   `tools/tiers/run --cpu` instead would reserve the config selection fab
   needs and apply its per-pair budgets as verdicts. An isolated Python
   worker runs the collector through fab's runner seam; `collect` accepts
-  the caller's profile, command and package selection, for later queue reuse.
-  The queue's default/fuzzy accounting is not enrolled by this change.
+  the caller's profile, command and package selection. The queue reuses it
+  for default/fuzzy with report-only per-tree budgets (section 6).
   The collector verifies JUnit attempt coverage and descendant accounting
   (`tools/tiers/design.md`, 7.2–7.3); incomplete CPU on a stopped attempt
   remains a lower bound. A separate nextest listing inventories selected
@@ -1318,8 +1360,9 @@ login that still works reused across them before more are signed in.
   reaching their tasks through the dispatcher, bisection when several
   branches are suspects, and the landing report's after-landing figures.
   CPU accounting is present (11); the user sets the one total CPU budget
-  from measurements after re-tiering lands. Default/fuzzy queue CPU reuses
-  the collector entry point in a later task. QA walks as a run kind.
+  from measurements after re-tiering lands. Default/fuzzy queue CPU now
+  reuses the collector (6); making its report-only excesses red awaits the
+  user's decision and budget figures. QA walks as a run kind.
 - Elastic builders from `fab hosts check`'s numbers.
 - Logins (13.13), next: after-landing `--live` run on the
   queue's machine as well as builders (the user, 10-31); `tools/qa/logins`

@@ -15,7 +15,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from fab import atomic, nextest, tiers
+from fab import atomic, nextest, tiers, reds
 from fab.hosts import Host
 from fab.sh import Result
 
@@ -67,6 +67,8 @@ def junit_xml(cases: Sequence[tuple[str, str, str]]) -> str:
         case = ET.SubElement(suites[binary], "testcase", name=test)
         if result == "fail":
             ET.SubElement(case, "failure").text = "assertion failed\nleft: 1, right: 2"
+        elif result == "starved":
+            ET.SubElement(case, "failure", type="test timeout").text = "slow timeout"
         elif result == "skipped":
             ET.SubElement(case, "skipped")
     return ET.tostring(root, encoding="unicode")
@@ -92,8 +94,14 @@ class FakeNextest:
 
     def __call__(self, argv: Sequence[str], **kwargs) -> Result:
         argv = list(argv)
+        if argv[:3] == ["heavy", "--gate", "cc"]:
+            return Result(0)  # fake the collector build, never touch a live service
+        if len(argv) == 4 and argv[-1].endswith("/fab/cpu.py"):
+            return self.collect(json.loads(kwargs["input"]), Path(kwargs["cwd"]))
         if not any(argv[i:i + 2] == ["nextest", "run"] for i in range(len(argv))):
             return self.fallback(argv, **kwargs) if self.fallback else Result(0)
+        if "--no-run" in argv:
+            return Result(0)
         self.calls.append(argv)
 
         def option(flag):
@@ -108,8 +116,30 @@ class FakeNextest:
         if config is not None:
             data = tomllib.loads(Path(config).read_text())
             atomic.write(Path(data["profile"][profile]["junit"]["path"]), junit_xml(cases))
-        failed = any(result == "fail" for _, _, result in cases)
+        failed = any(result in ("fail", "starved") for _, _, result in cases)
         return Result(self.codes.get(key, tiers.TEST_FAILED if failed else 0))
+
+    def collect(self, request: dict, repo: Path) -> Result:
+        """Fake fab's isolated worker using fake JUnit and measured test records.
+
+        The fixture package is smith, regardless of binary id, so callers cannot
+        accidentally rely on binary ids as package ownership.
+        """
+        directory = Path(request["directory"])
+        directory.mkdir()
+        profile = request["profile"]
+        config = directory / "fixture.toml"
+        atomic.write(config, reds.overlay_text(repo, profile, directory / "junit.xml"))
+        result = self([*request["command"], "--config-file", str(config)])
+        selected = self.results.get(None) or []
+        atomic.write(directory / "inventory.json", json.dumps([["smith", b, t] for b, t, _ in selected]))
+        tests = [dict(binary_id=b, test_name=t, cpu_s=2.0, wall_s=4.0,
+                      starved=int(r == "starved"), incomplete=0)
+                 for b, t, r in selected if r != "skipped"]
+        measured = dict(tests=tests, failures=[f"{b} {t}" for b, t, r in selected if r == "fail"],
+                        suite=dict(starved_run=False, starved=sum(t["starved"] for t in tests)))
+        atomic.write(directory / "summary.json", json.dumps(measured))
+        return result
 
 
 class ChecksTestCase(unittest.TestCase):

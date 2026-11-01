@@ -1,6 +1,6 @@
 """Reuse the checkout's CPU collector (docs/design/fab.md, 11).
 
-collect accepts any nextest command/profile/package selection, including a future queue
+collect accepts any nextest command/profile/package selection, including the queue
 command. The worker isolates collector cwd and stdout and stays behind fab's runner seam.
 """
 from __future__ import annotations
@@ -48,10 +48,11 @@ def budgets(repo: Path, path: Path | None = None) -> tuple[dict, dict]:
     return total, data
 
 
-def build_wrapper(repo: Path, directory: Path, *, sh: Runner = run) -> Path:
+def build_wrapper(repo: Path, directory: Path, *, lane: str = "build", sh: Runner = run) -> Path:
     """Build once per tip in its run directory, through heavy; never replace a live wrapper."""
     wrapper = directory / "cpu-wrapper"
-    done = sh(["heavy", "cc", "-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror",
+    heavy = ["heavy", "--gate"] if lane == "gate" else ["heavy"]
+    done = sh([*heavy, "cc", "-std=c11", "-O2", "-static", "-Wall", "-Wextra", "-Werror",
                "tools/tiers/cpu-wrapper.c", "-o", str(wrapper)], cwd=str(repo))
     atomic.write(directory / "cpu-wrapper.log", done.out + done.err)
     if not done.ok:
@@ -151,7 +152,7 @@ def collect(repo: Path, profile: str, command: list[str], directory: Path, wrapp
     """Run a selected nextest command with the checkout's collector; no implicit wall timeout.
 
     command already contains heavy and any env/package selection. This function is shared
-    with future queue CPU integration; it neither chooses packages nor applies budgets.
+    with queue CPU integration; it neither chooses packages nor applies budgets.
     """
     request = dict(profile=profile, command=command, directory=str(directory),
                    wrapper=str(wrapper), wall_hard_s=wall_hard_s)
@@ -217,7 +218,12 @@ def worker(request: dict) -> int:
         code = collector["execute"](command, dict(os.environ), directory, profile, {})
         measured = summary()
         atomic.write(directory / "summary.json", json.dumps(measured) + "\n")
-        return 100 if measured["failures"] else 0 if measured["suite"]["starved_run"] or measured["suite"]["starved"] else code
+        # Preserve infrastructure/setup/bad-command exits even alongside starvation.
+        raw = json.loads((directory / "run.json").read_text()).get("returncode", code)
+        if raw not in (0, 4, 100):
+            return raw
+        return 100 if measured["failures"] else 0 if (
+            measured["suite"]["starved_run"] or measured["suite"]["starved"]) else code
     finally:
         collector["execute"].__globals__["summary"] = original
 

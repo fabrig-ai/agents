@@ -331,7 +331,7 @@ class GitTest(unittest.TestCase):
         self.assertNotIn('receipt', batch)
         self.assertTrue(batch['steps'][0].startswith('fmt:0:'))
         self.assertTrue(batch['steps'][1].startswith('check:0:'))
-        self.assertRegex(Path(batch['log']).name, r'^\d{8}T\d{6}Z\.log$')
+        self.assertRegex(Path(batch['log']).name, r'^\d{8}T\d{15}Z\.log$')
         self.assertIn('[check] true', Path(batch['log']).read_text())
         restored = queue.Queue(self.repo, home=self.data, sh=self.runner, load=self.load)
         self.assertEqual(restored.state['tried'], {b.name: b.tip for b in branches})
