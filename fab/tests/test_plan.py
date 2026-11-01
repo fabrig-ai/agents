@@ -3,8 +3,9 @@ from dataclasses import replace
 from pathlib import Path
 
 from fab import atomic, state
-from fab.plan import (EFFORTS, KINDS, LANDINGS, MODES, OPTIONS, RESERVED, Part, Plan, PlanError,
+from fab.plan import (EFFORTS, KINDS, LANDINGS, MODES, OPTIONS, RESERVED, Ladder, Part, Plan, PlanError, Rung,
                      Question, Slice, Task, load, load_plan, load_tasks, parse_options, parse_task, problems)
+from fab.tests.ladder_plans import write_ladder
 from fab.tests.support import tmp_home
 
 
@@ -152,8 +153,7 @@ class PlanTest(unittest.TestCase):
                      'story = "A task runs"\n', 'parts = ["core"]\n', 'walk = true\n'):
             with self.subTest(line=line), self.assertRaisesRegex(PlanError, r"plan\.toml: missing"):
                 self.read(FULL.replace(line, ""))
-        with self.assertRaisesRegex(PlanError, r"plan\.toml: missing part"):
-            self.read(MINIMAL.replace("part = []\n", ""))
+        self.assertEqual(self.read(MINIMAL.replace("part = []\n", "")), self.read(MINIMAL))
 
     def test_wrong_types_name_the_file(self):
         replacements = [
@@ -456,3 +456,128 @@ class ProblemsTest(unittest.TestCase):
                  "draft/c": task("draft/c", ("draft/a",)),
                  "draft/d": task("draft/d", ("draft/b", "draft/c"))}
         self.assertEqual(problems(self.plan, tasks), [])
+
+
+class LadderPlanTest(unittest.TestCase):
+    def setUp(self):
+        self.directory = write_ladder(self.enterContext(tmp_home()) / "plan")
+        self.path = self.directory / "plan.toml"
+        self.text = self.path.read_text(encoding="utf-8")
+        self.plan = load_plan(self.path)
+
+    def test_ladder_loads_without_parts_and_keeps_rung_order(self):
+        plan, tasks = load(self.directory)
+        self.assertEqual((plan.parts, plan.slices, tasks), ({}, (), {}))
+        self.assertEqual(list(plan.rungs), ["b0", "b1"])
+        self.assertEqual(plan.rungs["b0"], Rung("b0", "claude-forgejo", ("briefs/kit.md", "briefs/b0.md")))
+        self.assertEqual(plan.rungs["b1"].after, ("b0",))
+        self.assertEqual(plan.ladder, Ladder("docs/design/draft/path.md, 2 and 4",
+                                            "docs/design/debt/ladder.md"))
+        self.assertEqual(problems(plan, tasks, self.directory), [])
+
+    def test_rung_after_defaults_to_none_and_backend_is_not_checked_here(self):
+        text = self.text.replace('after = ["b0"]', '').replace('backend = "claude-forgejo"',
+                                                                         'backend = "future-backend"')
+        atomic.write(self.path, text)
+        plan = load_plan(self.path)
+        self.assertEqual(plan.rungs["b1"].after, ())
+        self.assertEqual(problems(plan, {}, self.directory), [])
+
+    def test_fixture_custom_order_and_brief_text(self):
+        directory = write_ladder(self.directory, "ordered",
+                                 {"z": ("chatgpt-github", ()), "a": ("chatgpt-forgejo", ("z",))},
+                                 briefs={"briefs/kit.md": "Shared kit changed.\n"})
+        plan, tasks = load(directory)
+        self.assertEqual((plan.draft, list(plan.rungs)), ("ordered", ["z", "a"]))
+        self.assertEqual(plan.rungs["a"].backend, "chatgpt-forgejo")
+        self.assertEqual(plan.rungs["a"].after, ("z",))
+        self.assertEqual((directory / "briefs/kit.md").read_text(), "Shared kit changed.\n")
+        self.assertEqual(tasks, {})
+
+    def test_ladder_and_rung_fields_require_their_types(self):
+        cases = [('happy_path = "docs/design/draft/path.md, 2 and 4"', 'happy_path = 1'),
+                 ('backlog = "docs/design/debt/ladder.md"', 'backlog = false'),
+                 ('id = "b0"', 'id = 0'), ('backend = "claude-forgejo"', 'backend = []'),
+                 ('brief = ["briefs/kit.md", "briefs/b0.md"]', 'brief = "briefs/b0.md"'),
+                 ('brief = ["briefs/kit.md", "briefs/b0.md"]', 'brief = [1]'),
+                 ('after = ["b0"]', 'after = "b0"'), ('after = ["b0"]', 'after = [false]')]
+        for old, new in cases:
+            with self.subTest(new=new):
+                atomic.write(self.path, self.text.replace(old, new))
+                with self.assertRaisesRegex(PlanError, r"plan\.toml:.*" + new.split()[0]):
+                    load_plan(self.path)
+        for entry in ('ladder = []', 'ladder = false', 'rung = {}', 'rung = [1]'):
+            with self.subTest(entry=entry):
+                atomic.write(self.path, 'draft = "ladder"\nrepo = "agents"\n' + entry)
+                with self.assertRaisesRegex(PlanError, r"plan\.toml:.*" + entry.split()[0]):
+                    load_plan(self.path)
+
+    def test_ladder_and_rung_required_fields_name_the_file(self):
+        lines = ['happy_path = "docs/design/draft/path.md, 2 and 4"',
+                 'backlog = "docs/design/debt/ladder.md"', 'id = "b0"',
+                 'backend = "claude-forgejo"', 'brief = ["briefs/kit.md", "briefs/b0.md"]']
+        for line in lines:
+            with self.subTest(line=line):
+                atomic.write(self.path, self.text.replace(line + "\n", "", 1))
+                with self.assertRaisesRegex(PlanError, "plan.toml: missing " + line.split()[0]):
+                    load_plan(self.path)
+
+    def test_duplicate_rung_is_refused_before_dictionary_can_hide_it(self):
+        atomic.write(self.path, self.text.replace('id = "b1"', 'id = "b0"'))
+        with self.assertRaisesRegex(PlanError, "plan.toml: rung b0 is used twice"):
+            load_plan(self.path)
+
+    def test_parts_or_rungs_and_ladder_are_required(self):
+        self.assertEqual(problems(replace(self.plan, rungs={}, ladder=None), {}),
+                         ["plan has neither parts nor rungs"])
+        self.assertEqual(problems(replace(self.plan, rungs={}), {}),
+                         ["[ladder] requires rungs", "plan has neither parts nor rungs"])
+        self.assertEqual(problems(replace(self.plan, ladder=None), {}), ["rungs require [ladder]"])
+        self.assertEqual(problems(replace(self.plan, landing="integration"), {}),
+                         ["rungs require queue landing"])
+
+    def test_bad_rung_ids_and_duplicate_ids_in_plain_plan(self):
+        for identifier in ("", "B0", "b_0", "b.0", "b/0", "é", "b0\n"):
+            with self.subTest(identifier=identifier):
+                rung = replace(self.plan.rungs["b0"], id=identifier)
+                self.assertEqual(problems(replace(self.plan, rungs={identifier: rung}), {}),
+                                 [f"rung {identifier!r} id must match [a-z0-9-]+"])
+        rung = self.plan.rungs["b0"]
+        self.assertEqual(problems(replace(self.plan, rungs={"b0": rung, "alias": rung}), {}),
+                         ["rung b0 is used twice"])
+
+    def test_rung_reference_cycle_and_missing_briefs_are_sorted(self):
+        rungs = {"b1": replace(self.plan.rungs["b1"], after=("b0", "missing")),
+                 "b0": replace(self.plan.rungs["b0"], after=("b1",))}
+        plan = replace(self.plan, rungs=rungs, ladder=None, landing="integration")
+        (self.directory / "briefs/kit.md").unlink()
+        (self.directory / "briefs/b1.md").unlink()
+        expected = ["rung b0 brief file missing: briefs/kit.md",
+                    "rung b1 after names unknown rung missing",
+                    "rung b1 brief file missing: briefs/b1.md",
+                    "rung b1 brief file missing: briefs/kit.md", "rung cycle: b0, b1",
+                    "rungs require [ladder]", "rungs require queue landing"]
+        self.assertEqual(problems(plan, {}, self.directory), expected)
+        self.assertEqual(problems(replace(plan, rungs=dict(reversed(list(rungs.items())))),
+                                  {}, self.directory), expected)
+        self.assertEqual(problems(plan, {}), [line for line in expected if "file missing" not in line])
+
+    def test_rung_self_cycle(self):
+        rungs = {"b0": replace(self.plan.rungs["b0"], after=("b0",))}
+        self.assertEqual(problems(replace(self.plan, rungs=rungs), {}), ["rung cycle: b0"])
+
+    def test_load_checks_brief_files_and_names_directory(self):
+        path = self.directory / "briefs/b1.md"
+        path.unlink()
+        path.mkdir()
+        with self.assertRaises(PlanError) as raised:
+            load(self.directory)
+        self.assertEqual(str(raised.exception),
+                         f"{self.directory}: rung b1 brief file missing: briefs/b1.md")
+
+    def test_triage_is_reserved_for_calls(self):
+        self.assertIn("triage", RESERVED)
+        plan = Plan("draft", "repo", (), 1, 2,
+                    {"triage": Part("triage", "Triage", "direct", (), "design.md")},
+                    (Slice(1, "Story", ("triage",), False),))
+        self.assertEqual(problems(plan, {}), ["part triage takes a reserved id"])

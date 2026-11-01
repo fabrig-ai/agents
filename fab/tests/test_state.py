@@ -4,8 +4,9 @@ from contextlib import redirect_stderr, redirect_stdout
 from copy import deepcopy
 from dataclasses import replace
 
-from fab import log, state
-from fab.plan import Part, Plan, Task
+from fab import atomic, log, state
+from fab.plan import Part, Plan, Task, load
+from fab.tests.ladder_plans import write_ladder
 from fab.tests.support import tmp_home
 
 
@@ -250,11 +251,18 @@ walk = false
         self.assertEqual((code, out), (1, ""))
         self.assertIn("a.md", err)
 
-    def test_main_empty_plan_prints_nothing(self):
+    def test_main_empty_plan_reports_missing_parts_and_rungs(self):
         with tmp_home() as home:
-            (home / "tasks").mkdir()
-            (home / "plan.toml").write_text('draft = "draft"\nrepo = "repo"\npart = []\n')
-            self.assertEqual(self.run_status(home), (0, "", ""))
+            atomic.write(home / "plan.toml", 'draft = "draft"\nrepo = "repo"\npart = []\n')
+            self.assertEqual(self.run_status(home), (1, "", "plan has neither parts nor rungs\n"))
+
+    def test_main_ladder_prints_no_tasks_and_has_no_part_statuses(self):
+        with tmp_home() as home:
+            directory = write_ladder(home / "plan")
+            plan, tasks = load(directory)
+            self.assertEqual(state.part_statuses(plan, tasks, {}), {})
+            self.assertEqual(state.fold(tasks, []), {})
+            self.assertEqual(self.run_status(directory), (0, "", ""))
 
 
 class AnswerUnparksOnlyTest(unittest.TestCase):

@@ -7,10 +7,12 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import atomic, calls, cli, designer, log
+from fab import atomic, calls, cli, designer, dispatch, log
 from fab import run as runs
-from fab.plan import Part, Plan, Task, load_plan, load_tasks, parse_options
+from fab.hosts import Host
+from fab.plan import Part, Plan, Task, load, load_plan, load_tasks, parse_options
 from fab.sh import Failed, Result
+from fab.tests.ladder_plans import write_ladder
 from fab.tests.support import FakeRunner, git, git_pair, tmp_home
 
 FACTS = dict(call_id="call-1", branch="calls/call-1", report="/reports/call-1.md")
@@ -728,3 +730,29 @@ class MainTest(unittest.TestCase):
         self.assertEqual(result, 1)
         self.assertIn("fab call:", errors)
         start.assert_not_called()
+
+
+class LadderLifecycleTest(unittest.TestCase):
+    def test_ladder_has_no_design_or_retire_actions(self):
+        with tmp_home() as home:
+            plan, tasks = load(write_ladder(home / "docs/plan/ladder"))
+            for direct in (True, False):
+                with self.subTest(direct=direct):
+                    plan = replace(plan, direct=direct)
+                    hosts = {"builder": Host("builder", "fake@builder", ("builder",), places=1)}
+                    actions = dispatch.decide(plan, tasks, [], hosts)
+                    self.assertEqual([action.kind for action in actions], ["flow"])
+                    self.assertFalse(designer.retire_due(plan, tasks, []))
+                    self.assertEqual(dispatch.call_actions(plan, tasks, [], [], "2026-11-01T00:00:00Z"), [])
+
+    def test_design_call_refuses_a_rung_as_a_part_without_starting(self):
+        with tmp_home() as home:
+            directory = write_ladder(home / "docs/plan/ladder")
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(home)))
+            out, err = io.StringIO(), io.StringIO()
+            with patch.object(calls, "run", fake), patch.object(calls, "start") as start:
+                with redirect_stdout(out), redirect_stderr(err):
+                    code = calls.main(["skeleton", "b0", "--plan", str(directory)])
+            self.assertEqual((code, out.getvalue()), (1, ""))
+            self.assertIn("unknown part 'b0'", err.getvalue())
+            start.assert_not_called()
