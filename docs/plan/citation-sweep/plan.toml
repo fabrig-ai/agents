@@ -11,6 +11,7 @@ landing = "queue"
 # notes/common.md, the decisions and the critical path in notes/decisions.md.
 # dogfood-faults, which the request waits for, has landed every task.
 
+retired = true
 [buffer]
 low = 1.0
 high = 2.0
