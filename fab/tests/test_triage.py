@@ -2,8 +2,9 @@
 
 import copy
 import unittest
+from unittest.mock import patch
 
-from fab import dispatch, findings as qa, log, triage
+from fab import atomic, calls, channel, dispatch, findings as qa, log, triage
 from fab.plan import load_plan
 from fab.tests.ladder_plans import write_ladder
 from fab.tests.qa_records import (
@@ -417,6 +418,112 @@ class TriageBacklogTest(TriageTest):
         for branch in ("ladder/ladder/backlog-2/extra", "ladder/ladder/backlog-no", "ladder/ladder/backlog-0"):
             events += [{**_ready(3), "branch": branch}, {**_rejected(3), "branch": branch}]
         self.assertIsNone(triage.backlog_held(self.plan, events, "render"))
+
+
+class TriageBriefTest(TriageTest):
+    def setUp(self):
+        super().setUp()
+        self.root = log.home().parent
+        self.directory = self.root / "plan"
+        atomic.write(self.root / "docs/design/draft/path.md",
+                     "# Path\n\n## 1. Outside\nUncited setup.\n\n## 2. Story\nHappy story.\n"
+                     "\n## 3. Aside\nUncited aside.\n\n## 4. Acceptance\nHappy bar.\n")
+        self.editions = {"b0": "first-edition", "b1": "second-edition"}
+
+    def compile(self, events):
+        return triage.brief(self.plan, events, self.root, self.directory, self.editions,
+                            call_id="triage-preview", branch="", report="/report.md", now=STAMP)
+
+    def test_sections_new_fields_answers_and_only_affected_rung_briefs(self):
+        whole = "First step.\n\n## Nested detail\nLast step, café.\n"
+        atomic.write(self.directory / "briefs/b0.md", whole)
+        events = _walk(verdict="fail", title="A café stalls", blocking=True, index=7,
+                       commit="walked-sha", edition="walked-edition", severity="high", area="forge",
+                       reproduction="First step\nSecond step", expected="Success", seen="Failure",
+                       evidence=("log:first\ncontinued", "screenshot:second"))
+        events += [finding_triaged("finding-1", "user", question="Which login?"),
+                   log.record(channel.ANSWERED, ts=STAMP, subject="ladder/triage/finding-1",
+                              call="asked-1", by="owner", question="Which login?", answer="Use café\nThen retry.")]
+        events += _walk(2, verdict="void", again="finding-9") + _walk(3, draft="other")
+        before = copy.deepcopy(events)
+        text = self.compile(events)
+        headings = ["Role", "Call facts", "The happy path", "The rungs", "New findings", "Open findings"]
+        positions = [text.index(f"# {name}\n\n") for name in headings]
+        self.assertEqual(positions, sorted(positions))
+        self.assertIn(calls.ROLES["triage"].read_text(), text)
+        self.assertIn(calls._facts("triage-preview", "", "/report.md"), text)
+        self.assertIn("Happy story.", text)
+        self.assertIn("Happy bar.", text)
+        self.assertNotIn("Uncited", text)
+        for state in qa.rungs(self.plan, events, self.editions, STAMP):
+            self.assertIn(qa.line(state), text)
+        self.assertIn(whole, text)
+        self.assertEqual(text.count("## b0: briefs/b0.md"), 1)
+        self.assertIn("The walk kit.\n", text)
+        self.assertNotIn("Walk b1.", text)
+        self.assertNotIn("## b1: briefs/b1.md", text)
+        for fragment in ("- Id: finding-1", "- Kind: qa", "- Draft: ladder", "- Walk: walk-1",
+                         "- Index: 7", "- Rung: b0", "- Backend: chatgpt-forgejo", "- Commit: walked-sha",
+                         "- Edition: walked-edition", "- Title: A café stalls", "- Severity: high",
+                         "- Area: forge", "- Blocking: True", "- Reproduction: First step\nSecond step",
+                         "- Expected: Success", "- Seen: Failure", "log:first\ncontinued", "screenshot:second",
+                         f"- Raised: {STAMP}", "- Verdict: fail", "- Verdict: void", "- Again: finding-9"):
+            self.assertIn(fragment, text)
+        first = text.split("# New findings\n\n", 1)[1].split("## finding-2:", 1)[0]
+        self.assertNotIn("- Again:", first)
+        self.assertIn(channel.answers_text("ladder/triage/finding-1", events), first)
+        self.assertNotIn("## finding-3:", text)
+        self.assertEqual(events, before)
+
+    def test_each_affected_rung_includes_its_files_in_plan_order(self):
+        events = _walk() + [walk_started("walk-2", "b1"), finding_raised("finding-2", "walk-2", "b1"),
+                            walk_ended("walk-2", "pass", ("finding-2",))]
+        text = self.compile(events)
+        self.assertIn("Walk b1.\n", text)
+        self.assertLess(text.index("## b0: briefs/kit.md"), text.index("## b0: briefs/b0.md"))
+        self.assertLess(text.index("## b0: briefs/b0.md"), text.index("## b1: briefs/kit.md"))
+        self.assertLess(text.index("## b1: briefs/kit.md"), text.index("## b1: briefs/b1.md"))
+
+    def test_open_lines_cover_asked_routed_landed_and_backlog_with_sightings(self):
+        states = ("asked", "foreman", "deciding", "decided", "repairing", "landed", "backlog")
+        events = []
+        for number, state in enumerate(states, 1):
+            identifier, task, run = f"finding-{number}", f"ladder/finding-{number}", f"foreman-{number}"
+            events += _walk(number, title=f"Open {state}\ncontinued", area="forge\napi")
+            decision = {"asked": "user", "backlog": "backlog"}.get(state, "path")
+            events += [finding_triaged(identifier, decision)]
+            if state in ("deciding", "decided", "repairing", "landed"):
+                events += [log.record("run.started", ts=STAMP, task=task + "/foreman", run=run, kind="foreman")]
+            if state in ("decided", "repairing", "landed"):
+                events += [log.record("run.ended", ts=STAMP, task=task + "/foreman", run=run, outcome="done")]
+            if state in ("repairing", "landed"):
+                events += [log.record("finding.settled", ts=STAMP, finding=identifier, run=run, verdict="fix",
+                                      reason="Repair", section="Fix")]
+            if state == "landed":
+                events += [_landed(task)]
+        events += _walk(8) + [finding_merged("finding-8", "finding-1")]
+        events += _walk(9) + [finding_triaged("finding-9", "drop")]
+        events += _walk(10, draft="other") + [finding_triaged("finding-10", "backlog")]
+        events += _walk(11)
+        text = self.compile(events).split("# Open findings\n\n", 1)[1]
+        lines = text.splitlines()
+        self.assertEqual(len(lines), len(states))
+        for number, state in enumerate(states, 1):
+            sightings = "finding-8" if number == 1 else "(none)"
+            self.assertEqual(lines[number - 1], f"- finding-{number}: {state}; rung b0; area forge api; "
+                             f"Open {state} continued; sightings: {sightings}")
+
+    def test_empty_findings_keep_sections_without_rung_brief_files(self):
+        (self.directory / "briefs/b0.md").unlink()
+        text = self.compile([])
+        self.assertIn("# New findings\n\n", text)
+        self.assertIn("# Open findings\n\n", text)
+        self.assertNotIn("The walk kit.", text)
+
+    def test_oversize_brief_raises_without_trimming(self):
+        with patch.object(calls, "BRIEF_LIMIT", len(self.compile(_walk())) - 1):
+            with self.assertRaisesRegex(ValueError, "brief exceeds BRIEF_LIMIT"):
+                self.compile(_walk())
 
 
 if __name__ == "__main__":

@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import re
+import sys
 from collections.abc import Mapping
+from dataclasses import fields
 from datetime import datetime, timedelta
+from pathlib import Path
 
-from fab import findings as qa
-from fab.plan import Plan
+from fab import calls, channel, findings as qa, log, walks
+from fab.plan import Plan, load_plan
+from fab.sh import Failed
 
 ROLE = "triage"  # the report-only director call
 AT = 4  # new findings that start triage at once, as dispatch.ANSWER_AT
@@ -246,3 +251,87 @@ def backlog_held(plan: Plan, events: list[dict], render: str) -> dict | None:
 def _strings(event: dict, fields: str) -> bool:
     """Whether the fields used from a log record are all strings."""
     return all(isinstance(event.get(field), str) for field in fields.split())
+
+
+def brief(plan: Plan, events: list[dict], root: Path, plan_dir: Path,
+          editions: Mapping[str, str], *, call_id: str, branch: str, report: str,
+          now: str) -> str:
+    """Compile role, facts, happy path, rungs, new findings and open merge targets.
+
+    Include whole brief files only for rungs with new findings, and each finding's
+    user answers. Refuse a plan without rungs or a ladder; raise on BRIEF_LIMIT
+    overflow rather than trim context (docs/design/fab.md, 13.15, Its brief).
+    """
+    if not plan.rungs or plan.ladder is None:
+        raise ValueError("triage requires a plan with rungs and a ladder")
+    found = [finding for finding in qa.findings(events).values() if finding.draft == plan.draft]
+    new = [finding for finding in found if finding.state == "new"]
+    rung_text = [qa.line(state) for state in qa.rungs(plan, events, editions, now)]
+    affected = {finding.rung for finding in new}
+    for rung in plan.rungs.values():
+        if rung.id in affected:
+            for path in rung.brief:
+                rung_text.append(f"## {rung.id}: {path}\n\n"
+                                 + (plan_dir / path).read_text(encoding="utf-8"))
+    new_text = []
+    for finding in new:
+        lines = [f"## {finding.id}: {finding.title}", "", "- Kind: qa"]
+        for field in fields(finding):
+            if field.name == "answers" or (field.name == "again" and not finding.again):
+                continue
+            value = getattr(finding, field.name)
+            if isinstance(value, tuple):
+                value = ", ".join(value) or "(none)"
+            lines.append(f"- {field.name.capitalize()}: {value}")
+        answers = channel.answers_text(f"{subject(plan.draft)}/{finding.id}", events)
+        if answers:
+            lines.extend(("", "### The user's answers", "", answers))
+        new_text.append("\n".join(lines))
+    open_text = []
+    for finding in found:
+        if finding.state in ("asked", "foreman", "deciding", "decided", "repairing", "landed", "backlog"):
+            line = (f"- {finding.id}: {finding.state}; rung {finding.rung}; area {finding.area}; "
+                    f"{finding.title}; sightings: {', '.join(finding.sightings) or '(none)'}")
+            open_text.append(" ".join(line.splitlines()))
+    return calls._brief([
+        ("Role", calls.ROLES[ROLE].read_text(encoding="utf-8")),
+        ("Call facts", calls._facts(call_id, branch, report)),
+        ("The happy path", calls._cited_design(root, plan.ladder.happy_path)),
+        ("The rungs", "\n\n".join(rung_text)),
+        ("New findings", "\n\n".join(new_text)),
+        ("Open findings", "\n".join(open_text)),
+    ])
+
+
+def main(argv: list[str]) -> int:
+    """Compile or run fab call triage --plan PLAN_DIR [--brief-only].
+
+    Use the plan's repository and trunk for a report-only call, print its outcome,
+    and return 0 only for done or a printed brief; refusals and failed calls return
+    1 (docs/design/fab.md, 13.15, Triage is a Claude call in the director's role).
+    """
+    parser = argparse.ArgumentParser(prog="fab call triage", description=main.__doc__)
+    parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--brief-only", action="store_true")
+    args = parser.parse_args(argv)
+    try:
+        directory = args.plan.resolve()
+        plan = load_plan(directory / "plan.toml")
+        if not plan.rungs or plan.ladder is None:
+            raise ValueError("triage requires a plan with rungs and a ladder")
+        checkout = calls.run(["git", "rev-parse", "--show-toplevel"], cwd=str(directory), check=True)
+        root = Path(checkout.out.strip()).resolve()
+        text = brief(plan, log.read(), root, directory, walks.editions(plan, directory, sh=calls.run),
+                     call_id="(assigned at start)", branch="(assigned at start)",
+                     report="(assigned at start)", now=log.now())
+        if args.brief_only:
+            print(text)
+            return 0
+        repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
+        result = calls.start(ROLE, subject(plan.draft), repo, text, sh=calls.run,
+                             base=plan.trunk, report_only=True)
+        print(result["outcome"])
+        return 0 if result["outcome"] == "done" else 1
+    except (OSError, ValueError, Failed) as error:
+        print(f"fab call triage: {error}", file=sys.stderr)
+        return 1

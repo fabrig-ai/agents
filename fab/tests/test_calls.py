@@ -14,6 +14,7 @@ from unittest.mock import Mock, patch
 from fab import call_review, calls, channel, cli, log
 from fab.plan import Part, Plan, Question, Slice, Task, load_tasks
 from fab.sh import Failed, Result
+from fab.tests.ladder_plans import write_ladder
 from fab.tests.support import FakeRunner, call_started, call_ended, tmp_home
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -978,6 +979,90 @@ class StartTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_triage_runs_report_only_with_medium_effort_in_the_plan_repository(self):
+        cases = (("agents", "queue", "done", 0), ("agents", "integration", "done", 0),
+                 ("fabrig", "integration", "question", 1), ("fabrig", "queue", "failed", 1))
+        for repo_name, landing, outcome, code in cases:
+            with self.subTest(repo=repo_name, landing=landing, outcome=outcome), tmp_home() as root:
+                directory = write_ladder(root / "docs/plan/ladder")
+                path = directory / "plan.toml"
+                write(path, path.read_text().replace('repo = "agents"', f'repo = "{repo_name}"')
+                      .replace('landing = "queue"', f'landing = "{landing}"'))
+                write(root / "docs/design/draft/path.md", "## 2. Story\nThe story.\n## 4. Bar\nThe bar.\n")
+
+                def claude(call):
+                    call_dir = Path(call.cwd).parent
+                    text = (call_dir / "brief.md").read_text()
+                    self.assertIn(calls.ROLES["triage"].read_text(), text)
+                    self.assertIn(f"- Call: {call_dir.name}", text)
+                    self.assertIn("# The happy path\n\n", text)
+                    write(call_dir / "report.md", f"{outcome.capitalize()}: decisions\n")
+                    return Result(0, "{}")
+
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                fake.on(["git", "show"], Result(0, "Committed rung brief.\n")).on(["claude"], claude)
+                output = io.StringIO()
+                with patch.object(calls, "run", fake), redirect_stdout(output):
+                    self.assertEqual(cli.main(["call", "triage", "--plan", str(directory)]), code)
+                self.assertEqual(output.getvalue(), f"{outcome}\n")
+                started, ended = log.read()
+                self.assertEqual((started["role"], started["subject"]), ("triage", "ladder/triage"))
+                self.assertNotIn("branch", started)
+                self.assertEqual(ended["outcome"], outcome)
+                self.assertEqual(call_review.chains(log.read()), {})
+                command = next(call for call in fake.calls if call.argv[0] == "claude")
+                self.assertEqual(command.argv[command.argv.index("--effort") + 1], "medium")
+                repo = log.home() / "repos/fabrig" if repo_name == "fabrig" else root
+                trunk = "ladder/integration" if landing == "integration" else "main"
+                worktree = str(Path(command.cwd))
+                self.assertIn(["git", "worktree", "add", "--detach", worktree, f"origin/{trunk}"], fake.argvs())
+                self.assertIn(["git", "worktree", "remove", "--force", worktree], fake.argvs())
+                for call in fake.calls:
+                    if call.argv[:2] == ["git", "worktree"] or call.argv[:2] == ["git", "fetch"]:
+                        self.assertEqual(call.cwd, str(repo))
+                self.assertFalse(any(argv[:2] == ["git", "push"] for argv in fake.argvs()))
+                self.assertEqual([argv for argv in fake.argvs() if argv[:2] == ["git", "show"]], [
+                    ["git", "show", f"origin/main:docs/plan/ladder/briefs/{name}.md"]
+                    for name in ("kit", "b0", "kit", "b1")])
+
+    def test_triage_brief_only_prints_context_and_starts_nothing(self):
+        with tmp_home() as root:
+            directory = write_ladder(root / "docs/plan/ladder")
+            write(root / "docs/design/draft/path.md", "## 2. Story\nThe story.\n## 4. Bar\nThe bar.\n")
+            fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+            fake.on(["git", "show"], Result(0, "Committed rung brief.\n"))
+            output = io.StringIO()
+            with patch.object(calls, "run", fake), patch.object(calls, "start") as start, redirect_stdout(output):
+                self.assertEqual(calls.main(["triage", "--plan", str(directory), "--brief-only"]), 0)
+            start.assert_not_called()
+            self.assertIn(calls.ROLES["triage"].read_text(), output.getvalue())
+            self.assertIn("# New findings\n\n", output.getvalue())
+            self.assertIn("The story.", output.getvalue())
+            self.assertEqual(log.read(), [])
+            self.assertTrue(all(argv[:2] in (["git", "rev-parse"], ["git", "show"]) for argv in fake.argvs()))
+
+    def test_triage_refuses_non_ladder_missing_plan_and_brief_compilation_errors(self):
+        for failure, reason in (("no-rungs", "plan with rungs"), ("missing-plan", "plan.toml"),
+                                ("edition", "cannot read brief"), ("checkout", "git rev-parse"),
+                                ("oversize", "brief exceeds BRIEF_LIMIT")):
+            with self.subTest(failure=failure), tmp_home() as root:
+                directory = write_ladder(root / "docs/plan/ladder")
+                write(root / "docs/design/draft/path.md", "## 2. Story\nStory.\n## 4. Bar\nBar.\n")
+                if failure == "no-rungs":
+                    write(directory / "plan.toml", 'draft = "ladder"\nrepo = "agents"\n')
+                elif failure == "missing-plan":
+                    (directory / "plan.toml").unlink()
+                fake = FakeRunner().on(["git", "rev-parse"],
+                                       Result(1 if failure == "checkout" else 0, str(root)))
+                fake.on(["git", "show"], Result(1 if failure == "edition" else 0, "Brief.\n"))
+                errors = io.StringIO()
+                with patch.object(calls, "run", fake), patch.object(calls, "start") as start, \
+                     patch.object(calls, "BRIEF_LIMIT", 1 if failure == "oversize" else calls.BRIEF_LIMIT), \
+                     redirect_stderr(errors):
+                    self.assertEqual(calls.main(["triage", "--plan", str(directory)]), 1)
+                start.assert_not_called()
+                self.assertIn(reason, errors.getvalue())
+
     def test_answer_includes_red_task_questions_for_both_landing_modes(self):
         from fab.tests.test_tier_reds import repair_events
         for landing in ("queue", "integration"):

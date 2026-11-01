@@ -30,6 +30,7 @@ ROLES = {
     "skeleton": Path(__file__).resolve().parent / "roles" / "skeleton.md",
     "answer": Path(__file__).resolve().parent / "roles" / "answerer.md",
     "reply": Path(__file__).resolve().parent / "roles" / "reply.md",
+    "triage": Path(__file__).resolve().parent / "roles" / "triager.md",
     "review": Path(__file__).resolve().parent / "roles" / "reviewer.md",
     "amend": Path(__file__).resolve().parent / "roles" / "amender.md",
     "cut": Path(__file__).resolve().parent / "roles" / "cut.md",
@@ -442,9 +443,9 @@ def open_questions(events: Iterable[dict]) -> list[dict]:
 
 
 # Each Claude role's effort, as the user's model sets it (execution-modes.md, the roles table):
-# the answerer and issue reply are medium; the designer's calls, the skeleton author,
+# the answerer, issue reply and triager are medium; the designer's calls, the skeleton author,
 # its amendments and the structure reviewer are high. Passed explicitly, so a user's own default never leaks in.
-EFFORTS = {"answer": "medium", "reply": "medium"}
+EFFORTS = {"answer": "medium", "reply": "medium", "triage": "medium"}
 EFFORT = "high"
 
 
@@ -633,19 +634,22 @@ def _call_result(report_path: Path) -> str:
 
 def main(argv: list[str]) -> int:
     """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
-    Delegate cut, contract, decision and retire to fab.designer.main.
+    Delegate cut, contract, decision and retire to fab.designer.main, and triage
+    to fab.triage.main.
 
     Answer briefs contain only queued questions and include any foreman report.
     Amend requires a known chain in state amend and reuses its subject and branch.
     --brief-only prints the brief; otherwise print outcome and branch, exiting 0 for Done
     and 1 for a failed call, invalid chain or compilation error."""
-    from fab import call_review, designer
+    from fab import call_review, designer, triage
 
+    if argv and argv[0] == "triage":
+        return triage.main(argv[1:])
     if argv and argv[0] in designer.ROLES:
         return designer.main(argv)
     parser = argparse.ArgumentParser(prog="fab call", description=__doc__)
     commands = parser.add_subparsers(dest="role", required=True)
-    for role in (name for name in ROLES if name not in (*designer.ROLES, "reply")):
+    for role in (name for name in ROLES if name not in (*designer.ROLES, "reply", "triage")):
         command = commands.add_parser(role)
         if role in ("skeleton", "amend"):
             command.add_argument("part" if role == "skeleton" else "root")
