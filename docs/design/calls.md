@@ -82,11 +82,12 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     call that lands through `fab land` (this repository), the finish action
     reads the step of the `branch.rejected` that `fab land` logged during it:
     - Any step (`fetch`, `rebase`, `paths`, `test`, `push`): no
-      `call.finished` is logged. The refusal counts as a refusal of the
-      chain, as fabrig's queue rejections do (integration.md 2;
-      `_fold_review` already counts a `branch.rejected` carrying the chain's
-      branch and a step): the first since the chain's reset is amended, the
-      next holds it for settle, under the chain's one amend count. Two
+      `call.finished` is logged. A `rebase`, `paths` or `test` refusal
+      counts as a refusal of the chain, as fabrig's queue rejections do
+      (integration.md 2; `_fold_review` counts a `branch.rejected` carrying
+      the chain's branch and a step, `fab land`'s `fetch` and `push` apart):
+      the first since the chain's reset is amended, the next holds it for
+      settle, under the chain's one amend count. Two
       exceptions end the chain instead: a finish whose branch a
       `branch.landed` already names (landed by hand) logs `call.finished`
       done, and a `fetch` refusal whose branch is gone from origin logs
@@ -481,3 +482,20 @@ before it lands (2).
 - A cap on a call's context or turns, once the user sets one from the
   measurements (reports.md 3); Claude and Codex usage against their plans' limits,
   once the limits are recorded somewhere fab can read.
+- A `fab land` park (2) the page can quote: `call.parked`'s `report` is a path
+  everywhere else, and this park holds the log's text, so the page and the
+  issue say `(report missing)` (`calls.status.md`). The log kept in a file
+  under `FAB_HOME`, or carried in the reason.
+- A `fetch` or `push` retry (2) with its own wake at `LAND_AFTER`, should the
+  wait for the next tick matter: the backstop's ten minutes can double it.
+- A call from main that starts from main's tip: `fab.calls.start` fetches
+  first only for fabrig, a branch, a report-only call or another base, so a
+  retire started right after its plan's last landing misses that landing
+  (`calls.status.md`, mechanisms-out's retire).
+- The mechanisms the calls still do (mechanisms-out's design review, 11-01;
+  `coord/loop/README.md`, "North-star breaches seen"; the request left them):
+  `[buffer]` in the cut's plan.toml; calls pushing their own branch
+  (`calls.start` pushes only for fabrig); the cut's `fab wake`; `bin/fab
+  status` checked only by the cut, the retire and the amender; "a pushed spec
+  never changes" unchecked at a cut's merge; the amender copying the root's
+  `Answered:` line, partly judgement.

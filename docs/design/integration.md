@@ -720,3 +720,8 @@ anything.
   trunk after each merge, the codex-kit run's lesson (two parallel branches
   meeting at clippy found only at the end check); once the replay matches
   the manual run.
+- The cut's seeded `draft`, `repo` and `sources` (3) restored as its options
+  are: only the brief's and the roles' text keeps the cut from changing them.
+- A cut's plan.toml that does not parse parked rather than retried: with
+  options to restore, each tick logs a failed note and nothing asks anyone
+  (`integration.status.md`).

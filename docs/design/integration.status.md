@@ -98,8 +98,42 @@
   takes `trunk` (default `main`) and counts a done rebase run from
   `origin/<trunk>`; `fab.dispatch` passes `plan.trunk`. Tested in
   `test_call_review.py` and `test_dispatch.py`.
+- **Code writes the cut's inputs and options** (3, "The cut's inputs"; the
+  user, 11-01; plan `docs/plan/mechanisms-out`, retired 11-01; 3806c34).
+  `fab.calls.start`'s `seed` (`_seed_call`) writes its paths after `worktree
+  add`, refuses one outside the worktree, and commits `<draft>: plan options`
+  as fab before `call.started`. `fab call cut` (`fab.designer.main`, not with
+  `--brief-only`) seeds every cut with `plan_seed`: `draft`, `repo`, `sources`
+  and, only when given, the options under `OPTION_COMMENT`. `cut_brief`'s
+  `- Plan:` line and `Plan options` text, and `fab/roles/cut.md`,
+  `cut-fabrig.md` and `cut-run.md`, say so. `fab.designer.restore_options` is
+  the one writer of the option lines; equal parsed values, of the same type,
+  leave the text alone. `_cut_options` reads the root cut's `call.started`
+  `options`, never an amendment's. An integration plan's restore is
+  `fab.dispatch._restore_trunk_options`, in `_merge_branch` after a clean merge
+  (a baseline recount's included) and before the push, committing `<draft>:
+  plan options restored` on the trunk. A queue plan's is `_pre_deliver`
+  (calls.status.md), on the cut's branch once the call has ended, with
+  retire's guards and open finish, worktree `FAB_HOME/options/<root>`; a
+  missing plan.toml makes no restore. Departure: `_merge_branch` has no plan
+  directory, so the trunk's restore finds the path by `git ls-files` of
+  `docs/plan/<draft>/plan.toml` and `*/docs/plan/<draft>/plan.toml`, leaving
+  out `old/` and raising on more than one. Tested with real git and fake
+  runners (`test_calls.py` `test_seed_*`, `test_designer.py` `test_restore_*`,
+  `test_dispatch.py` `test_cut_*`, `test_queue_cut_*`). Not seen live: the
+  last cuts, df-followups' and precheck-starved's (18:00 and 18:02Z), came
+  before it landed, so no cut has been seeded and no restore has run.
 
 ## Gaps and departures
+
+- **Only the options are restored** (3, 5; mechanisms-out): the seeded
+  `draft`, `repo` and `sources` are kept by the brief's and roles' text alone,
+  as the design says, and `[buffer]` is still the cut's (calls.md 5).
+- **A cut's plan.toml that does not parse is retried, not parked** (3, 5): with
+  options to restore, `restore_options` raises, in `_pre_deliver` for a queue
+  plan and in `_merge_branch` for an integration plan. Each tick then logs a
+  failed note and leaves the finish open, and nothing asks anyone. The cut's
+  own `bin/fab status` rule is the only guard before it.
 
 - **An integration trunk through the queue is untried live:** the catch-up
   with main (before a check and along the way), catch-up repairs, the

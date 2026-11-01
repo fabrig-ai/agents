@@ -56,8 +56,61 @@
   retire (11-01, ~106k characters, every design quoted, none listed), and
   findings-loop's (~194 KB with six designs listed; ~404k quoted whole),
   and findings-repair's (~195 KB, eleven listed: the designs' rename,
-  477b3e0, made every design changed in its window), and dogfood-faults'
-  (~156 KB, every changed design quoted, none listed).
+  477b3e0, made every design changed in its window), dogfood-faults'
+  (~156 KB, every changed design quoted, none listed) and mechanisms-out's
+  (~144 KB, none listed).
+- **`retired = true` is code's** (3; the user, 11-01; plan
+  `docs/plan/mechanisms-out`, retired 11-01; b951d3f). `_take`'s `finish`
+  runs `fab.dispatch._pre_deliver` before `_deliver`. For a retire chain it
+  skips a branch a `branch.landed` names and one absent from origin after a
+  fetch, reads `origin/<branch>`'s plan.toml (the path from the plan
+  directory, as `_check_call` finds it; a missing file fails that `git show`,
+  before `_retire_plan`'s own `missing plan.toml`) and, unless `tomllib` reads
+  `retired` True, calls `fab.spec_edit.commit_path` on the call's branch from
+  `origin/<branch>`, worktree `FAB_HOME/retire/<root>`, author fab, message
+  `<draft>: retired`. `_retire_plan` replaces a top-level `retired = false` or
+  inserts `retired = true` before the first table. A failure is `_take`'s
+  note `finish <root> failed: ...`; the delivery not having run, `_take`'s
+  `finally` records no `call.finished`, and the next tick tries again.
+  `_queue_branch` reads origin's tip and readies again when it differs from
+  the last `branch.ready`'s `tip`, beside the `call.ended` rule.
+  `fab/roles/retire.md` says fab sets it and `fab/roles/consistency.md` no
+  longer checks it. Tested with fake runners and fixture logs
+  (`test_dispatch.py`, `test_retire_*`,
+  `test_fabrig_queue_readies_moved_tip_without_later_call_end`). Live on this
+  repository at three retires, each `<draft>: retired` by fab: precheck-starved
+  (ab4e3ba), df-followups (7e143f7) and start-commands (18b5d7f), which it
+  carried through three refusals at `rebase`. The re-ready is untried live:
+  no fabrig retire has been delivered since.
+- **`fab land` refusals, code first** (2; the user, 11-01; plan
+  mechanisms-out; db47677). `_fold_review` skips `fab land`'s `fetch` and
+  `push` refusals (no `queue_ts`), so they count toward no amend.
+  `fab.call_review.land_tries(chain, events, step)`, pure and not a `Chain`
+  field (the cut's decision 7), gives the refusals at that step on the branch
+  since the later of `chain.latest`'s `call.ended`, a `call.answered` for the
+  subject and this root's `chain.settled` amend, by log position, never by
+  `tip`. `fab.dispatch._chain_actions` (which now takes `events` and `now`)
+  asks `_land_action` for a chain's finish: `land-park` at `LAND_TRIES` (3) at
+  either step, nothing within `LAND_AFTER` (10) minutes of either step's last
+  refusal, otherwise the finish. `_land_park` logs `call.parked` (subject, the
+  root as call, `fab land refused at <step> 3 times`, `report` the refusal's
+  `log`); the fold then parks the chain, and an answer clears the count and
+  lets the finish run at once. `fab.calls._amend_rebase` (from `_chain_call`
+  before `amend_brief`, only when the chain's last refusal is a `fab land`
+  `test`) fetches, detaches `FAB_HOME/amend/<root>` at `origin/calls/<root>`,
+  rebases onto `origin/main` as fab, aborts a conflict (`conflicted`, nothing
+  pushed) and otherwise pushes with
+  `--force-with-lease=refs/heads/calls/<root>:<fetched tip>` (`rebased`),
+  removing the worktree in a `finally`; `--brief-only` rebases nothing
+  (`pending`). A failed fetch, rebase abort or push is `fab.sh.Failed`, which
+  fails the amend's start without parking, and the next tick tries again.
+  `amend_brief`'s `rebase` adds the outcome to `Findings`;
+  `fab/roles/amender.md` is in step. Tested with fake runners and fixture logs
+  (`test_call_review.py` `test_land_tries_*`, `test_calls.py`
+  `test_main_test_refusal_amend_rebases_before_brief_and_start`,
+  `test_dispatch.py`). Not seen live: at this retire hel8's log holds no `fetch`,
+  `push` or `test` refusal of a call's branch since it landed, and no land
+  park.
 - **A direct queue plan's cut reads that its branch lands on main** (3;
   plan `docs/plan/dogfood-faults`, retired 11-01; 7a8eeea):
   `fab/roles/cut-direct.md`, which `fab.designer._cut_role_options` gives
@@ -113,18 +166,23 @@
   The hold's reason is `LAND_HOLD`; its settle brief allows amend or user,
   then user only, and `_judge_chain` parks a land verdict on it with
   `settle failed`. Any other `ls-remote` code (0, 1, or 128 for network
-  or auth) leaves the refusal open for its amend; `test_dispatch.py`'s
+  or auth) leaves the refusal open for its retry (`fetch` and `push`
+  above); `test_dispatch.py`'s
   `test_finish_land_refusal_steps_and_terminal_exceptions` holds 0, 1, 2
   and 128. `fab/roles/settle.md` says land is not an option when the brief
   says it would land a tip `fab land` refused; `fab/roles/amender.md`
-  rebases onto `origin/main` at `test` as at `rebase` before it reproduces
-  and fixes what the log names, then force-pushes with lease. Tested with
-  temporary homes, fake runners and log folds; not yet run live.
+  rebases onto `origin/main` at `rebase`, and at `test` only when the brief
+  says that rebase conflicted, then force-pushes with lease. Tested with
+  temporary homes, fake runners and log folds. Live once, at `rebase`
+  (start-commands' retire, 11-01): refused at 18:19:36Z, amended, refused
+  again at 18:21:45Z, held, settled amend at 18:23:05Z, refused and amended
+  once more, landed at 18:25:30Z (18b5d7f) with `call.finished` done.
 
 ## Gaps and departures
 
 - **A `fab land` refusal amended from its own heading** (2, 11-01): the
-  amender's rebase at `rebase` and `test`, its `--force-with-lease` push
+  amender's rebase at `rebase` (and at `test` after a conflicted
+  `_amend_rebase`), its `--force-with-lease` push
   and a retire's listed designs are role text (`fab/roles/amender.md`), not
   checked by code; settle's refusal to land a refused tip is role text too
   (`fab/roles/settle.md`), which `_judge_chain` enforces by parking a land
@@ -132,6 +190,26 @@
   failing `git fetch` in `_retire_designs` fails the amend's start without
   parking (a git failure is not a brief's, 2), and the next tick tries
   again.
+- **A `fab land` park's report is the log's text, not a path** (2, channel.md
+  2; mechanisms-out): the request and 2 say "the refusal's log as report", and
+  `_land_park` does that, but `fab land`'s `log` is the output's text while
+  every other `call.parked`'s `report` is a path. `fab/channel.py` and
+  `fab/forge.py` read it as one, so the page says `(report missing)` under the
+  reason, with the text in its `- Read:` line (reproduced with a temporary
+  home); the issue likewise. The reason and the log still reach the user.
+  `test_dispatch.py`'s fixture uses `refusal.log`, a path, so it does not
+  show this (5).
+- **A `fetch` or `push` retry waits for a tick** (2): nothing wakes the tick
+  at `LAND_AFTER`. `_land_action` only holds the finish back until a round at
+  or after it, so with no other wake the backstop's ten minutes can make the
+  wait nearly twenty (5).
+- **A call from main can start behind main** (3, seen at mechanisms-out's
+  retire; 5): `fab.calls.start` fetches first only for a report-only call, a
+  supplied branch, fabrig or a base other than main. `land-code-first` landed
+  at 18:26:21Z, the retire's `call.started` is 18:26:22Z, and its worktree and
+  inventory were 18b5d7f, one commit behind: no `land_tries`, and `amend_brief`
+  without `rebase`. The call brought itself to `origin/main` by hand; a retire
+  that trusted its brief would have called the part unbuilt.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
@@ -146,7 +224,10 @@
   start-commands' retire (11-01): the designs it built against (calls.md 2,
   integration.md 3, tick.md 5) were written before its cut (de5edc2,
   1fc8818), so its brief quoted none of them, and quoted integration.md
-  and landing.md, which df-followups and precheck-starved changed.
+  and landing.md, which df-followups and precheck-starved changed. Seen
+  again at mechanisms-out's retire (11-01): calls.md 2 and 3 and
+  integration.md 3 were written before its cut (f2d3ddb to f380344, 0a3a84e),
+  so the seven designs its brief quoted carried only other plans' diffs.
   Code and design agree; the gap is with the role's "the designs this plan
   changed" (5, Later).
 - **Designs a retire brief lists are read by the call** (3, 11-01), as the
