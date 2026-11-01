@@ -235,7 +235,8 @@ things fab follows, whatever the clock says:
   landing in `docs/design/draft/` starts nothing by itself; the timeline's
   T+0:00 is the user's start. `fab draft start PATH`, which would run the
   draft's surveys and then its cut, is not built (8).
-- **Surveys:** read-only Codex runs (medium, kind `survey`), at intake (the
+- **Surveys (not built as runs; today a designer that sees fit starts Claude
+  sub-agents, calls.md 1):** read-only Codex runs (medium, kind `survey`), at intake (the
   readers of what the draft changes, the primitives in reach with their
   signatures, each area's test world) and before each skeleton call (the
   primitives in reach, refreshed); their reports go into the cut's and the

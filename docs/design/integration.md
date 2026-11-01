@@ -498,10 +498,11 @@ only as tweaks once a replay matches its run.
     and spec formats, that implementers read nothing but their spec, the
     notes it cites and the repository, and the early release above. It asks
     for no survey: the lead was not told to make one, and made it as it
-    saw fit; when it surveys, the survey is a read-only Codex run at high it starts
-    with `codex exec --sandbox read-only` on hel8 (the user, 10-31; `lead.md`
-    said so too). Where the design is too wide for one writer, it may
-    split it across Claude designer subagents, one per part or family, from
+    saw fit; when it surveys, the survey is a read-only Claude sub-agent it
+    starts with the Agent tool, Opus 5.5 at effort high (the user, 11-01;
+    until then a Codex run). Where the design is too wide for one writer, it
+    may split it across Claude designer subagents, Opus 5.5 at effort xhigh,
+    one per part or family, from
     contracts it fixes first, as playground-kit's lead did with two
     designers from shared binding calls; they write specs and notes only,
     and the cut checks and releases them batch by batch (the user, 10-31,
@@ -567,8 +568,10 @@ only as tweaks once a replay matches its run.
   retire's `retired = true` ends the plan once the queue lands it. Fixed
   11-01 (found by dogfood/design): the tick merged the retire into the
   trunk, so the plan's status files and `retired = true` never reached main.
-- **Departures from the user's drafts, at the user's word** (10-31;
-  `execution-modes.md`): no surveys (not built), no skeletons or test
+- **Departures from the user's drafts, at the user's word** (11-01,
+  `execution-modes.md`'s roles table: the designer's calls run at xhigh, not
+  high, and a designer's surveys are Claude sub-agents at high, not Codex
+  at medium; 10-31, the same draft): no surveys (not built), no skeletons or test
   vocabulary (every part direct), no Codex review of the cut, no structure
   review, and the code reaches main as one integration branch through one
   check instead of each task through the merge queue. The self-critique

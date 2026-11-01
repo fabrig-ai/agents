@@ -7,7 +7,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 ## 1. In one page
 
 - **A Claude call's output is reviewed before it lands,** by a session that did not write it; the foreman settles runs' questions and refusals.
-- **The designer is four calls** (cut, contract, decision, retire), each with its role text in `fab/roles/`.
+- **The designer is four calls** (cut, contract, decision, retire), each with its role text in `fab/roles/`, at effort xhigh (the user, 11-01; the other Claude roles keep theirs). A designer that sees fit to survey starts Claude sub-agents, Opus 5.5 at high; a designer sub-agent it splits work to runs Opus 5.5 at xhigh.
 - **A probe** is a read-only, time-boxed Codex run whose report a decision call turns into design.
 
 ## 2. Design and acceptance are separate
