@@ -3,3 +3,27 @@ repo = "agents"
 sources = ["docs/plan/citation-sweep/inputs/request.md", "docs/design/draft/execution-modes.md"]
 # Plan options, written by fab call cut --set; keep them
 landing = "queue"
+
+# The thin cut of citation-sweep: the citations written before fab's design
+# split, rewritten to the design and section each now means
+# (docs/design/fab.md, 6, second table). One direct part of one task, since
+# fab/tests/ holds a single rewrite; the spec in tasks/, the standing rules in
+# notes/common.md, the decisions and the critical path in notes/decisions.md.
+# dogfood-faults, which the request waits for, has landed every task.
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "sweep"
+title = "Pre-split citations in fab/ and bin/ name the design and section they now mean"
+mode = "direct"
+needs = []
+design = "docs/design/fab.md, 6"
+
+[[slice]]
+id = 1
+story = "A reader following any citation in fab/ or bin/ comes to the design and section that holds the cited text; the only old name left is a test's string"
+parts = ["sweep"]
+walk = false
