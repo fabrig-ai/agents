@@ -409,6 +409,31 @@ class GitTest(unittest.TestCase):
         self.assertEqual(self.q.state['tried'], {branch.name: branch.tip})
         self.assert_clean()
 
+    def test_cleanup_stale_source_lease_leaves_green_landing_tried(self):
+        branch = self.branch('draft/a', {'a.txt': 'a'})
+        tree = git(self.origin, 'rev-parse', branch.tip + '^{tree}')
+        replacement = git(self.origin, 'commit-tree', tree, '-p', branch.tip, '-m', 'New task tip')
+
+        def checks(*args, **kwargs):
+            self.assertEqual(git(self.repo, 'rev-parse', 'refs/remotes/origin/' + branch.name),
+                             branch.tip)
+            git(self.origin, 'update-ref', 'refs/heads/' + branch.name, replacement)
+            return self.check_steps(*args, **kwargs)
+
+        with patch('fab.gate.check_steps', side_effect=checks):
+            self.assertTrue(self.q.cycle())
+        landed, batch = self.records()
+        self.assertEqual((landed['ev'], landed['branch'], landed['tip']),
+                         ('landed', branch.name, branch.tip))
+        self.assertEqual(batch['outcome'], 'green')
+        self.assertEqual(self.q.state['tried'], {branch.name: branch.tip})
+        self.assertEqual(Path(batch['log']).read_text().splitlines().count(
+            f'left {branch.name}: [rejected] (stale info)'), 1)
+        self.assertEqual(git(self.origin, 'rev-parse', 'refs/heads/' + branch.name), replacement)
+        self.assertEqual(git(self.origin, 'for-each-ref', 'refs/heads/ready/'), '')
+        git(self.origin, 'merge-base', '--is-ancestor', branch.tip, 'main')
+        self.assert_clean()
+
     def test_a_branch_readied_by_hand_lands_cleanly_without_its_task_ref(self):
         branch = self.branch('ops/hand', {'a.txt': 'a'})
         git(self.origin, 'update-ref', '-d', 'refs/heads/' + branch.name)
@@ -756,10 +781,11 @@ class ShellTest(unittest.TestCase):
 
     def test_retirement_source_refusal_leaves_green_landing_tried(self):
         branch = queue.Branch('ops/hand', TIP, 0)
-        for reason in ('[rejected] (stale info)', '[remote rejected] (protected branch)'):
+        for source, reason in (('(delete)', '[rejected] (stale info)'),
+                               ('', '[remote rejected] (protected branch)')):
             with self.subTest(reason=reason):
                 output = (f'To /remote\n-\t:refs/heads/ready/{branch.name}\t[deleted]\n'
-                          f'!\t:refs/heads/{branch.name}\t{reason}\nDone\n')
+                          f'!\t{source}:refs/heads/{branch.name}\t{reason}\nDone\n')
                 fake = FakeRunner().on(['git', 'rev-parse', '--verify'], Result(0, TIP + '\n')).on(
                     ['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
                     ['git', 'push', '--porcelain'], Result(1, output, 'failed to push some refs'))
@@ -808,10 +834,53 @@ class ShellTest(unittest.TestCase):
                          [['git', 'ls-remote', 'origin', 'refs/heads/ready/' + branch.name]
                           for branch in branches[:2]])
 
+    def test_retirement_failed_readback_records_every_landing_and_keeps_deleted_tip_tried(self):
+        branches = [queue.Branch('draft/' + name, name, 0) for name in 'ab']
+        reason = '[rejected] (stale info)'
+        output = (f'!\t(delete):refs/heads/ready/draft/a\t{reason}\n'
+                  '-\t:refs/heads/ready/draft/b\t[deleted]\n')
+        fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+            ['git', 'push', '--porcelain'], Result(1, output)).on(
+            ['git', 'ls-remote'], Result(128, err='fatal: remote unavailable\nsecond line\n'))
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        with patch('fab.queue.build_batch', return_value=(branches, [])), \
+                patch('fab.gate.changed_paths', return_value=['README.md']), \
+                patch('fab.gate.check_steps', return_value=[]):
+            self.assertTrue(q.attempt(branches))
+        records = log.read(q.log_path)
+        self.assertEqual([entry['branch'] for entry in records if entry['ev'] == 'landed'],
+                         [branch.name for branch in branches])
+        batch = records[-1]
+        self.assertEqual(batch['outcome'], 'error')
+        self.assertEqual(batch['error'],
+                         f'cleanup: ready/draft/a {reason}; ls-remote: fatal: remote unavailable')
+        self.assertEqual(q.state['tried'], {'draft/b': 'b'})
+        self.assertEqual(json.loads(q.state_path.read_text())['tried'], {'draft/b': 'b'})
+        self.assertEqual([argv for argv in fake.argvs() if argv[:2] == ['git', 'ls-remote']],
+                         [['git', 'ls-remote', 'origin', 'refs/heads/ready/draft/a']])
+
+    def test_retirement_unreported_ready_uses_first_stderr_line_or_default(self):
+        branch = queue.Branch('draft/task', TIP, 0)
+        ref = 'refs/heads/ready/' + branch.name
+        for stderr, reason in (('remote unavailable\nsecond line\n', 'remote unavailable'),
+                               ('', 'delete not reported')):
+            with self.subTest(stderr=stderr):
+                fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+                    ['git', 'push', '--porcelain'], Result(1, err=stderr)).on(
+                    ['git', 'ls-remote'], Result(0, f'{TIP}\t{ref}\n'))
+                q = queue.Queue(self.home / 'clone', sh=fake)
+                with patch('fab.queue.build_batch', return_value=([], [])):
+                    self.assertTrue(q.attempt([branch]))
+                landed, batch = log.read(q.log_path)[-2:]
+                self.assertEqual((landed['ev'], landed['branch']), ('landed', branch.name))
+                self.assertEqual(batch['outcome'], 'error')
+                self.assertEqual(batch['error'], f'cleanup: ready/{branch.name} {reason}')
+                self.assertEqual(q.state['tried'], {})
+
     def test_retirement_ready_refused_or_unreported_but_gone_or_moved_is_green(self):
         branch = queue.Branch('draft/task', TIP, 0)
         ref = 'refs/heads/ready/' + branch.name
-        for output in (f'!\t:{ref}\t[rejected] (stale info)\n', '', 'stray line\n'):
+        for output in (f'!\t(delete):{ref}\t[rejected] (stale info)\n', '', 'stray line\n'):
             for remote in ('', MAIN + '\t' + ref + '\n'):
                 with self.subTest(output=output, remote=remote):
                     fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(

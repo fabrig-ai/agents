@@ -200,12 +200,15 @@ class Queue:
             if source_ref in statuses and statuses[source_ref][0] == "!":
                 atomic.extend(detail, f"left {branch.name}: {statuses[source_ref][1]}\n")
             ready_ref = "refs/heads/ready/" + branch.name
-            status, reason = statuses.get(ready_ref, ("", result.err.strip() or "delete not reported"))
+            reason = (result.err.strip().splitlines() or ["delete not reported"])[0]
+            status, reason = statuses.get(ready_ref, ("", reason))
             remaining = False
             if status != "-":
-                remote = self._git("ls-remote", "origin", ready_ref)
-                remaining = any(line.split() == [branch.tip, ready_ref]
-                                for line in remote.out.splitlines())
+                remote = self._git("ls-remote", "origin", ready_ref, check=False)
+                remaining = not remote.ok or any(line.split() == [branch.tip, ready_ref]
+                                                 for line in remote.out.splitlines())
+                if not remote.ok:
+                    reason += "; ls-remote: " + (remote.err.strip().splitlines() or [""])[0]
             self.state["collateral"].pop(branch.name, None)
             if remaining:
                 errors.append(f"cleanup: ready/{branch.name} {reason}")
