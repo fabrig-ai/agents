@@ -52,6 +52,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `~/src/fabrig/slots/<n>` on a builder | warm fabrig checkouts (unchanged); `slots/<n>.claim` the slot's claim (section 7) |
 | `FAB_HOME/after-landing.jsonl` on the after-landing builder | its verdicts; `FAB_HOME/after-landing/` its state and each run's logs (section 11) |
 | `FAB_HOME/reds/<red>.md` on hel8 | an after-landing red's evidence, written when it opens (section 11) |
+| `FAB_HOME/walks/<walk>/` on hel8 | a QA walk's compiled brief, its walker's `report.md` and `result.toml` (13.15) |
 | `~/src/fabrig/logins/shelf/` on hel8 | every login at rest or its placeholder while lent (13.13) |
 
 - **hel8** runs the dispatcher, Claude calls and `fab land` for this
@@ -71,7 +72,7 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | ev | fields | meaning |
 |---|---|---|
 | `task.added` | draft, task, repo, path, sha | a task spec exists on its repository's main |
-| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman; check is an integration branch's full check (13.12); a foreman's carries `asked`, `refused` or `red` (13.1) |
+| `run.started` | run, task, kind, host, dir, branch, base | a Codex run began; kind is implement, repair, rebase, review or foreman; check is an integration branch's full check (13.12); a foreman's carries `asked`, `refused`, `red` (13.1) or `finding` (13.15) |
 | `run.ended` | run, task, outcome, report, minutes, tokens | outcome is done, question, infra or failed (section 5); tokens is Codex's (13.5) |
 | `branch.ready` | task, branch, tip | handed to the landing pipeline |
 | `branch.landed` | task, branch, tip, main, into | on main; with into, merged into an integration plan's trunk, main being its new tip (13.12) |
@@ -89,6 +90,12 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `red.closed` | red, reason, tip | every test of the red recovered or is no longer red in a run without faults, or its signal was cleared (section 11) |
 | `queue.rejected` / `queue.landed` / `queue.collateral` | branch, tip, step, log, tests; branch, tip, main; branch, tip, step, tests, log | the queue's record of a branch no fab task owns, `queue_ts` its time, `gate` the gate host's name (13.8) |
 | `signal.cleared` | signal, by, text | a signal taken off the user's page by hand (13.6) |
+| `walk.started` / `walk.ended` | walk, draft, rung, backend, edition, commit, by; walk, verdict, reason, report, findings | a QA walk of a ladder plan's rung; verdict pass, fail or void (13.15) |
+| `finding.raised` | finding, draft, walk, rung, backend, commit, edition, kind, title, severity, area, blocking, reproduction, expected, seen, evidence, again | a walk's finding, from its `result.toml` (13.15) |
+| `finding.merged` | finding, into, by, reason | the same finding as `into`: named by the walker (by the walk) or judged by triage (by the call) |
+| `finding.triaged` | finding, call, decision, owner, reason, question | a triage call's decision: path, backlog, user or drop |
+| `finding.settled` | finding, run, verdict, reason, section | the tick acted on a finding's foreman: fix or none (a repair task follows) or left (the page) |
+| `rung.passed` | draft, rung, walk, edition, commit | a rung's brief rerun unchanged and passing, its lower rungs passed (13.15) |
 | `note` | text | anything a person wants on the record |
 
 - **New kinds are additive.** The fold ignores types it does not know, so a
@@ -109,7 +116,9 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   walks it). Each `[[question]]` is one of the user's, from the cut: `id`,
   `text`, `parts` (designed only once it is answered) and `answer`, written
   into plan.toml when the user gives it. `retired = true` ends the plan. No
-  part is called `cut`, `retire` or `review`: those name calls' subjects.
+  part is called `cut`, `retire`, `review` or `triage`: those name calls'
+  subjects. A ladder plan names `[ladder]` and its `[[rung]]`s instead of
+  parts (13.15).
 - **A task spec** is Markdown with a TOML header between `+++` lines: `id`,
   `part`, `kind` (feature, interface, migration, repair, rebase or docs),
   `repo`, `needs` (tasks that land first), `files` (globs it may change),
@@ -386,8 +395,11 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
   the suspects'); red repairs landed; reds closed, by reason (recovered,
   absent, cleared), with the median hours from opened to recovered (the
   draft's "time to the confirmed fix"); hand-pushed rejections
-  (`queue.rejected`). These are decisions the tick records anyway, not
-  records kept for the report.
+  (`queue.rejected`). From the log too, the landing draft's "QA passes ...
+  and their findings" (13.15): walks by verdict, findings raised and
+  merged, triaged by decision, finding repairs landed, rungs passed, and
+  the median hours from a failed walk to its rung's next pass. These are
+  decisions the tick records anyway, not records kept for the report.
 - **Signals without targets:** a report raises only the drafts' signals that
   need no number of the user's: idle gaps, rising rejections, Infra runs,
   collateral rejections, queue errors, a ready branch waiting over an hour and
@@ -929,6 +941,10 @@ it, and the flow grows from a small start rather than to a fixed cap.
     the queue) or a change to a trunk that has already landed (integration
     plans), for history the log (`red.settled`'s section) and the repair's
     commit already hold.
+- **The foreman reads a QA finding too** (13.15): a finding the triage call
+  puts on the path goes to a foreman of its own (`fab/roles/
+  foreman-finding.md`) in the same form, its fix a new task
+  `<draft>/finding-<n>` as a red's is.
 - **The foreman settles what the options settle.** A run ending with a
   question first goes to a foreman run (Codex, medium, kind `foreman`,
   `fab/roles/foreman.md`; it writes no code, code records what it decides) with the task spec and the report: when
@@ -1056,7 +1072,7 @@ before it lands (13.1).
   after it.
 - **A plan owns its draft's work:** its tasks' runs and their foreman runs,
   its calls (subject the draft or under it), and the review runs of those
-  calls. A plan collects only its own runs, and its call limits (one answer,
+  calls; a ladder plan's walks and findings too (13.15). A plan collects only its own runs, and its call limits (one answer,
   review or amend call at a time) count only its own calls. Runs no ticked
   plan owns are collected after every plan has ticked.
 - **A plan that cannot load** (its plan.toml, a fetch, a second plan of the
@@ -1112,11 +1128,18 @@ before it lands (13.1).
 - **Questions that are the user's** (budgets, machines, what is hard to
   reverse) park their task and are listed, with the reports' signals that
   are the user's, on one page the user reads; nothing else goes to the user.
-- **Whoever asks decides it is the user's,** never the page. Three things
+- **Whoever asks decides it is the user's,** never the page. Four things
   are (`fab.channel.asks`, folded from the plans and the log):
   - a plan's `[[question]]` with no answer, the cut's (13.3);
   - a call that ended `Question:` (section 12);
-  - a call's chain parked after its review refused twice (13.1).
+  - a call's chain parked after its review refused twice (13.1);
+  - a QA finding its triage call decided `user` (13.15): Ask kind
+    `finding`, subject `<draft>/triage/<finding>`, its text the question,
+    what to read the walk's report; `### <subject>, asked <since>`, the
+    finding's title, rung and the first 12 lines of its reproduction, then
+    the question. `fab page answer <subject> TEXT` logs `call.answered` as
+    for any subject, which makes the finding new again for the next triage
+    call, its answer in that call's brief.
   A task's questions are the foreman's and the answerer's and never reach
   the page; an answer call that cannot settle one ends `Question:` itself.
 - **The page** is `FAB_HOME/user.md` on hel8 (`fab/channel.py`):
@@ -1139,11 +1162,20 @@ before it lands (13.1).
     - `fault:<profile>`, a pair that cannot run: `- Fault` (its text),
       `- Runs` (how many in a row), `- Read: \`<host>:<run log>\`` (the
       run's `host`, section 11);
+    - `finding-<n>`, a QA finding its foreman left (13.15): `- Rung`,
+      `- Why` (`not the code's: <the foreman's line>`), `- Title`, `- Read:`
+      the walk's report and the foreman's report;
   - then, from each standing report's latest day (section 10), its path and
     only the Signals lines whose owner is the user (the drafts' signal
     tables: targets, capacity, a usage limit, a budget the three questions
     could not settle); the rest of each report is the director's;
-  - then `## After landing` (section 11) and `## Unread`, as today.
+  - then `## After landing` (section 11), then `## The ladder` for each
+    plan with rungs (13.15): `### <draft>`, one line per rung in plan
+    order (its state: due, walking, waiting, holding or passed, with what
+    it waits for), then `- Backlog: <n> findings in \`<backlog path>\``,
+    then `## Unread`, as today. The ladder is not the user's: it is there
+    so the session that walks by hand, and the director, read what is due
+    where they read fab's other state, as `## After landing` is.
   The tick rewrites it at its end; `fab page show|write [PLAN_DIR...]`
   makes it on demand. Its plans are those in `FAB_HOME/plans` (13.4) and
   those named. The drafts send the reports to the director, who passes the
@@ -1169,7 +1201,10 @@ before it lands (13.1).
   a later `queue.rejected` or `queue.collateral` of it at another tip (a
   newer tip was tried; a newer rejection opens its own), or by hand;
   `red-<n>` opens when the red becomes a signal and clears when the red
-  closes (section 11) or by hand; `fault:<profile>` clears only when a run
+  closes (section 11) or by hand; `finding-<n>` opens at its
+  `finding.settled` left and clears at its rung's next `rung.passed` (the
+  rerun showed it was not the code's) or by hand, which drops the finding,
+  the clear's text its reason; `fault:<profile>` clears only when a run
   does not fault the pair. `fab page clear ID TEXT` on hel8 logs
   `signal.cleared` (signal, by `user` or `--by`, text) and rewrites the
   page; it refuses an id that is not an open signal, and a fault. Clearing a
@@ -1269,8 +1304,8 @@ only the backstop.
   a cycle that recorded `landed` or `rejected` (one wake per cycle), the
   after-landing machine at the end of a run that recorded a red new or
   unattributed or a recovery (one wake per run, section 11), `fab land`
-  when it lands or refuses, and the user's answer or clear (`fab page
-  answer`, `fab page clear`).
+  when it lands or refuses, the user's answer or clear (`fab page
+  answer`, `fab page clear`), and a walk's result (`fab qa result`, 13.15).
   On hel8 a wake is one appended line; elsewhere it is one ssh to the host
   with the role dispatcher. A wake that fails is not retried: the backstop
   finds its work.
@@ -1300,7 +1335,9 @@ only the backstop.
   `refusal.settled`, `call.finished`, `call.parked`, `call.answered`,
   `red.settled`, which makes a red task, and `red.closed`, which may let a
   retire start; `red.opened` needs none, since the same round's plans take
-  it), the tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
+  it; `finding.settled`, which makes a finding's repair task, 13.15;
+  `finding.triaged` and `rung.passed` need none, being logged before the
+  same round's decisions), the tick wakes itself at its end (`tick <n>: <kinds>`). Five such ticks in a
   row with no outside wake between them stop the chain with a note: a chain
   that long is a fault, and the next tick waits for an event or the
   backstop.
@@ -1787,7 +1824,7 @@ login that still works reused across them before more are signed in.
   and calls within `fab.calls.TIMEOUT` seconds without a matching end, by
   host and role. Waiting uses `fab.channel.asks((), events)`: only the log's
   open user asks, without plans or the foreman's task questions. The
-  `waiting_on_user` snapshot has `asks`, `by_kind` (`call`, `parked`) and
+  `waiting_on_user` snapshot has `asks`, `by_kind` (`call`, `parked`, `finding`) and
   `oldest_age_s` from the asks' `since`, null when none. Waiting has no age
   cut; answers, completed designs and finished chains close asks as on the
   user's page (13.6).
@@ -1822,6 +1859,400 @@ login that still works reused across them before more are signed in.
   issue contents.
 - **Deployment is by hand at the user's OK:** a transient unit on hel8 and
   Caddy's `status.fabrig.ai` moved to `reverse_proxy 127.0.0.1:8370`.
+
+### 13.15 QA findings
+
+At the user's word (11-01, after qa-ladder): QA of temper v0.1.0 ran by hand.
+A session wrote rung briefs, had a Claude subagent walk each, triaged the
+findings itself, surveyed their causes, had Codex repair the on-path ones,
+landed them as hand-pushed ready refs and reran each brief unchanged; the
+off-path ones piled up in a file with no owner (`coord/qa-ladder/
+findings.md`, 48 entries). fab runs that loop: a walk's findings enter the
+log, a director's call triages them, on-path ones become Fix-mode repairs
+through the foreman path reds use (section 11, 13.1), and fab says when a
+rung's brief is due again, unchanged. `temper/docs/design/draft/v0.1.0.md`,
+2-4, is the process; `execution-modes.md`'s Fix mode ("a finding, a red, a
+bug"; one finding the unit of flow; the finding's own walk, rerun unchanged)
+and "QA's findings enter Fix mode" are the model. In the first build a
+session still walks by hand; walks run by fab are the section's last part.
+
+- **The ladder is a plan,** a fabrig plan (13.11) with `landing = "queue"`,
+  listed in `FAB_HOME/plans`, whose plan.toml names its rungs: v0.1.0's is
+  `temper/docs/plan/v0.1.0-ladder/`. A plan owns its draft's work (13.4), so
+  its walks, findings, triage calls and repairs are the plan's.
+  - `[ladder]`: `happy_path` (a citation, as a part's `design`:
+    `"temper/docs/design/draft/v0.1.0.md, 2 and 4"`) and `backlog` (a
+    repository path: `"temper/docs/design/debt/v0.1.0-ladder.md"`).
+  - Each `[[rung]]`: `id` (`[a-z0-9-]+`, unique), `backend` (one of
+    `fab.findings.BACKENDS`: `chatgpt-forgejo`, `claude-forgejo`,
+    `chatgpt-github`), `brief` (paths in the plan directory, read in order:
+    the kit, then the rung's own, as qa-ladder's `briefs/kit.md` and
+    `briefs/rung-b1.md`) and `after` (rung ids that must pass first; default
+    none). A story walked on two backends is two rungs (`b1`, `b1-claude`).
+  - `fab.plan.load_plan` reads them into `Plan.rungs` (`fab.plan.Rung`) and
+    `Plan.ladder`; `[[part]]` becomes optional, and a ladder plan has none,
+    so it is never designed or retired. `fab.plan.problems` adds: a plan with
+    neither parts nor rungs; a rung id used twice; `after` naming no rung, or
+    a cycle; a brief file missing; rungs in a plan whose landing is not
+    `queue` (the ladder walks main). `triage` joins `fab.plan.RESERVED`.
+- **A rung's edition is its brief's bytes** (`fab.walks.edition`, pure): the
+  first 12 hex of sha256 over each brief file's path and text, in order,
+  read at `origin/main` of the plan's checkout (`git show`, by
+  `fab.walks.editions` for the tick and `fab qa walk` alike). "Rerun unchanged" means a walk at
+  the edition of an earlier walk of the rung. A kit or brief change makes a
+  new edition (qa-ladder's B1 and B2 edition 2, 11-01, after a careful model
+  beat edition 1's gate by guessing its pull request's number, and
+  kit-github's editions 2 and 3): walks at an older edition count no more
+  toward the pass, the new edition's first walk is a first walk, and its
+  pass is that edition rerun unchanged (qa-ladder's advisor, 11-01 05:40Z).
+  Findings raised under an older edition keep their state and still hold
+  the rung. A kit change reopens every rung that reads it, even one it does
+  not touch (kit-github edition 3 changed only CI reads): the price of
+  "unchanged" being code's rather than a session's judgement.
+- **A walk enters fab by a command on hel8** (`fab qa`, `fab/walks.py`; the
+  session that walks runs it in the first build):
+  - `fab qa walk PLAN_DIR RUNG --commit SHA [--by WHO]` fetches the plan's
+    checkout, reads the rung's brief files at `origin/main`, refuses a commit
+    that does not contain every landed repair of the rung's findings (`git
+    merge-base --is-ancestor <its branch.landed main> SHA` in
+    `FAB_HOME/repos/fabrig`, naming the first missing), and logs
+    `walk.started` (walk `walk-<n>`, n counting `walk.started` in the whole
+    log; draft, rung, backend, edition, commit, by). It writes
+    `FAB_HOME/walks/<walk>/brief.md` and prints its path and the walk's id:
+    the brief files' text as read, then `# Reporting to fab` (the result's
+    form, below, and where to write it: `report.md` and `result.toml` in
+    that directory), then `# Open findings` (each open finding of the plan:
+    id, state, rung, area, title), so the walker can name one it meets
+    again. What fab adds is fab's mechanics, not the rung's story, and is
+    outside the edition. A walk is not refused for being early or
+    speculative: qa-ladder walked rung A's first walk beside rung 0's.
+  - **The result** is `result.toml` (TOML: multi-line strings are easy for a
+    walker to write and tomllib reads them): `verdict` (`pass`, `fail` or
+    `void`), `reason` (one line: where it broke; for void, why the story was
+    not walked: a setup to redo, a gate the model beat, as qlc-b1-1), then
+    per `[[finding]]`: `title`, `severity` (`low`, `medium`, `high`), `area`
+    (the component it names: `temper ctl`, `jig tasks`, `smith`, `temper
+    help`), `blocking` (it stopped the walk), `reproduction` (the commands
+    from a fresh box, in order), `expected`, `seen`, `evidence` (paths on
+    the walk's machine) and `same` (an open finding's id from the brief's
+    list, when it is that one; else ""). It is what qa-ladder's walkers
+    wrote in prose (`walks/*/report.md`), in fields. The prose report stays
+    beside it for people.
+  - `fab qa result WALK [DIR]` (DIR default `FAB_HOME/walks/<walk>/`) reads
+    `result.toml` (`fab.walks.parse`, pure), copies it and `report.md` into
+    the walk's directory, and logs `walk.ended` (walk, verdict, reason,
+    report, findings: the ids), then one `finding.raised` per finding, then
+    the walker's merges, and wakes the tick (`qa <walk>`). It refuses,
+    logging nothing and naming the field: a walk unknown or already ended;
+    a verdict not in the three; `pass` with a blocking finding; `fail` with
+    no finding (where it broke is one); a severity not in the three; a
+    title over 200 characters or a reproduction, expected or seen over
+    4,000; more than 30 findings.
+  - `fab qa rungs [PLAN_DIR...]` prints each rung's line, as the page does.
+  - A walk with no `walk.ended` for `WALK_HOURS` (4: the kit's wall cap of 3
+    hours and an hour to report) is no longer walking; its result is still
+    taken when it comes.
+- **A finding is temper's record, kept in fab's log** (temper's
+  `domain/findings.md`, 2 and 4; fab keeps no forge issue, 1's "interim by
+  intent"). `finding.raised`: finding (`finding-<n>`, n counting
+  `finding.raised` in the whole log), draft, walk, rung, backend, commit,
+  edition, kind (`qa`, temper's kind; reds keep their own path, section
+  11), title, severity, area, blocking, reproduction, expected, seen,
+  evidence, and `again` (below). Its state, as temper's: `new`, `routed`
+  (on the path), `backlog`, `dropped`; and fab's: `asked` (needs the user),
+  `merged` (into another), and a routed finding's repair states.
+  - **Departures from temper's record, each for a reason:** no signature: a
+    QA finding has no failing test ids, and temper too files QA findings
+    anew, matching only flakes by signature (its 4); `area` is the component
+    the walker names, free text, since fab has no project's areas list;
+    severity is the walker's, recorded for the triager and the page, and
+    the triager does not restate it (temper's open question 10, settled
+    for fab by taking the finder's); a finding closes on its rung's rerun,
+    not on `Fixes #n` once its landing clears (temper's 7): there is no
+    issue, and Fix mode's QA is the finding's own walk, rerun unchanged.
+- **The same finding is merged, never filed twice,** by two hands and no
+  key: a normalised reproduction would not match, since the same cause shows
+  through different tasks, ids, SHAs, times and ports in each walk
+  (qa-ladder 32 and 38: one reviewer's reads answered "busy", another's
+  "declined", one capacity likely behind both).
+  - **The walker names it:** a result's `same` names a finding of the plan
+    (a merged one resolving to its target). One new, asked, routed before
+    its repair has landed, or backlog merges at once, `finding.merged`
+    (finding, into, by the walk, reason `named by the walker`): qa-ladder's
+    walkers listed theirs as "Known again: 2, 6, 9, ...". One whose repair
+    has landed, fixed, left or dropped files the finding anew with `again`
+    set to it, for triage: the fix did not hold, or the drop was wrong. A
+    `same` naming no finding of the plan is refused with the result.
+  - **The triager merges by judgement** (below): `finding.merged` by the
+    call. A merged finding's state is merged; its target's repair carries
+    its reproduction too, and its target holds the rung for it. Merges into
+    a merged finding resolve to the last target.
+- **Triage is a Claude call in the director's role** (v0.1.0.md 4: "the
+  director triages every finding"; the user's request, 11-01): role
+  `triage`, `fab/roles/triager.md`, effort medium as the answerer (a batch
+  of small judgements, not a design), subject `<draft>/triage`, started by
+  the tick, `fab call triage --plan PLAN_DIR` (`fab.triage.main`, reached
+  from `fab.calls.main` as the designer's roles are).
+  - **When** (`fab.triage.due`, pure, in `fab.dispatch.call_actions`): a
+    finding of the plan is new, no triage call of the plan is in flight and
+    no triage chain is open (one at a time, as the answer call: two
+    branches appending to one backlog file would conflict at the queue),
+    and either a new finding came from a failed walk or is blocking (it
+    holds its rung: at once, as a question that holds up work), or the
+    answerer's thresholds hold: `ANSWER_AT` (4) new, or the oldest new one
+    `ANSWER_AFTER` (30) minutes old. A finding the user answered, or raised
+    `again`, is new again. A call that ends otherwise than done is followed
+    only after a new finding or 30 minutes.
+  - **Its brief** (`fab.triage.brief`, compiled by code): the role text;
+    the call's facts; `# The happy path`, `happy_path`'s sections cut as a
+    part's design is (`fab.calls._cited_design`); `# The rungs`: each rung's
+    line (state, edition, after) and the brief of every rung with a new
+    finding, whole; `# New findings`: each with every field, its walk's
+    verdict, `again` when set, and the user's answers for it
+    (`fab.channel.answers_text(<draft>/triage/<finding>)`); `# Open
+    findings`, to merge against: every finding asked, routed, landed or
+    backlog, one line each (id, state, rung, area, title, sightings: the
+    merges into it); `# The backlog`: its path.
+  - **It decides each new finding,** one report line each, and may re-decide
+    a backlog one (qa-ladder promoted `account list`'s raw dump to the path
+    once every walk had met it):
+    - `<id>: path <owner>: <why>`, on the happy path (4's: the ladder's
+      stories and each part's bar, used as intended, on the four backends;
+      a security hole, lost data and a gate's flake; the tool's friction
+      where a walk stalled), owner the tree or crate it names;
+    - `<id>: backlog: <why>`, off the path; it appends the finding's entry
+      to the backlog file on its branch (below);
+    - `<id>: user: <the question>`, only what is the user's (a credential or
+      sign-in, a machine, a budget, the product's direction: qa-ladder's
+      GitHub rungs with no GitHub login on the shelf);
+    - `<id>: merge <into>: <why>`, the same cause as an open finding;
+    - `<id>: drop: <why>`: not reproducible from its report, the walk's
+      setup or machine (qa-ladder's load-caused red, item 24), the brief's
+      own fault, or not temper's or its trees'.
+    A blocking finding, one that failed its rung's acceptance, is on the
+    path unless it is not the product's: v0.1.0.md 4 puts a rung's own
+    walk's findings on the path by definition, and the request triages
+    them; the role text defaults to the path. A finding that is the box's
+    model going against what it is told is on the path only when it failed
+    an acceptance (qa-ladder's ql-a-2: a chat reported an invented feature
+    as the fix), its fix being what the model is told; otherwise backlog
+    (findings 7, 16, 41).
+  - **Code records the decisions** (`fab.triage.decisions`, pure; logged
+    by the tick each round before `decide`, once per call): for a triage
+    call ended done whose id no `finding.triaged`, `finding.merged` or note
+    carries, it parses the report and logs per valid line `finding.triaged`
+    (finding, call, decision `path`, `backlog`, `user` or `drop`, owner,
+    reason, question) or `finding.merged` (by the call). A line naming a
+    finding that is not new (or backlog, for a re-decision), or merging
+    into itself, an unknown or a dropped finding, is skipped; the finding
+    stays as it was for the next call. A call with no valid line logs one
+    note (`call`, `triage <call>: no decisions`). Decisions are recorded at
+    the call's end, not its branch's landing, so a repair does not wait a
+    queue round for the backlog file.
+- **Off the path is the tree's backlog,** `[ladder].backlog`, not the
+  user's page: the page is for what is the user's (13.6) and 48 entries
+  would bury it; the backlog outlives the plan, for the owner after
+  v0.1.0 (v0.1.0.md 4: it "waits until v0.1.0 is out"), as fabrig's
+  `jig/docs/design/debt/` and `skein/docs/design/debt/` do; and a fabrig
+  plan's calls already land through fabrig's queue (13.11). The triage
+  call appends, per backlog finding, `## <finding>: <title>` with its rung,
+  walk, backend, commit, area, severity, reproduction, expected, seen and
+  the triager's reason, as `findings.md`'s entries; it changes no other
+  file. A call that writes no entry makes no commit, and its chain finishes
+  without a ready. The page shows the backlog's count and path only.
+- **On the path is a Fix-mode repair through the reds' foreman path,** a
+  new kind beside `red` sharing its machinery, not that machinery
+  generalised: a finding's lifecycle (walks, rungs, reruns, merges) shares
+  nothing with a red's (tips, keys, suspects, tiers runs, coverage), while
+  what follows the decision is the same (`fab/fixes.py`, beside
+  `fab/tier_reds.py`).
+  - **Its foreman** (Codex, medium, kind `foreman`, read-only;
+    `fab/roles/foreman-finding.md`): a finding routed starts one, run
+    `<draft>/finding-<n>/foreman-1` of task `<draft>/finding-<n>/foreman`
+    (`fab.foreman.task_field`), its run.started carrying `finding` and `tip`
+    (main's tip in the plan's checkout this tick), on the builder with most
+    free places even at none, in fabrig detached at that tip
+    (`fab.run.launch_detached`). It is qa-ladder's cause survey. Its brief
+    (`fab.fixes.brief`): the role text; `# The finding`: run, finding, rung,
+    backend, walk, commit walked, area, the triager's owner and reason, the
+    rung's brief paths (in its checkout), the report path, `Your checkout is
+    fabrig at <tip>, read-only.`; `# The record`: title, reproduction,
+    expected, seen, and each finding merged into it; `# The walk's report`:
+    `FAB_HOME/walks/<walk>/report.md` quoted whole (at most the kit's 15
+    KiB), since a builder cannot read hel8's files.
+  - Its report keeps the form: `Done: fix: <line>`, then at most thirty
+    lines: the cause, where on main, what to change, and the lowest world
+    that reproduces it (a unit or world test on the fake backends; a fake
+    model's script from the walk's transcript where the model's turn matters,
+    v0.1.0.md 4); `Done: retry: <line>`, read as **not the code's** (the
+    walk's setup or machine, the brief, a backend's outage), then at most
+    ten lines; or `Failed: <why>`. When unsure, it is the code's. The tick
+    settles it (`fab.fixes.remedy`, pure, sharing the verdict's parse with
+    `fab.tier_reds.remedy` through `fab.tier_reds.verdict(report)`, factored
+    out of it; then `fab.fixes.settle`) with `finding.settled`: finding, run,
+    verdict `fix` (reason, section `## Repair (<day>, finding <n>, foreman
+    <run>)` and the lines), `left` (from retry: the finding is a signal) or
+    `none` (no verdict). A foreman ending otherwise is the fallback: the
+    repair starts with the finding alone. One foreman per finding.
+  - **The repair is `<draft>/finding-<n>`,** folded from the log
+    (`fab.fixes.tasks(plan, events)`, joined to the plan's tasks as red
+    tasks are), never a spec file: kind `finding`, part `qa` (no plan part,
+    as a red's `after-landing`, so it holds no part's status), repo fabrig,
+    no needs, files `**`, effort high, minutes 20. It exists from
+    `finding.settled` fix or none, or the fallback. Its body: `# Repair a QA
+    finding (finding-<n>)`; the rung, backend, walk, commit and edition; the
+    area, owner and the triager's reason; `## The finding` (the record, and
+    each merged one's walk and reproduction); the foreman's section when
+    there is one; then `## Acceptance`: reproduce first, in the lowest world
+    that shows it, a test red on main before the change and green after,
+    naming the world and why it is the lowest; then fix; design text the
+    change makes untrue changes in the same branch (the tree's
+    `docs/design/` and status file; `temper/docs/help/` with its help tests);
+    then the task's own checks as any fabrig task (precheck `--onto
+    origin/main`): qa-ladder's `tasks/TEMPLATE.md`, which every hand repair
+    carried. Answers fold in under `## Answers`, as a red task's.
+  - **Everything section 11 gives kind `red` holds for kind `finding`,**
+    read through one tuple, `fab.tier_reds.FIX_KINDS = ("red", "finding")`:
+    an implement run from `origin/main` in a slot; readied for the queue
+    (`ready/<draft>/finding-<n>`, its receipt) and landed as `Merge
+    <draft>/finding-<n>`; in the queue import's tasks; `RED_RUNS` (2), then
+    the answerer (Fix mode: "Claude ... after two failed tries"); its
+    questions skip the foreman; its queue refusal goes to the specless
+    refusal foreman; the answer call's brief lists its questions. Each
+    repair is readied alone from main and the queue batches them: qa-ladder
+    batched by hand, and two of its batches went stale on the first's
+    landing (batch-2 and batch-3, ~40 minutes); the queue's bisection and
+    the refusal foreman take a batch's conflict or red. A finding repair
+    landed is fab's suspect after landing like any task (section 11's
+    owners include folded tasks).
+  - **One repair per finding:** a merge never makes a second; the merged
+    reproduction reaches the repair's next run through the body.
+- **Where each finding stands** (`fab.findings.findings(events)`, pure, log
+  order): new; asked (triaged `user`; new again at a `call.answered` whose
+  subject is `<draft>/triage/<finding>`); foreman, deciding, decided
+  (triaged `path`, its foreman's run.started, its done end); repairing (its
+  task exists, not landed); landed (its task's `branch.landed`); left
+  (settled left); backlog; dropped (triaged `drop`, or its signal cleared:
+  reason the clear's text); merged. After landed: **fixed** at its rung's
+  next `rung.passed`, or **unfixed** when a later raise names it, the new
+  raise taking its place. New, asked, foreman, deciding, decided and
+  repairing **hold** the rung; a merged finding holds through its target.
+  Left does not: the foreman says it is not the code's, and the rerun shows
+  whether it was.
+- **Acceptance by itself** (v0.1.0.md 3: "the same brief, rerun unchanged,
+  passing"). A rung's state (`fab.findings.rungs(plan, events, editions)`,
+  pure, editions the current ones, `fab.walks.editions`), the first that
+  holds, in plan order:
+  - **passed:** a `rung.passed` at its current edition and no failed walk of
+    it since (a rung that fails after passing has a finding, never a retry,
+    v0.1.0.md 3);
+  - **walking:** a walk of it in flight;
+  - **waiting:** a rung in `after` has no `rung.passed` (any edition):
+    "down before up" (qa.md 3);
+  - **holding:** one of its findings holds it;
+  - **due:** otherwise, a `first walk` when no walk at its current edition
+    has ended pass or fail, else a `rerun`, at a main containing each
+    landed repair of its findings (the newest such `branch.landed`'s main).
+  The rerun does not wait for after-landing's verdict on that main: the
+  walk is its own check on real backends, a red after landing reaches its
+  owner by section 11, and the tiers would add an hour to each round.
+- **A pass is recorded by the tick** (`fab.findings.passes`, pure, then one
+  `rung.passed` each: draft, rung, walk, edition, commit; before `decide`):
+  a walk ended pass at the rung's current edition, after another walk of it
+  at that edition ended pass or fail (a rerun), with no failed walk of the
+  rung since, and each rung in `after` passed before this walk ended, or by
+  a walk at the same commit (qa-ladder judged parallel walks in rung order:
+  "counts once B0 passes"). A pass whose lower rung passed later, at
+  another commit, counts no more: the rung is due again. A passing walk's
+  non-blocking findings are triaged as any; the pass stands.
+- **fab says a rerun is due** on the user's page and in `fab qa rungs`, one
+  line per rung (13.6, `## The ladder`): `<rung> (<backend>), edition <e>:
+  due: rerun at a main containing <sha12>`, `walking: <walk> since <ts>`,
+  `waiting for <rungs>`, `holding: finding-3 repairing, finding-7 new`,
+  `passed at <commit12> (<walk>)`. The first build's session reads it,
+  starts the walk with `fab qa walk` and reports it with `fab qa result`.
+- **The tick, each round** (`fab.dispatch._tick_plan`, a plan with rungs):
+  first the triage decisions of ended calls, then `rung.passed`, then the
+  plan's tasks joined with its finding repairs, then `decide`; after the
+  refusal settlements, `fab.dispatch.finding_actions` (pure, the plan's
+  findings): foreman, `Action("examine-finding", task=<draft>/finding-<n>,
+  detail=<finding>)`, which starts its foreman; decided,
+  `Action("remedy-finding", run=<foreman run>)`, which settles it. A repair
+  task that exists is one of the plan's tasks, so `decide` starts, readies
+  and parks it as any. `call_actions` starts the triage call when it is due.
+- **The cases it was designed against** (`coord/qa-ladder/`, 11-01):
+  rung 0's first walk failing on two on-path findings, repaired and landed
+  (batch-1), and its rerun passing at e259dc2e2; 32 and 38 merged into one
+  repair; the walkers' "Known again" lists as `same`; model behaviour to
+  the backlog (7, 16, 41) unless an acceptance failed for it (chat-truth);
+  GitHub's rungs waiting on a login the shelf did not have, a question for
+  the user; B1's edition 2 and its first walk passing, then its rerun as
+  the pass; a load-caused red dropped as setup (24); the repairs readied
+  one by one where qa-ladder batched them.
+- **Tests** (fake runner, records and log): `fab qa result` on a failed
+  walk's `result.toml` logs `walk.ended`, two `finding.raised` and one
+  `finding.merged` for a `same` naming an open finding, and wakes once; a
+  `same` naming a landed finding files it anew with `again`; a pass with a
+  blocking finding, or a fail with none, logs nothing; the edition changes
+  when a brief file does and the rung's earlier walks count no more; a
+  failed walk's finding starts a triage call at once, a passing walk's
+  waits for four or thirty minutes; a triage report's `path`, `backlog`,
+  `user`, `merge` and `drop` lines log their records once, and a line for a
+  finding not new is skipped; a path decision starts one foreman run whose
+  fix makes `<draft>/finding-<n>`, an implement run from main, readied, and
+  whose retry leaves a signal and holds nothing; a user decision is on the
+  page and its answer makes the finding new; the rung is holding until the
+  repair lands, then due for a rerun at the landed main, and `fab qa walk`
+  refuses an older commit; the rerun's pass logs `rung.passed` and the
+  finding is fixed; a pass whose lower rung has not passed logs nothing
+  until the lower passes at the same commit; a failed walk after a pass
+  reopens the rung.
+- **Walks run by fab** (the last part; the cut leaves it for after the
+  first build has walked a ladder by hand, or for later). A walk is a Claude
+  call, role `walk` (`fab/roles/walker.md`, then the brief `fab qa walk`
+  compiles), started by the tick for a due rung, never two of one rung:
+  - on hel8 as every call, with no branch: its worktree is fabrig detached
+    at the walk's commit, read-only for it (qa-ladder's `read-<commit>`
+    checkouts); its box on the builder with the role `qa` in
+    `fab/hosts.toml`, in `W = ~/src/fabrig/fab/walks/<walk>`, at most
+    `boxes` (a new figure there) at once; its output is `result.toml` and
+    its report, taken at its end as `fab qa result` takes them; no chain
+    and no review, since it changes nothing;
+  - its binary `W/bin/temper` copied from `walks/bin/temper-<commit>`,
+    built once per commit by a run of kind `build` in a slot of that
+    builder (`heavy cargo build -p temper`), which the walk waits for;
+  - **logins are the resource:** the tick borrows, per the backend's kinds
+    (`fab.findings.BACKENDS`: `chatgpt`, `claude-box`, `chatgpt` and
+    `github`), the free login of each kind (`fab logins borrow KIND HOST
+    --path W/<file> --holder <walk>`) before it starts the call, and starts
+    none while one is missing, saying `due, waiting for a <kind> login` on
+    the page: one live box per login (v0.1.0.md 2.2: "one holder per
+    login"), the tick deciding who gets one as it does places (13.13). The
+    walk returns them at its end (`fab logins return`) after its give-back
+    has exported the account; one that cannot be returned stays lent with
+    an `error` record, as a pair's (13.13);
+  - its timeout is the kit's wall cap, 3 hours (`fab.calls.TIMEOUTS`), not
+    a call's 60 minutes; `call.ended` wakes the tick as any call's.
+- **Built in this order; what waits for red-routing** (section 11's code:
+  `fab/tier_reds.py` is on main since 5469947, its wiring into the tick and
+  the page is being built, 11-01):
+  - **Now, independent:** the plan's `[[rung]]` and `[ladder]` (`fab/plan.py`);
+    the findings' and rungs' fold (`fab/findings.py`); `fab qa` and the
+    intake (`fab/walks.py`, `fab/cli.py`); the triage call, its role text
+    and its brief and decisions (`fab/triage.py`, `fab/roles/triager.md`,
+    `fab/calls.py`); the page's `finding` asks and `## The ladder`
+    (`fab/channel.py`'s asks and render, beside red-routing's page work:
+    rebase on it); the landing report's QA figures (10).
+  - **After red-routing's tick wiring lands** (`red_actions`, red tasks run
+    from main and readied, `RED_RUNS`, the specless refusal foreman, the
+    answer call seeing red tasks): `fab/fixes.py` and
+    `fab/roles/foreman-finding.md`, `fab.tier_reds.FIX_KINDS` and
+    `verdict`, and the tick's steps above in `fab/dispatch.py` (the triage
+    call's start and recording too, to keep one writer of
+    `_tick_plan` at a time).
+  - **After red-routing's page lands:** the `finding-<n>` signal in
+    `fab.channel.signals`.
+  - **Last, separable:** walks run by fab.
 
 ## 14. Later
 
@@ -1858,7 +2289,32 @@ login that still works reused across them before more are signed in.
   gate, above). CPU accounting is present (11); the user sets the one total CPU budget
   from measurements after re-tiering lands. Default/fuzzy queue CPU now
   reuses the collector (6); making its report-only excesses red awaits the
-  user's decision and budget figures. QA walks as a run kind.
+  user's decision and budget figures.
+- QA findings (13.15), next:
+  - **Then it holds** (v0.1.0.md 3): a passed rung's story joins the live
+    tier after-landing runs (`live-temper`'s stories, once the user says
+    which run with `--run-ignored`, 11), and its fake twin goes into the
+    worlds from the passing walk's transcripts (`qa-live.md`, 8): a task
+    made from `rung.passed`, for Codex, kind feature, its body the walk's
+    report and transcript paths. Waits for the first ladder fab runs.
+  - Walks run by fab (13.15's last part), if the cut leaves it: the walk
+    call, the `build` run, the `qa` host's `boxes`, logins borrowed per
+    walk; and GitHub's managed rung, which needs a person's clicks in the
+    manifest flow (the user, 11-01: a test account's web login on the shelf
+    and a headless browser, deferred).
+  - Findings of other finders, as temper's kinds: after-landing flakes
+    (`flake`), reviews' follow-ups (`review`), QA after landing's passes
+    (temper's `findings.md`, 8) once marks exist; and filed as forge issues
+    once temper's findings are built and fab moves onto them.
+  - A normalised key for merging, if the triage call's merges show walkers
+    miss duplicates often; a second repair of an unfixed finding is today a
+    new finding raised `again`, triaged as any.
+  - A kit change that reopens only the rungs it touches (today every rung
+    whose brief lists the kit gets a new edition).
+  - Fix mode's gate waking Claude when a finding's fix touches a public
+    item, with the api gate (as for reds, above).
+  - The backlog taken up after v0.1.0 (v0.1.0.md 4): a cut of the backlog
+    file into a plan of its own.
 - Elastic builders from `fab hosts check`'s numbers.
 - Logins (13.13), next: after-landing `--live` run on the
   queue's machine as well as builders (the user, 10-31); `tools/qa/logins`
