@@ -816,6 +816,43 @@ class CallActionsTest(unittest.TestCase):
                 self.assertEqual(self.actions(history, ["core", "next"]),
                                  [*step, Action("call", task="next", run_kind="skeleton")])
 
+    def test_mechanical_land_retry_waits_from_latest_refusal_and_answer_retries_now(self):
+        finish = Action("finish", task="root", run="root", run_kind="skeleton", branch="calls/root")
+        for step in ("fetch", "push"):
+            with self.subTest(step=step):
+                refusal = dict(ev="branch.rejected", branch="calls/root", step=step, tip="one",
+                               ts="2026-10-30T12:10:00.000Z", log="first failure")
+                events = [*chain_history("approved"), refusal]
+                self.assertEqual(self.actions(events), [finish])
+                events.append(dict(refusal, tip="two", ts="2026-10-30T12:20:00.001Z"))
+                self.assertEqual(self.actions(events), [])
+                events[-1]["ts"] = "2026-10-30T12:20:00.000Z"
+                self.assertEqual(self.actions(events), [finish])
+                events[-1]["ts"] = self.now
+                self.assertEqual(self.actions(events), [])
+                events.append(dict(ev="call.answered", subject="draft/core", ts=self.now))
+                self.assertEqual(self.actions(events), [finish])
+
+    def test_mechanical_land_tries_park_per_step_before_retry_delay(self):
+        for step in ("fetch", "push"):
+            with self.subTest(step=step):
+                refusal = dict(ev="branch.rejected", branch="calls/root", step=step, ts=self.now)
+                events = [*chain_history("approved"),
+                          *(dict(refusal, tip=str(n)) for n in range(dispatch.LAND_TRIES))]
+                self.assertEqual(self.actions(events),
+                                 [Action("land-park", task="draft/core", run="root", detail=step)])
+                events[-1]["step"] = "push" if step == "fetch" else "fetch"
+                self.assertEqual(self.actions(events), [])
+
+    def test_mechanical_land_retry_delay_applies_with_reviews_off(self):
+        self.plan = replace(self.plan, reviews=False)
+        refusal = dict(ev="branch.rejected", branch="calls/root", step="push", ts=self.now)
+        events = [*chain_history("review"), refusal]
+        self.assertEqual(self.actions(events), [])
+        events += [dict(refusal, tip="two"), dict(refusal, tip="three")]
+        self.assertEqual(self.actions(events),
+                         [Action("land-park", task="draft/core", run="root", detail="push")])
+
     def test_settle_shares_only_its_plans_answer_limit(self):
         held = chain_history("hold", root="one") + chain_history("hold", root="two", subject="draft/other")
         self.assertEqual(self.actions(held), [Action("call", task="one", run_kind="settle")])
@@ -2678,6 +2715,9 @@ parts = []
                                checkout=self.home, sh=self.fake, log_path=path)
                 records = log.read(path)
                 finished = [entry for entry in records if entry["ev"] == "call.finished"]
+                chain = call_review.chains(records)[root]
+                expected = "finished" if outcome else "approved" if step in ("fetch", "push") else "amend"
+                self.assertEqual(chain.state, expected)
                 self.assertEqual([entry["outcome"] for entry in finished], [] if outcome is None else [outcome])
                 if finished:
                     self.assertEqual((finished[0]["call"], finished[0]["tip"]), (root, "checked-tip"))
@@ -2688,6 +2728,41 @@ parts = []
                 queries = [call for call in self.fake.calls if call.argv == query]
                 self.assertEqual([call.cwd for call in queries],
                                  [str(self.home)] if step == "fetch" and not landed else [])
+        self.assertEqual(log.read(), [])
+
+    def test_finish_mechanical_refusals_retry_then_park_without_amend(self):
+        for step in ("fetch", "push"):
+            with self.subTest(step=step):
+                path = self.home / f"retry-{step}.jsonl"
+                self.completed_call(identifier="root", path=path)
+                self.approve("root", path=path)
+                finish = Action("finish", task="root", run="root", run_kind="answer", branch="calls/root")
+                refusal_time = datetime.fromisoformat("2026-11-01T12:00:00.000+00:00")
+                self.land.side_effect = lambda argv: self.refuse_call(argv, step=step, path=path)
+                for attempt in range(dispatch.LAND_TRIES):
+                    stamp = refusal_time.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+                    with patch.object(log, "now", return_value=stamp):
+                        self.assertEqual(self.tick(hosts={}, log_path=path), [finish])
+                        if attempt < dispatch.LAND_TRIES - 1:
+                            self.assertEqual(self.tick(hosts={}, log_path=path), [])
+                    refusal_time += timedelta(minutes=dispatch.LAND_AFTER)
+                with patch.object(log, "now", return_value=stamp):
+                    self.assertEqual(self.tick(hosts={}, log_path=path),
+                                     [Action("land-park", task="draft", run="root", detail=step)])
+                    self.assertEqual(self.tick(hosts={}, log_path=path), [])
+                records = log.read(path)
+                parked = [entry for entry in records if entry["ev"] == "call.parked"]
+                self.assertEqual(len(parked), 1)
+                self.assertEqual((parked[0]["subject"], parked[0]["call"], parked[0]["reason"], parked[0]["report"]),
+                                 ("draft", "root", f"fab land refused at {step} 3 times", "refusal.log"))
+                self.assertFalse(any(entry["ev"] == "call.finished" for entry in records))
+                self.assertFalse(any(entry["ev"] == "call.started" and entry["role"] == "amend" for entry in records))
+                self.append(dict(ev="call.answered", subject="draft"), path=path)
+                self.approve("root", number=2, path=path)
+                self.land.side_effect = self.record_land
+                with patch.object(log, "now", return_value=stamp):
+                    self.assertEqual(self.tick(hosts={}, log_path=path), [finish])
+                self.assertEqual(log.read(path)[-1]["outcome"], "done")
         self.assertEqual(log.read(), [])
 
     def test_finish_refusal_matches_only_new_unqueued_records_on_its_branch(self):
@@ -4767,8 +4842,8 @@ class IntegrationDecideTest(unittest.TestCase):
                 continue
             with self.subTest(status=status):
                 chains = call_review.chains(chain_history(status))
-                self.assertEqual(dispatch._chain_actions(chains, False, reviews=False),
-                                 dispatch._chain_actions(chains, False))
+                self.assertEqual(dispatch._chain_actions(chains, False, events=[], now=now, reviews=False),
+                                 dispatch._chain_actions(chains, False, events=[], now=now))
 
 
 class CheckoutFollowTest(unittest.TestCase):

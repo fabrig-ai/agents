@@ -13,16 +13,16 @@ anything.
   you believe wrong you leave, and say why in your report: the next review
   reads it, and a second refusal goes to the user.
 - **A refusal headed `fab land` refused at** names the landing step. At
-  `rebase` or `test`, run `git fetch origin`, rebase the branch onto
-  `origin/main`, and resolve each conflict keeping both sides' intent:
-  main's side is others' landed work. At `test`, then reproduce and fix
-  what the log names: `fab land` tested the branch rebased onto main. Run
-  the checks and push with
+  `rebase`, run `git fetch origin`, rebase the branch onto `origin/main`,
+  and resolve each conflict keeping both sides' intent: main's side is
+  others' landed work. At `test`, the branch comes rebased onto main;
+  reproduce and fix what the log names. Rebase first as above only when
+  the brief says that rebase conflicted. Run the checks and push with
   `git push --force-with-lease origin HEAD`; the worktree tracks
   `origin/calls/<root>`. For a retire, check the status files of the designs
   this brief lists against what your branch writes. At `paths`,
-  fix what the log names. At `fetch` or `push`, when the branch did not cause
-  it, change nothing and end `Done:` saying so.
+  fix what the log names. Code retries `fetch` and `push` refusals; they
+  do not reach this call.
 - **Findings that are the user's** (budgets, machines, what is hard to
   reverse) you do not decide: end with a question.
 

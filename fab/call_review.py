@@ -236,7 +236,7 @@ def settle_brief(chain: Chain, checkout: Path, events: Iterable[dict], *,
 
 
 def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str,
-                designs: Sequence[str] = ()) -> str:
+                designs: Sequence[str] = (), rebase: str = "") -> str:
     """The amend call's brief, through fab.calls' own section builder and facts (so
     fab.calls.start rebinds its `# Call facts` as for any call), sections in this order:
 
@@ -250,6 +250,8 @@ def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str,
     4. `Findings`: per refusal in order, `## <run>` and the first FINDINGS_LINES lines of
        FAB_HOME/runs/<run>/report.md (`(report missing)` when it cannot be read); `(none)`
        when the chain has no refusals. fab land refusals name their step and quote their log.
+       rebase adds the test refusal's outcome: rebased, conflicted (aborted), or pending
+       (--brief-only); empty keeps the findings unchanged.
     5. `Designs main changed since your branch`, only for non-empty designs: each design
        and its designer.status_path, then ask to check those status files against the branch
        (docs/design/calls.md, 2).
@@ -265,6 +267,15 @@ def amend_brief(chain: Chain, *, call_id: str, branch: str, report: str,
                 ("Call facts", calls._facts(call_id, branch, report)),
                 ("The call you amend", "\n".join(facts)),
                 ("Findings", _findings(chain.refusals))]
+    if rebase:
+        outcome = {
+            "rebased": "The branch was rebased onto origin/main and pushed before this amend.",
+            "conflicted": "The rebase onto origin/main conflicted and was aborted; nothing was pushed. "
+                          "Rebase first and resolve the conflicts before fixing the test refusal.",
+            "pending": "The branch would be rebased onto origin/main and pushed before this amend "
+                       "(--brief-only).",
+        }[rebase]
+        sections[-1] = ("Findings", sections[-1][1] + "\n\n" + outcome)
     if designs:
         paths = "\n".join(f"- `{path}` (status `{designer.status_path(path)}`)" for path in designs)
         sections.append(("Designs main changed since your branch", paths + "\n\n" +
@@ -443,6 +454,27 @@ def land_refusal(refusal: str) -> dict | None:
     return None
 
 
+def land_tries(chain: Chain, events: Iterable[dict], step: str) -> list[dict]:
+    """Fab land refusals at step since the later of latest's ending and the last reset.
+
+    Count by log position for this branch, regardless of tip. A subject's call.answered
+    or this root's chain.settled amend resets attempts; queue refusals never count.
+    Pure; docs/design/calls.md, 2.
+    """
+    attempts = []
+    for event in events:
+        kind = event.get("ev")
+        if ((kind == "call.ended" and event.get("call") == chain.latest)
+                or (kind == channel.ANSWERED and event.get("subject") == chain.subject)
+                or (kind == "chain.settled" and event.get("call") == chain.root
+                    and event.get("verdict") == "amend")):
+            attempts = []
+        elif (kind == "branch.rejected" and event.get("branch") == chain.branch
+              and "queue_ts" not in event and event.get("step") == step and step in LAND_STEPS):
+            attempts.append(event)
+    return attempts
+
+
 def _settle_restriction(chain: Chain, second: bool) -> str:
     """Limit the verdicts to ones that can resolve this hold without landing a refused tip."""
     if chain.reason == LAND_HOLD:
@@ -478,6 +510,8 @@ def _findings(refusals: tuple[str, ...]) -> str:
 def _fold_review(event: dict, position: int, folded: dict, reviews: dict) -> None:
     """Attach review runs and their first complete ending to an existing root."""
     if event["ev"] == "branch.rejected" and all(key in event for key in ("branch", "step")):
+        if "queue_ts" not in event and event["step"] in ("fetch", "push"):
+            return
         refusal = "queue:" + json.dumps(event, sort_keys=True)
         for chain in folded.values():
             if chain["branch"] == event["branch"] and refusal not in chain["refusals"]:

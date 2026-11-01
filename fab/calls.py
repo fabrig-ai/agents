@@ -704,9 +704,31 @@ def _retire_designs(repo: Path, draft: str, plan_path: str, branch: str) -> list
     return sorted(set(main) - set(tip))
 
 
+def _amend_rebase(repo: Path, root: str, branch: str, *, sh: Runner) -> str:
+    """Rebase the fetched call tip as fab in isolation, pushing only with its exact lease."""
+    sh(["git", "fetch", "origin"], cwd=str(repo), check=True)
+    tip = sh(["git", "rev-parse", "--verify", f"refs/remotes/origin/{branch}^{{commit}}"],
+             cwd=str(repo), check=True).out.strip()
+    worktree = log.home() / "amend" / root
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    sh(["git", "worktree", "add", "--detach", str(worktree), tip], cwd=str(repo), check=True)
+    try:
+        rebased = sh(["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
+                      "rebase", "origin/main"], cwd=str(worktree))
+        if not rebased.ok:
+            sh(["git", "rebase", "--abort"], cwd=str(worktree), check=True)
+            return "conflicted"
+        sh(["git", "push", f"--force-with-lease=refs/heads/{branch}:{tip}",
+            "origin", f"HEAD:refs/heads/{branch}"], cwd=str(worktree), check=True)
+        return "rebased"
+    finally:
+        sh(["git", "worktree", "remove", "--force", str(worktree)], cwd=str(repo), check=True)
+
+
 def _chain_call(role: str, root: str, repo: Path, events: list[dict],
-                facts: Mapping[str, str], *, draft: str, plan_path: str) -> tuple[str, str, dict]:
-    """Compile an amend or settle call from its root, refusing an invalid chain state."""
+                facts: Mapping[str, str], *, draft: str, plan_path: str,
+                brief_only: bool = False) -> tuple[str, str, dict]:
+    """Compile an amend or settle; rebase a test-refused branch before a real amend."""
     from fab import call_review
 
     chain = call_review.chains(events).get(root)
@@ -716,8 +738,12 @@ def _chain_call(role: str, root: str, repo: Path, events: list[dict],
         designs = ()
         if chain.role == "retire" and chain.refusals and call_review.land_refusal(chain.refusals[-1]):
             designs = _retire_designs(repo, draft, plan_path, chain.branch)
+        refusal = call_review.land_refusal(chain.refusals[-1]) if chain.refusals else None
+        rebase = ""
+        if refusal and refusal["step"] == "test":
+            rebase = "pending" if brief_only else _amend_rebase(repo, chain.root, chain.branch, sh=run)
         try:
-            text = call_review.amend_brief(chain, designs=designs, **facts)
+            text = call_review.amend_brief(chain, designs=designs, rebase=rebase, **facts)
         except (ValueError, OSError) as error:
             raise BriefError(str(error)) from error
         return text, chain.subject, dict(branch=chain.branch, amends=chain.root)
@@ -771,7 +797,7 @@ def _compile_call(args, plan, tasks, root, repo, events, facts, plan_path):
     """Validate a fresh call's part, then translate only brief builder failures."""
     if args.role in ("amend", "settle"):
         return _chain_call(args.role, args.root, repo, events, facts,
-                           draft=plan.draft, plan_path=plan_path)
+                           draft=plan.draft, plan_path=plan_path, brief_only=args.brief_only)
     if args.role == "skeleton" and args.part not in plan.parts:
         raise ValueError(f"unknown part {args.part!r}")
     if args.role == "skeleton":

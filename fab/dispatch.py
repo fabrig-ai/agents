@@ -34,6 +34,8 @@ ANSWER_AFTER = 30  # minutes the oldest queued question waits before an answer c
 ANSWER_AT = 4  # queued questions that start an answer call at once
 REVIEW_AT = 10  # tasks landed since the last review call that start one at once
 REVIEW_AFTER = 4 * 60  # minutes since the last review call that start one with any landed
+LAND_AFTER = 10  # minutes between fab land fetch or push retries
+LAND_TRIES = 3  # refusals at one mechanical step before parking for the user
 
 
 def blocking(tasks: Mapping[str, Task], events: list[dict], questions: list[dict], *,
@@ -65,6 +67,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     draft. Fresh skeleton and contract parts share its flow target, in design order.
     Successful calls stay designed; parked subjects and open chains block their subject.
     Settle calls share the answer limit; reply calls and issues/ reserve nothing.
+    LAND_AFTER delays fetch/push retries; LAND_TRIES parks them for the user.
     Queued questions use ANSWER_AT, ANSWER_AFTER or draft-local blocking; reviews use
     REVIEW_AT or REVIEW_AFTER since this draft's last review started. Retire follows
     review once every part is done. Pure; docs/design/fab-gates.md, 2; fab-calls.md, 2; fab-tick.md, 5.
@@ -81,7 +84,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     own = {root: chain for root, chain in chains.items()
            if drafts.under(plan.draft, chain.subject)}
     actions = _chain_actions(own, any(event["role"] == "amend" for event in flight.values()),
-                             reviews=plan.reviews)
+                             events=events, now=now, reviews=plan.reviews)
     open_chains = [chain for chain in own.values() if chain.state != "finished"]
     subjects = {chain.subject for chain in open_chains}
     roles = {event["role"] for event in flight.values()}
@@ -132,20 +135,38 @@ def _part_calls(plan: Plan, design: list[str], started: Mapping[str, dict], even
 
 
 def _chain_actions(chains: Mapping[str, call_review.Chain], amending: bool, *,
-                   reviews: bool = True) -> list[Action]:
-    """Translate chain states in order, reserving at most one amend call at a time."""
+                   events: list[dict], now: str, reviews: bool = True) -> list[Action]:
+    """Translate chain states, delaying mechanical land retries and reserving one amend."""
     actions = []
     for chain in chains.values():
         if chain.state in ("review", "approved"):
-            actions.append(Action("vet" if chain.state == "review" and reviews else "finish",
-                                  task=chain.root, run=chain.latest, branch=chain.branch,
-                                  run_kind=chain.role))
+            if chain.state == "review" and reviews:
+                actions.append(Action("vet", task=chain.root, run=chain.latest,
+                                      branch=chain.branch, run_kind=chain.role))
+            elif action := _land_action(chain, events, now):
+                actions.append(action)
         elif chain.state == "amend" and not amending:
             actions.append(Action("call", task=chain.root, run_kind="amend"))
             amending = True
         elif chain.state == "hold":
             actions.append(Action("hold", task=chain.subject, run=chain.root, detail=chain.reason))
     return actions
+
+
+def _land_action(chain: call_review.Chain, events: list[dict], now: str) -> Action | None:
+    """Park exhausted fetch/push retries, or finish after both steps' retry delays."""
+    waiting = False
+    for step in ("fetch", "push"):
+        attempts = call_review.land_tries(chain, events, step)
+        if len(attempts) >= LAND_TRIES:
+            return Action("land-park", task=chain.subject, run=chain.root, detail=step)
+        if attempts:
+            elapsed = datetime.fromisoformat(now) - datetime.fromisoformat(attempts[-1]["ts"])
+            waiting |= elapsed < timedelta(minutes=LAND_AFTER)
+    if not waiting:
+        return Action("finish", task=chain.root, run=chain.latest, branch=chain.branch,
+                      run_kind=chain.role)
+    return None
 
 
 def _settle_actions(actions: list[Action], chains: Mapping[str, call_review.Chain],
@@ -1020,7 +1041,7 @@ def _finish_outcome(action: Action, plan: Plan, checkout: Path, *, outcome: str,
                     since: int, sh: Runner, log_path: Path | None) -> str | None:
     """Return the finish outcome to record, or None to leave a refusal open.
 
-    A fab land refusal stays in its chain unless already landed or lost at fetch:
+    A fab land refusal stays open for retry or amendment unless landed or lost at fetch:
     the ref is absent (exit 2; docs/design/calls.md, 2). Queue and integration
     failures retain their own paths.
     """
@@ -1118,6 +1139,8 @@ def _take(action: Action, tasks: Mapping[str, Task], hosts: Mapping[str, Host], 
                 _judge_chain(action, log_path=log_path)
             case "hold":
                 _hold(action, log_path=log_path)
+            case "land-park":
+                _land_park(action, log_path=log_path)
             case "finish":
                 _pre_deliver(action, plan, plan_dir, checkout, sh=sh, log_path=log_path)
                 finish_events = log.read(log_path)
@@ -1783,6 +1806,16 @@ def _judge_chain(action: Action, *, log_path: Path | None) -> None:
             return
     log.append("call.parked", path=log_path, call=chain.root, subject=chain.subject,
                reason="user: " + text if valid else "settle failed", report=str(path))
+
+
+def _land_park(action: Action, *, log_path: Path | None) -> None:
+    """Park a chain for the user with its last mechanical land refusal's log."""
+    events = log.read(log_path)
+    chain = call_review.chains(events)[action.run]
+    refusal = call_review.land_tries(chain, events, action.detail)[-1]
+    log.append("call.parked", path=log_path, call=chain.root, subject=chain.subject,
+               reason=f"fab land refused at {action.detail} {LAND_TRIES} times",
+               report=refusal.get("log", ""))
 
 
 def _hold(action: Action, *, log_path: Path | None) -> None:

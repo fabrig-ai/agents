@@ -1617,6 +1617,97 @@ class MainTest(unittest.TestCase):
             self.assertIn("fix the signature", output.getvalue())
             self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
 
+    def test_main_test_refusal_amend_rebases_before_brief_and_start(self):
+        for outcome in ("rebased", "conflicted", "pending"):
+            with self.subTest(outcome=outcome), tmp_home() as root:
+                fixture(root)
+                self.amend_chain()
+                log.append("branch.rejected", branch="calls/root", step="test", log="test failure")
+                rebase = ["git", "-c", "user.name=fab", "-c", "user.email=fab@localhost",
+                          "rebase", "origin/main"]
+                fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(root)))
+                fake.on(["git", "rev-parse", "--verify"], Result(0, "fetched-tip\n"))
+                fake.on(rebase, Result(1 if outcome == "conflicted" else 0))
+                worktree = str(log.home() / "amend/root")
+                expected = [["git", "rev-parse", "--show-toplevel"]]
+                if outcome != "pending":
+                    expected += [["git", "fetch", "origin"],
+                                 ["git", "rev-parse", "--verify", "refs/remotes/origin/calls/root^{commit}"],
+                                 ["git", "worktree", "add", "--detach", worktree, "fetched-tip"], rebase]
+                    expected += ([["git", "rebase", "--abort"]] if outcome == "conflicted" else
+                                 [["git", "push", "--force-with-lease=refs/heads/calls/root:fetched-tip",
+                                   "origin", "HEAD:refs/heads/calls/root"]])
+                    expected += [["git", "worktree", "remove", "--force", worktree]]
+                compile_brief = call_review.amend_brief
+
+                def brief(*args, **kwargs):
+                    self.assertEqual(fake.argvs(), expected)
+                    self.assertEqual(kwargs["rebase"], outcome)
+                    return compile_brief(*args, **kwargs)
+
+                output = io.StringIO()
+                argv = ["amend", "root", "--plan", str(root / "docs/plan/demo")]
+                if outcome == "pending":
+                    argv.append("--brief-only")
+                with patch.object(calls, "run", fake), redirect_stdout(output), \
+                     patch.object(call_review, "amend_brief", side_effect=brief) as compile_call, \
+                     patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/root")) as start:
+                    self.assertEqual(calls.main(argv), 0)
+                compile_call.assert_called_once()
+                self.assertEqual(fake.argvs(), expected)
+                if outcome == "pending":
+                    start.assert_not_called()
+                    text = output.getvalue()
+                    self.assertIn("would be rebased onto origin/main and pushed", text)
+                else:
+                    start.assert_called_once()
+                    text = start.call_args.args[3]
+                    self.assertEqual(start.call_args.kwargs["branch"], "calls/root")
+                    phrase = ("was rebased onto origin/main and pushed" if outcome == "rebased" else
+                              "conflicted and was aborted; nothing was pushed")
+                    self.assertIn(phrase, text)
+                self.assertIn("## `fab land` refused at test", text)
+                self.assertIn("test failure", text)
+                self.assertEqual(fake.calls[0].cwd, str(root / "docs/plan/demo"))
+                for command in fake.calls[1:]:
+                    self.assertEqual(command.cwd, worktree if command.argv in
+                                     (rebase, ["git", "rebase", "--abort"]) or
+                                     command.argv[:2] == ["git", "push"] else str(root))
+
+    def test_main_amend_does_not_rebase_queue_tests_or_earlier_land_refusals(self):
+        for case in ("queue", "review", "paths"):
+            with self.subTest(case=case), tmp_home() as root:
+                fixture(root)
+                self.amend_chain()
+                fields = dict(queue_ts="queue-stamp") if case == "queue" else {}
+                log.append("branch.rejected", branch="calls/root", step="test", **fields)
+                if case == "review":
+                    log.append("run.started", run="root-2", task="root", kind="review")
+                    log.append("run.ended", run="root-2", outcome="failed")
+                elif case == "paths":
+                    log.append("branch.rejected", branch="calls/root", step="paths")
+                fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+                with patch.object(calls, "run", fake), redirect_stdout(io.StringIO()), \
+                     patch.object(calls, "start", return_value=dict(outcome="done", branch="calls/root")):
+                    self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo")]), 0)
+                self.assertEqual(fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
+    def test_main_test_refusal_push_failure_removes_worktree_and_starts_no_amend(self):
+        with tmp_home() as root:
+            fixture(root)
+            self.amend_chain()
+            log.append("branch.rejected", branch="calls/root", step="test")
+            fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"], Result(0, str(root)))
+            fake.on(["git", "rev-parse", "--verify"], Result(0, "fetched-tip\n"))
+            fake.on(["git", "push"], Result(1, err="lease refused"))
+            with patch.object(calls, "run", fake), redirect_stderr(io.StringIO()) as errors, \
+                 patch.object(calls, "start") as start:
+                self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo")]), 1)
+            start.assert_not_called()
+            self.assertIn("lease refused", errors.getvalue())
+            self.assertEqual(fake.argvs()[-1], ["git", "worktree", "remove", "--force",
+                                               str(log.home() / "amend/root")])
+
     def test_main_retire_land_amend_passes_plan_context_to_design_comparison(self):
         with tmp_home() as root:
             fixture(root)

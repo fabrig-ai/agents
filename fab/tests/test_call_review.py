@@ -75,6 +75,43 @@ class LandRefusalTest(unittest.TestCase):
                 with self.subTest(refusal=refusal):
                     self.assertIsNone(review.land_refusal(refusal))
 
+    def test_land_tries_counts_refusals_by_branch_and_step_never_tip(self):
+        with tmp_home():
+            first = _event("branch.rejected", branch=CHAIN.branch, step="fetch", tip="same")
+            second = dict(first, tip="new")
+            ignored = [dict(first, branch="calls/other"), dict(first, step="push"),
+                       dict(first, queue_ts="queued"), dict(first, queue_ts=None),
+                       dict(first, ev="branch.landed"), _event("branch.rejected")]
+            events = [*_root_events(), first, second, first, *ignored]
+            self.assertEqual(review.land_tries(CHAIN, iter(events), "fetch"), [first, second, first])
+            self.assertEqual(review.land_tries(CHAIN, events, "push"), [ignored[1]])
+
+    def test_land_tries_starts_after_later_latest_ending_or_reset(self):
+        refusal = _event("branch.rejected", branch=CHAIN.branch, step="push", tip="tip")
+        latest = replace(CHAIN, latest="amend-1", calls=(CHAIN.root, "amend-1"))
+        resets = [_event(channel.ANSWERED, subject=CHAIN.subject),
+                  _event("chain.settled", call=CHAIN.root, subject=CHAIN.subject,
+                         settle="settle-1", verdict="amend", text="Try again.")]
+        with tmp_home():
+            for reset in resets:
+                for end_first in (False, True):
+                    with self.subTest(reset=reset["ev"], end_first=end_first):
+                        ending = _event("call.ended", call=latest.latest, outcome="done")
+                        boundaries = [ending, reset] if end_first else [reset, ending]
+                        events = [*_root_events(), refusal, boundaries[0], refusal, boundaries[1], refusal]
+                        self.assertEqual(review.land_tries(latest, events, "push"), [refusal])
+
+    def test_land_tries_ignores_unrelated_answers_endings_and_land_settlements(self):
+        refusal = _event("branch.rejected", branch=CHAIN.branch, step="push")
+        ignored = [_event(channel.ANSWERED, subject="other"),
+                   _event("question.answered", subject=CHAIN.subject),
+                   _event("call.ended", call="other", outcome="done"),
+                   _event("chain.settled", call="other", verdict="amend"),
+                   _event("chain.settled", call=CHAIN.root, verdict="land")]
+        with tmp_home():
+            self.assertEqual(review.land_tries(CHAIN, [*_root_events(), refusal, *ignored], "push"),
+                             [refusal])
+
 
 class ChainsTest(unittest.TestCase):
     def chain(self, *events):
@@ -144,6 +181,22 @@ class ChainsTest(unittest.TestCase):
             chain = self.chain(*history, second)
             self.assertEqual((chain.state, chain.reason), ("hold", review.LAND_HOLD))
             self.assertEqual(len(chain.refusals), 2)
+
+    def test_mechanical_land_refusals_keep_approval_and_queue_refusals_still_amend(self):
+        with tmp_home():
+            for step in ("fetch", "push", "rebase", "paths", "test"):
+                refusal = _event("branch.rejected", branch=CHAIN.branch, step=step, log="failure")
+                with self.subTest(step=step):
+                    chain = self.chain(*_review_events(outcome="done"), refusal)
+                    mechanical = step in ("fetch", "push")
+                    self.assertEqual(chain.state, "approved" if mechanical else "amend")
+                    self.assertEqual(len(chain.refusals), 0 if mechanical else 1)
+                    queued = self.chain(*_review_events(outcome="done"), dict(refusal, queue_ts="queued"))
+                    self.assertEqual(queued.state, "amend")
+                    self.assertEqual(len(queued.refusals), 1)
+            history = [_event("branch.rejected", branch=CHAIN.branch, step="test"),
+                       *_amend_events(), *_review_events(outcome="done")]
+            self.assertEqual(self.chain(*history, dict(refusal, step="push")).state, "approved")
 
     def test_last_refusal_selects_hold_reason(self):
         land = _event("branch.rejected", branch=CHAIN.branch, step="test", log="failure")
@@ -498,6 +551,21 @@ class BriefTest(unittest.TestCase):
             self.assertEqual(text, plain + "\n" + section)
             queue = replace(chain, refusals=("queue:" + json.dumps(dict(record, queue_ts="queued")),))
             self.assertIn("## Queue rejection\n\nStep: rebase", review.amend_brief(queue, **options))
+
+    def test_test_refusal_brief_names_rebase_outcome_in_findings(self):
+        refusal = _event("branch.rejected", branch=CHAIN.branch, step="test", log="test failed")
+        chain = replace(CHAIN, refusals=("queue:" + json.dumps(refusal),))
+        with tmp_home():
+            for outcome, phrase in (("rebased", "was rebased onto origin/main and pushed"),
+                                    ("conflicted", "conflicted and was aborted; nothing was pushed"),
+                                    ("pending", "would be rebased onto origin/main and pushed")):
+                with self.subTest(outcome=outcome):
+                    text = review.amend_brief(chain, call_id="id", branch=chain.branch,
+                                              report="report", rebase=outcome)
+                    findings = text.split("# Findings\n\n", 1)[1]
+                    self.assertIn("## `fab land` refused at test", findings)
+                    self.assertIn("test failed", findings)
+                    self.assertIn(phrase, findings)
 
     def test_amend_brief_without_refusals(self):
         with tmp_home():
