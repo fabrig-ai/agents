@@ -51,6 +51,6 @@ come before the ones above where they differ.
   `files`); the pre-approved defaults for the questions it is likely to
   hit (a count that also matches the shared item itself, a site whose
   move would change what a test pins); its checks; and what its report
-  must say. Its base is the trunk's tip when its needs have merged.
-- **Your branch** is merged into the plan's trunk, not readied for the
-  queue.
+  must say. Its base is main's tip once its needs have landed.
+- **Your branch** lands on main once reviewed (this repository through
+  `bin/fab land`, fabrig through its queue).
