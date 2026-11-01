@@ -115,18 +115,25 @@
   import's dedup key includes the binary; `fab after-landing run` wakes the
   tick after a run with a new or unattributed red or a recovery (13.9's
   sender side); the page labels the newest run's reds `new red:` or
-  `unattributed red:`. Designed,
+  `unattributed red:`. Built (11-01), the hand-pushed side: the queue's
+  records of a branch that is not fab's (13.8: neither owned nor known to
+  the log) imported as `queue.rejected`, `queue.landed` and
+  `queue.collateral` with `gate`, an unloaded plan's records deferred, and
+  a tick with no loaded plan importing them and rewriting the page (13.4);
+  the page's `## Open signals` with the `queue:<branch>` kind and its new
+  first line (13.6); `fab page clear` and its wake; the backstop's
+  `lost event` note naming taskless records by branch (13.9). Designed,
   not built: after-landing reds opened by tip and suspects, sent to a red
   foreman (`fab/roles/foreman-red.md`, not written) and repaired by a
   log-folded task `<draft>/red-<n>` from main through the queue, closed by
-  recovery (11, 13.1); the specless refusal foreman (13.1); open signals on
-  the user's page and `fab page clear` (13.6); hand-pushed rejections
-  imported as `queue.rejected` (13.8); `red.settled` and `red.closed`
-  waking the tick again (13.9); a fabrig plan's retire waiting for its
-  verdict (11, 13.12); the landing report's red figures (10). Today the
-  imported reds open nothing: the queue import drops every record that is
-  no task's, and `fab/tier_reds.py` does not exist. A specless repair's refusal foreman still reads its spec from
-  `task.path` (`fab.repairs.start`), which a specless task does not have.
+  recovery, covered and unfixed (11, 13.1); the page's `red-<n>` and
+  `fault:<profile>` signals (13.6); the specless refusal foreman (13.1);
+  `red.settled` and `red.closed` waking the tick again (13.9); a fabrig
+  plan's retire waiting for its verdict (11, 13.12); the landing report's
+  red figures (10). Today the imported reds open nothing:
+  `fab/tier_reds.py` does not exist and the tick is not wired to it. A
+  specless repair's refusal foreman still reads its spec from `task.path`
+  (`fab.repairs.start`), which a specless task does not have.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
   `fab.calls.review_brief`, `last_review` and `landed_after` the review

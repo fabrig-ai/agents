@@ -579,6 +579,10 @@ which folds where each red stands, and the tick.
   integration plan's trunk, `<draft>/integration` (its owner the plan,
   whose tasks the foreman reads). Any other named branch was readied by
   hand; a retired plan is not loaded, so its branches count as hand-pushed.
+  This is a rule of its own, not 13.8's: the queue import keeps out of
+  `queue.*` every branch the log knows, loaded or not, while a red's
+  suspect must belong to a loaded plan that can hold its repair, so a
+  retired plan's branch is hand-pushed as a red's suspect.
 - **A red with a fab suspect goes to a foreman** (13.1, `fab/roles/
   foreman-red.md`): it reads the red, its evidence and the suspects' specs
   on main at the red's tip, and decides as a refusal's foreman does. The
@@ -645,11 +649,15 @@ which folds where each red stands, and the tick.
   - Standing reds start nothing: a standing red is not a `tiers.red`, and a
     key already in an open red opens no other.
   - **A fixed red is confirmed green by the same checks:** once the red
-    task lands, its keys' recoveries close it as any red's. The first
-    `tiers.run` without faults whose `branches` name `<draft>/red-<n>` and
-    that still lists one of its keys in `reds` makes it **unfixed**: the
-    red becomes a signal, saying the repair landed and the test is still
-    red. A second repair round is left for later (14).
+    task lands, its keys' recoveries close it as any red's. The red
+    records `covered`: the first `tiers.run` without faults one of whose
+    `branches` is its repair by `fab.land.task_of` (so a rebased
+    `<draft>/red-<n>-r<k>` counts). From that run on, any `tiers.run`
+    without faults that lists one of its keys in `reds` makes it
+    **unfixed**: the red becomes a signal, saying the repair landed and
+    the test is still red. A key starved on the covering run neither
+    closes nor unfixes the red there. A second repair round is left for
+    later (14).
 - **Reds no task owns are signals, on the user's page** (13.6): a red
   routed to the page at its opening, one its foreman left (verdict left),
   and an unfixed one. Each stays open until the red closes or its signal
@@ -1052,6 +1060,11 @@ before it lands (13.1).
 - **A plan that cannot load** (its plan.toml, a fetch, a second plan of the
   same draft) is printed and skipped; the others tick. It logs nothing,
   and `fab tick` exits 1. A retired plan is skipped.
+- **A tick with no loaded plan** (none listed or named, or none that
+  loads) imports the queue's unowned records (13.8) and rewrites the page,
+  and nothing else: no after-landing import, no measurement of the
+  builders, no decisions and no strays collected. Failed loads are still
+  printed and still make `fab tick` exit 1.
 - **Design calls run in parallel** for independent parts. A plan's
   skeleton and contract calls in flight number at most its flow target
   (13.2): two at its start, growing as the target does. The eligible parts
@@ -1209,15 +1222,24 @@ before it lands (13.1).
   qa-ladder batch was rejected on a port flake and nobody was told; its
   `rejected` sat in `queue.jsonl`). The tick's queue import
   (`fab.dispatch._import_queue`) keeps, besides its tasks' records, the
-  records of a branch that is no loaded task's and no fab branch's (not a
-  call's, answer's, repair section's or trunk): `rejected` as
-  `queue.rejected` (branch, tip, step, log, tests), `landed` as
-  `queue.landed` (branch, tip, main) and `collateral` as `queue.collateral`
-  (branch, tip, step, tests, log), each with `queue_ts` and `gate` (the
-  gate host's name, for the page's `<gate>:<log>`), deduplicated by
-  the same key as its tasks' records; its cursor stays the tasks'.
+  records of a branch that is not fab's: `rejected` as `queue.rejected`
+  (branch, tip, step, log, tests), `landed` as `queue.landed` (branch,
+  tip, main) and `collateral` as `queue.collateral` (branch, tip, step,
+  tests, log), each with `queue_ts` and `gate` (the gate host's name, for
+  the page's `<gate>:<log>`), deduplicated by the same key as its tasks'
+  records. Imported `tests` keep their string entries only.
+  - **A branch is fab's,** and never imported as `queue.*`, when a loaded
+    task or fab branch owns it, or when the log knows it, loaded or not: a
+    `branch.ready` or `run.started` naming the branch, a `run.started`
+    whose task is `fab.land.task_of(branch)`, or a fab branch's form
+    (`calls/`, `answers/`, `repairs/`, `<draft>/integration`). A record of
+    an unloaded plan's task is deferred, not relabelled: it imports as
+    `branch.*` once its plan loads, from the plans' cursors as before.
+  - **The cursor:** the oldest of the loaded drafts' cursors (13.4), as
+    before; with no loaded draft, the import resumes at the newest
+    `queue_ts` of any kind in the log.
   - A `queue.rejected` opens the signal `queue:<branch>` on the user's page
-    (13.6): branch, tip, step, failing tests and the log on the gate. It
+    (13.6), since its `queue_ts`: branch, tip, step, failing tests and the log on the gate. It
     clears when the branch lands, when a newer tip of it is tried, or by
     hand. Telling the session that readied it is left for later (14): a
     ready ref carries no pusher fab can read reliably.
