@@ -1905,38 +1905,47 @@ login that still works reused across them before more are signed in.
   the log qualify. Those with a run in flight, a main landing or a trunk
   merge today show `runs_in_flight`, `landed_today` and `merged_today`.
   A main landing belongs to its task's prefix; a trunk merge to the prefix
-  of `into` (`<draft>/integration`). Call branches do not create drafts.
+  of `into` (`<draft>/integration`). A main landing with no task (missing or
+  null) belongs to `by-hand`, even without a run start. Call branches do not
+  create drafts.
 - **Only public labels leave the fold.** Known host names, call roles from
   `fab.calls.ROLES` (others become `other`), and draft names matching
   `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A prefix ends at the
   first `/`; a task without `/` becomes `other`. Draft qualification uses
-  the prefix before this public classification. Subscription login ids
-  (`claude-7`, `codex-1`) are fab's public opaque names. No task, run or call
+  the prefix before this public classification. Subscription labels are
+  stable opaque account labels, never emails or full hashes. No task, run or call
   ids, branches, shas, paths, question or answer text, notes, reports,
   emails or holders in HTML or JSON; subscriptions never expose hosts.
-- **Subscriptions:** the snapshot's `subscriptions` list has each nonretired
-  Claude or Codex login whose latest `login.checked` is within 24 hours,
-  sorted by kind then id. Each has `login`, `kind`, a `plan` matching
-  `[a-z0-9_]{1,40}` or empty, `checked_age_s`, `check_failed` (a boolean,
-  never the error text) and `limits`. The three scalar log lists are zipped
-  back to `name`, `used`, `resets`; old checks without them have no limits.
-  Fable is omitted; `5 h` appears only above 80% use. Each limit also has
-  `rate_per_h`, `full_at` and `at_reset`, null without a usable earlier
-  sample. Use the oldest successful sample of that login and limit with
-  the same reset, at least 20 minutes before the latest check; decreasing
-  use and expired or unknown resets give no pace. Rate is percent per hour
-  to one decimal; projections use the unrounded rate from the latest check
-  time. `full_at` is Unix seconds if full before reset; otherwise
-  `at_reset` is projected percent at reset to one decimal (zero rate lasts).
-  The panel after Waiting on the user has Subscription (kind, plan, id on
-  its first row), Limit, Used (meter and percent), Resets (countdown and a
-  UTC `time` element/title), Rate (`3.6%/h`) and At this pace (`full in
-  1 d 13 h`, `lasts, 19% at reset`, or `–`). Meters warn at 80% and turn
-  critical at 95%. A failed check says `check failed` in Used, even with no
-  limits; a successful check with no limits shows `–`. With no recent
-  checks: `No login checked in the last 24 hours.` A Subscriptions tile
-  after the weights shows the highest `week` percent among successful
-  checks (`–` when absent), with the number of recent logins below.
+- **Subscriptions:** group nonretired Claude and Codex logins whose latest
+  `login.checked` is within 24 hours and successful (no error), with a
+  nonempty email, by `(kind, email)`. Each login's latest check decides its
+  current account; a failed check or one without an email leaves that login
+  out. Email is only an internal grouping key. The snapshot's `subscriptions`
+  list has one entry per group, sorted by kind then label. Each has
+  `subscription` (the first eight hex characters of SHA-256 of
+  `kind + "\0" + email`, encoded as UTF-8), `kind`, `plan` matching
+  `[a-z0-9_]{1,40}` or empty, `logins` (the sign-in count), `checked_age_s`
+  and `limits`. The group's newest successful check supplies its plan,
+  age and limits. The three scalar log lists are zipped back to `name`,
+  `used`, `resets`; old checks without them have no limits. Fable is omitted;
+  `5 h` appears only above 80% use. Each limit also has `rate_per_h`,
+  `full_at` and `at_reset`, null without a usable earlier sample. Use the
+  oldest successful sample across the group's logins for that account and
+  limit with the same reset, at least 20 minutes before the latest check;
+  decreasing use and expired or unknown resets give no pace. Checks made
+  under another account do not contribute. Rate is percent per hour to one
+  decimal; projections use the unrounded rate from the latest check time.
+  `full_at` is Unix seconds if full before reset; otherwise `at_reset` is
+  projected percent at reset to one decimal (zero rate lasts).
+  The panel after Waiting on the user has Subscription (kind, plan, label,
+  and `7 sign-ins` or `1 sign-in` on its first row), Limit, Used (meter and
+  percent), Resets (countdown and a UTC `time` element/title), Rate
+  (`3.6%/h`) and At this pace (`full in 1 d 13 h`, `lasts, 19% at reset`,
+  or `–`). Meters warn at 80% and turn critical at 95%. A check with no
+  limits shows `–`. With no eligible subscriptions:
+  `No login checked in the last 24 hours.` A Subscriptions tile after the
+  weights shows the highest `week` percent (`–` when absent), with
+  `<n> subscriptions` below.
 - The page reuses the previous status page's stylesheet and layout (tiles, panels, cards, badges), 1280 px wide.
 - **One plain document.** Title `fab status`, inline CSS, no JavaScript,
   refresh every 30 seconds, phone width and light and dark colours. Header,

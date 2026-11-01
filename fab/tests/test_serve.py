@@ -1,4 +1,5 @@
 import copy
+import hashlib
 import io
 import json
 import os
@@ -189,6 +190,18 @@ class SnapshotTest(unittest.TestCase):
         self.assertIn('<div class="label">Merged into a trunk today</div><div class="value">3</div>', page)
         self.assertIn('<td class="num">1</td><td class="num">2</td><td class="num">1</td>', page)
 
+    def test_serve_taskless_main_landings_are_by_hand_without_run_start(self):
+        events = [event("branch.landed"), event("branch.landed", task=None),
+                  event("branch.landed", 1801), event("branch.landed", -1),
+                  event("branch.landed", into="unknown/integration")]
+        current = serve.snapshot(events, NOW, [])
+        self.assertEqual(current["drafts"], {
+            "by-hand": {"runs_in_flight": 0, "landed_today": 2, "merged_today": 0},
+        })
+        self.assertEqual(current["landed"], {"last_hour": 3, "today": 2})
+        self.assertIn('<tr><td>by-hand</td>', serve.render(current))
+        self.assertNotIn('"other"', json.dumps(current["drafts"]))
+
     def test_serve_drafts_are_bounded_public_names(self):
         valid = ["a", "release-1.2", "a" * 64, "other"]
         invalid = ["a" * 65, "Upper", "-dash", "path<secret>", "", "../hidden"]
@@ -202,7 +215,7 @@ class SnapshotTest(unittest.TestCase):
                    event("branch.landed", task="unseen<secret>/private")]
         current = serve.snapshot(events, NOW, [])
         self.assertEqual(current["drafts"]["other"], {
-            "runs_in_flight": 0, "landed_today": 10, "merged_today": 7,
+            "runs_in_flight": 0, "landed_today": 9, "merged_today": 7,
         })
         for name in valid[:-1]:
             self.assertEqual(current["drafts"][name], {
@@ -277,7 +290,8 @@ class SubscriptionsTest(unittest.TestCase):
             limits = [("week", 80, NOW.timestamp() + 7200)]
         return event("login.checked", age, id=name, plan=plan,
                      limit_names=[limit[0] for limit in limits], limit_used=[limit[1] for limit in limits],
-                     limit_resets=[limit[2] for limit in limits], **fields)
+                     limit_resets=[limit[2] for limit in limits],
+                     **{"email": name + "@example.invalid", **fields})
 
     def test_subscriptions_latest_recent_check_retirement_sorting_and_public_plan(self):
         events = [self.added(), self.checked(3600, plan="old"), self.checked(60),
@@ -295,11 +309,75 @@ class SubscriptionsTest(unittest.TestCase):
         # The latest check is chosen by its timestamp, even when the input is out of order.
         subscriptions = serve.snapshot(list(reversed(events)), NOW, [])["subscriptions"]
         self.assertEqual(events, before)
-        self.assertEqual([s["login"] for s in subscriptions],
-                         ["claude-7", "claude-8", "codex-1", "codex-10", "codex-11"])
-        self.assertEqual([s["plan"] for s in subscriptions], ["max", "", "pro", "", "max_5"])
-        self.assertEqual([s["checked_age_s"] for s in subscriptions], [86400, 0, 60, 0, 0])
-        self.assertEqual([s["kind"] for s in subscriptions], ["claude", "claude", "codex", "codex", "codex"])
+        expected = [("claude", "claude-7", "max", 86400), ("claude", "claude-8", "", 0),
+                    ("codex", "codex-1", "pro", 60), ("codex", "codex-10", "", 0),
+                    ("codex", "codex-11", "max_5", 0)]
+        expected = sorted((kind, hashlib.sha256((kind + "\0" + name + "@example.invalid").encode())
+                           .hexdigest()[:8], plan, age) for kind, name, plan, age in expected)
+        self.assertEqual([(s["kind"], s["subscription"], s["plan"], s["checked_age_s"])
+                          for s in subscriptions], expected)
+        self.assertTrue(all(s["logins"] == 1 for s in subscriptions))
+
+    def test_subscriptions_group_account_uses_newest_limits_and_plan(self):
+        reset = NOW.timestamp() + 7200
+        events = [self.added(), self.checked(600, limits=[("week", 40, reset)]),
+                  self.added("codex-2"), self.checked(60, name="codex-2", plan="max",
+                                                   email="codex-1@example.invalid")]
+        current = serve.snapshot(list(reversed(events)), NOW, [])
+        self.assertEqual(current["subscriptions"], [{
+            "subscription": "11176037", "kind": "codex", "plan": "max", "logins": 2,
+            "checked_age_s": 60, "limits": [{"name": "week", "used": 80, "resets": reset,
+                                           "rate_per_h": None, "full_at": None, "at_reset": None}],
+        }])
+        page = serve.render(current)
+        self.assertIn("Codex · max · 11176037 · 2 sign-ins", page)
+        self.assertIn('<div class="sub">1 subscriptions</div>', page)
+
+    def test_subscriptions_latest_account_moves_login_to_new_group(self):
+        events = [self.added(), self.added("codex-2"),
+                  self.checked(3600), self.checked(1800, name="codex-2", email="codex-1@example.invalid")]
+        self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["logins"], 2)
+        events.append(self.checked(email="codex-2@example.invalid"))
+        subscriptions = serve.snapshot(events, NOW, [])["subscriptions"]
+        self.assertEqual(len(subscriptions), 2)
+        self.assertTrue(all(s["logins"] == 1 for s in subscriptions))
+        previous = next(s for s in subscriptions if s["subscription"] == "11176037")
+        self.assertEqual(previous["checked_age_s"], 1800)
+
+    def test_subscriptions_failed_or_missing_latest_account_leaves_login_out(self):
+        for fields in ({"error": "private failure"}, {"email": None}, {"email": ""},
+                       {"email": ["invalid"]}):
+            with self.subTest(fields=fields):
+                events = [self.added(), self.checked(3600), self.checked(**fields)]
+                self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"], [])
+                events += [self.added("codex-2"), self.checked(name="codex-2", email="codex-1@example.invalid")]
+                self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["logins"], 1)
+        missing = self.checked()
+        del missing["email"]
+        self.assertEqual(serve.snapshot([self.added(), self.checked(3600), missing], NOW, [])["subscriptions"], [])
+
+    def test_subscriptions_pace_uses_oldest_sample_across_account_logins(self):
+        reset = NOW.timestamp() + 7200
+        events = [self.added(), self.added("codex-2"),
+                  self.checked(7200, name="codex-2", email="codex-1@example.invalid",
+                               limits=[("week", 60, reset)]),
+                  self.checked(3600, limits=[("week", 75, reset)]), self.checked()]
+        subscription = serve.snapshot(list(reversed(events)), NOW, [])["subscriptions"][0]
+        self.assertEqual(subscription["logins"], 2)
+        self.assertEqual(subscription["limits"][0]["rate_per_h"], 10)
+        self.assertEqual(subscription["limits"][0]["at_reset"], 100)
+        events.insert(2, self.checked(10800, email="another@example.invalid", limits=[("week", 0, reset)]))
+        self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["limits"], subscription["limits"])
+
+    def test_subscriptions_label_stable_across_login_ids_and_separate_by_kind(self):
+        for name in ("codex-1", "codex-19"):
+            events = [self.added(name), self.checked(name=name, email="codex-1@example.invalid")]
+            self.assertEqual(serve.snapshot(events, NOW, [])["subscriptions"][0]["subscription"], "11176037")
+        events += [self.added("claude-7", "claude"),
+                   self.checked(name="claude-7", email="codex-1@example.invalid")]
+        subscriptions = serve.snapshot(events, NOW, [])["subscriptions"]
+        self.assertEqual([s["kind"] for s in subscriptions], ["claude", "codex"])
+        self.assertNotEqual(subscriptions[0]["subscription"], subscriptions[1]["subscription"])
 
     def test_subscriptions_rate_full_at_and_at_reset_from_same_window(self):
         reset = NOW.timestamp() + 7200
@@ -353,20 +431,17 @@ class SubscriptionsTest(unittest.TestCase):
 
     def test_subscriptions_private_account_and_custody_fields_never_leave_fold(self):
         private = {"email": "private@example.invalid", "holder": "private-holder", "host": "private-host",
-                   "path": "/private/path", "error": "private failure", "plan": "private@example.invalid"}
+                   "path": "/private/path", "plan": "private@example.invalid"}
         events = [self.added(), event("login.lent", 100, id="codex-1", at="/private/path", **private),
-                  self.checked(**private)]
+                  self.checked(3600, error="private failure", **private), self.checked(**private)]
         current = serve.snapshot(events, NOW, [])
+        digest = hashlib.sha256(b"codex\0private@example.invalid").hexdigest()
+        self.assertEqual(current["subscriptions"][0]["subscription"], digest[:8])
         for output in (json.dumps(current), serve.render(current)):
-            for secret in (*private.values(), "private-sha", "private-host:/private/path"):
+            for secret in (*private.values(), "private-sha", "private-host:/private/path",
+                           "private failure", "codex-1", digest):
                 self.assertNotIn(secret, output)
-            self.assertIn("codex-1", output)
-        self.assertTrue(current["subscriptions"][0]["check_failed"])
-        self.assertIn("check failed", serve.render(current))
-        events[-1] = self.checked(error="private failure", limits=[])
-        page = serve.render(serve.snapshot(events, NOW, []))
-        self.assertIn("check failed", page)
-        self.assertNotIn("private failure", page)
+            self.assertIn(digest[:8], output)
 
     def test_subscriptions_table_meters_resets_pace_and_tile(self):
         reset = NOW.timestamp() + 11340
@@ -381,7 +456,7 @@ class SubscriptionsTest(unittest.TestCase):
         self.assertIn('<h2>Subscriptions</h2><div class="panel"><div class="scroll"><table>', page)
         self.assertIn('<th>Subscription</th><th>Limit</th><th>Used</th><th>Resets</th>'
                       '<th>Rate</th><th>At this pace</th>', page)
-        self.assertEqual(page.count("Claude · max · claude-7"), 1)
+        self.assertEqual(page.count("Claude · max · d2b5a5cf · 1 sign-in</td>"), 1)
         self.assertIn('<span class="meter warning"><i style="width:80%"></i></span> 80%', page)
         self.assertIn('<span class="meter critical"><i style="width:95%"></i></span> 95%', page)
         self.assertIn('<span class="meter"><i style="width:4%"></i></span> 4%', page)
@@ -390,7 +465,7 @@ class SubscriptionsTest(unittest.TestCase):
         self.assertIn('<td>3.6%/h</td><td>lasts, 91.3% at reset</td>', page)
         self.assertIn('<td>–</td><td>–</td><td>–</td>', page)
         self.assertIn('<div class="label">Subscriptions</div><div class="value">80%</div>'
-                      '<div class="sub">2 logins</div>', page)
+                      '<div class="sub">2 subscriptions</div>', page)
         current["subscriptions"][0]["limits"][0]["full_at"] = NOW.timestamp() + 37 * 3600
         current["subscriptions"][0]["limits"][0]["at_reset"] = None
         self.assertIn("full in 1 d 13 h", serve.render(current))
@@ -400,10 +475,11 @@ class SubscriptionsTest(unittest.TestCase):
     def test_subscriptions_empty_and_legacy_checks(self):
         self.assertIn('<p class="empty">No login checked in the last 24 hours.</p>',
                       serve.render(serve.snapshot([], NOW, [])))
-        events = [self.added(), event("login.checked", id="codex-1", plan="pro", used=72, resets=123)]
+        events = [self.added(), event("login.checked", id="codex-1", email="codex-1@example.invalid",
+                                      plan="pro", used=72, resets=123)]
         current = serve.snapshot(events, NOW, [])
         self.assertEqual(current["subscriptions"][0]["limits"], [])
-        self.assertIn("Codex · pro · codex-1", serve.render(current))
+        self.assertIn("Codex · pro · 11176037 · 1 sign-in", serve.render(current))
 
 
 class RenderTest(unittest.TestCase):
@@ -452,7 +528,7 @@ class RenderTest(unittest.TestCase):
             '<div class="sub">last hour 3',
             '<div class="label">Weight today, Codex</div><div class="value">12.3M',
             '<div class="label">Weight today, Claude</div><div class="value">4.0M',
-            '<div class="label">Subscriptions</div><div class="value">–</div><div class="sub">0 logins',
+            '<div class="label">Subscriptions</div><div class="value">–</div><div class="sub">0 subscriptions',
         ])
         self.assertIn('main{max-width:1280px;', page)
         self.assertIn('<style>' + serve.STYLE + '</style>', page)

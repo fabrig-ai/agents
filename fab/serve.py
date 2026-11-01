@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import math
@@ -103,7 +104,7 @@ def _limits(event: dict) -> list[dict]:
 
 
 def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[dict]:
-    """Latest recent checks, with pace from the oldest usable sample in the same window."""
+    """One subscription per account, with pace from its oldest usable window sample."""
     kinds, retired, checks = {}, set(), {}
     for event, stamp in sorted(dated, key=lambda pair: pair[1]):
         name = event.get("id")
@@ -116,23 +117,31 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
             retired.add(name)
         elif ev == "login.checked":
             checks.setdefault(name, []).append((event, stamp))
-    subscriptions = []
+    groups = {}
     for name, samples in checks.items():
         event, stamp = samples[-1]
-        if name not in kinds or name in retired or (now - stamp).total_seconds() > 86400:
+        email = event.get("email")
+        if (name not in kinds or name in retired or (now - stamp).total_seconds() > 86400
+                or event.get("error") or not isinstance(email, str) or not email):
             continue
+        groups.setdefault((kinds[name], email), []).append(name)
+    subscriptions = []
+    for (kind, email), names in groups.items():
+        samples = sorted((sample for name in names for sample in checks[name]
+                          if not sample[0].get("error") and sample[0].get("email") == email),
+                         key=lambda pair: pair[1])
+        event, stamp = samples[-1]
         plan = event.get("plan")
-        failed = bool(event.get("error"))
         limits = []
         for limit in _limits(event):
             label, used, resets = limit["name"], limit["used"], limit["resets"]
             if label == "5 h" and (used is None or used <= 80):
                 continue
             limit.update(rate_per_h=None, full_at=None, at_reset=None)
-            if not failed and used is not None and resets is not None and resets > now.timestamp():
+            if used is not None and resets is not None and resets > now.timestamp():
                 for earlier, before in samples[:-1]:
                     elapsed = (stamp - before).total_seconds()
-                    if elapsed < 1200 or earlier.get("error"):
+                    if elapsed < 1200:
                         continue
                     previous = next((sample for sample in _limits(earlier)
                                      if sample["name"] == label and sample["resets"] == resets
@@ -148,20 +157,22 @@ def _subscriptions(dated: list[tuple[dict, datetime]], now: datetime) -> list[di
                         limit["at_reset"] = round(used + rate * (resets - stamp.timestamp()) / 3600, 1)
                     break
             limits.append(limit)
-        subscriptions.append({"login": name, "kind": kinds[name],
+        label = hashlib.sha256((kind + "\0" + email).encode()).hexdigest()[:8]
+        subscriptions.append({"subscription": label, "kind": kind, "logins": len(names),
                               "plan": plan if isinstance(plan, str) and re.fullmatch(r"[a-z0-9_]{1,40}", plan)
                               else "",
                               "checked_age_s": int((now - stamp).total_seconds()),
-                              "check_failed": failed, "limits": limits})
-    return sorted(subscriptions, key=lambda subscription: (subscription["kind"], subscription["login"]))
+                              "limits": limits})
+    return sorted(subscriptions, key=lambda subscription: (subscription["kind"], subscription["subscription"]))
 
 
 def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
     """Public counts and ages at now, in UTC, with only known hosts, call roles and safe
     draft names. Skip invalid timestamps and future events; pair ids across the log,
     fold the user's log asks through channel.asks, and bound runs to 24 h and calls to
-    calls.TIMEOUT. Include recent subscription limits and pace, with public login ids.
-    Separate main landings from trunk merges; only drafts named by run starts appear.
+    calls.TIMEOUT. Include recent account subscriptions with opaque labels and pace.
+    Separate main landings from trunk merges; drafts come from run starts, with
+    by-hand for main landings without a task.
     Today runs from UTC midnight through now. Only public fields leave the fold."""
     now = now.astimezone(timezone.utc)
     today = now.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -184,10 +195,14 @@ def snapshot(events: list[dict], now: datetime, hosts: Collection[str]) -> dict:
 
     def count_draft(event: dict, figure: str) -> None:
         name = _draft(event)
-        if name in known_drafts:
+        if event.get("ev") == "branch.landed" and "into" not in event and event.get("task") is None:
+            public = "by-hand"
+        elif name in known_drafts:
             public = name if DRAFT.fullmatch(name) else "other"
-            counts = drafts.setdefault(public, {"runs_in_flight": 0, "landed_today": 0, "merged_today": 0})
-            counts[figure] += 1
+        else:
+            return
+        counts = drafts.setdefault(public, {"runs_in_flight": 0, "landed_today": 0, "merged_today": 0})
+        counts[figure] += 1
 
     for event, stamp in dated:
         last = stamp
@@ -318,14 +333,14 @@ def render(snapshot: dict) -> str:
             return '<p class="empty">No login checked in the last 24 hours.</p>'
         rows = []
         for subscription in subscriptions:
+            sign_ins = subscription["logins"]
             label = " · ".join(filter(None, (subscription["kind"].title(), subscription["plan"],
-                                             subscription["login"])))
+                                             subscription["subscription"],
+                                             f"{sign_ins} sign-in" + ("s" if sign_ins != 1 else ""))))
             for index, limit in enumerate(subscription["limits"] or [{}]):
                 used = limit.get("used")
                 use = "–"
-                if subscription["check_failed"]:
-                    use = "check failed"
-                elif used is not None:
+                if used is not None:
                     state = " critical" if used >= 95 else " warning" if used >= 80 else ""
                     use = (f'<span class="meter{state}"><i style="width:{max(0, min(100, used)):g}%"></i>'
                            f'</span> {used:g}%')
@@ -365,7 +380,7 @@ def render(snapshot: dict) -> str:
         waiting = snapshot["waiting_on_user"]
         weights = snapshot["weight_today"]
         subscriptions = snapshot["subscriptions"]
-        weekly = [limit["used"] for subscription in subscriptions if not subscription["check_failed"]
+        weekly = [limit["used"] for subscription in subscriptions
                   for limit in subscription["limits"] if limit["name"] == "week" and limit["used"] is not None]
         content = '<div class="tiles">' + "".join([
             tile("Runs in flight", runs["total"],
@@ -379,7 +394,7 @@ def render(snapshot: dict) -> str:
                  f'last hour {snapshot["merged"]["last_hour"]}'),
             tile("Weight today, Codex", f'{weights["codex_m"]:.1f}M'),
             tile("Weight today, Claude", f'{weights["claude_m"]:.1f}M'),
-            tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} logins"),
+            tile("Subscriptions", f"{max(weekly):g}%" if weekly else "–", f"{len(subscriptions)} subscriptions"),
         ]) + '</div>'
         content += ('<h2>Waiting on the user</h2><div class="panel">'
                     + table(("Kind", "Open"), [("Call questions", waiting["by_kind"]["call"]),
