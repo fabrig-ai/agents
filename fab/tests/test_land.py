@@ -12,13 +12,13 @@ from fab.tests.wakes import WakeTestCase
 
 
 class LandPureTest(unittest.TestCase):
-    def test_outside_obeys_directory_and_exact_boundaries(self):
+    def test_outside_names_only_forbidden_directories(self):
         allowed = ["fab/a.py", "fab/tests/a.py", "bin/fab", "docs/design/fab.md",
-                   "docs/design/fab.status.md", "docs/plan/a/tasks/b.md",
-                   "docs/design/fab-tick.md", "docs/design/fab-after-landing.status.md"]
-        forbidden = ["fab", "fabric/a.py", "bin/fab-extra", "docs/design/fab.md.bak",
-                     "docs/plan", "README.md", "docs/design/fab-tick.md.bak",
-                     "docs/design/fab-x/y.md", "docs/design/fabx.md", "docs/design/fab-.md"]
+                   "docs/design/tick.status.md", "docs/plan/a/tasks/b.md", "README.md",
+                   "AGENTS.md", "tools/x", "docs/design/README.md", "docs/design/draft",
+                   "older/a.md", "docs/design/drafts/a.md"]
+        forbidden = ["old/README.md", "old/scripts/a", "docs/design/draft/a.md",
+                     "docs/design/draft/README.md"]
         self.assertEqual(landing.outside(iter(allowed + forbidden)), sorted(forbidden))
         self.assertEqual(landing.outside([]), [])
 
@@ -120,8 +120,8 @@ class LandGitTest(unittest.TestCase):
         self.assert_refused(outcome, "rebase", main)
         self.assertIn("CONFLICT", outcome.detail)
 
-    def test_path_outside_allowed_is_named(self):
-        tip = self.branch_commit("README.md", "changed\n")
+    def test_forbidden_path_is_named(self):
+        tip = self.branch_commit("old/README.md", "changed\n")
         real_land = landing.land
         with patch("fab.land.land", side_effect=lambda checkout, branch: real_land(checkout, branch, test=["true"])), \
                 redirect_stdout(io.StringIO()) as output:
@@ -132,21 +132,21 @@ class LandGitTest(unittest.TestCase):
         self.assertEqual(record["branch"], self.branch)
         self.assertEqual(record["tip"], tip)
         self.assertEqual(record["step"], "paths")
-        self.assertIn("README.md", record["log"])
+        self.assertIn("old/README.md", record["log"])
         self.assertIn("paths", output.getvalue())
         self.assertEqual(git(self.origin, "rev-parse", "main"), self.base)
         self.assertNotEqual(git(self.origin, "branch", "--list", self.branch), "")
         self.assert_clean_detached()
 
-    def test_rename_from_outside_allowed_is_refused(self):
+    def test_rename_into_forbidden_is_refused(self):
         git(self.clone, "checkout", "-qb", self.branch)
-        (self.clone / "fab").mkdir()
-        git(self.clone, "mv", "README.md", "fab/moved.md")
+        (self.clone / "old").mkdir()
+        git(self.clone, "mv", "README.md", "old/moved.md")
         git(self.clone, "commit", "-qm", "Move readme")
         git(self.clone, "push", "-q", "origin", "HEAD:refs/heads/" + self.branch)
         outcome = landing.land(self.clone, self.branch, test=["true"])
         self.assert_refused(outcome, "paths")
-        self.assertIn("README.md", outcome.detail)
+        self.assertIn("old/moved.md", outcome.detail)
 
     def test_red_test_keeps_last_twenty_lines_and_cleans_output(self):
         self.branch_commit()

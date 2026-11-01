@@ -12,9 +12,8 @@ from pathlib import Path
 from fab import log, wake
 from fab.sh import Runner, run
 
-# What fab land may land; anything else still goes through tools/land.
-ALLOWED = ("fab/", "bin/fab", "docs/design/fab.md", "docs/design/fab.status.md", "docs/plan/")
-DESIGNS = re.compile(r"docs/design/fab-[a-z0-9-]+(\.status)?\.md")  # fab's subsystem designs
+# What fab land never lands: the legacy kit, kept as reference, and the user's drafts.
+FORBIDDEN = ("old/", "docs/design/draft/")
 REMOTE = "git@github.com:fabrig-ai/agents.git"
 TEST = ("bin/fab", "test")
 
@@ -29,12 +28,8 @@ class Outcome:
 
 
 def outside(paths: Iterable[str]) -> list[str]:
-    """The paths fab land may not land, sorted: an ALLOWED entry ending in / covers a directory,
-    others match exactly, and fab's subsystem designs (DESIGNS) are allowed too."""
-    return sorted(path for path in paths if not DESIGNS.fullmatch(path) and not any(
-        path.startswith(allowed) if allowed.endswith("/") else path == allowed
-        for allowed in ALLOWED
-    ))
+    """The paths fab land may not land, sorted: those under a FORBIDDEN directory."""
+    return sorted(path for path in paths if path.startswith(FORBIDDEN))
 
 
 def task_of(branch: str) -> str | None:
@@ -90,7 +85,7 @@ def land(checkout: Path, branch: str, *, test: Sequence[str] = TEST, sh: Runner 
                 return Outcome(False, "paths", detail(changed), tip, main_tip)
             forbidden = outside(path for path in changed.out.split("\0") if path)
             if forbidden:
-                return Outcome(False, "paths", "Paths outside ALLOWED:\n" + "\n".join(forbidden), tip, main_tip)
+                return Outcome(False, "paths", "Paths fab land may not land:\n" + "\n".join(forbidden), tip, main_tip)
             try:
                 tested = sh(test, cwd=str(checkout), timeout=120)
             except OSError as error:

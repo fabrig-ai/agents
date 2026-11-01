@@ -13,8 +13,9 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 ## 2. Landing
 
 - **This repository:** `bin/fab land BRANCH` on hel8, one at a time under a
-  flock. It refuses a branch touching anything outside `fab/`, `bin/fab`,
-  `docs/design/fab*` and `docs/plan/` (those still go through `tools/land`).
+  flock. It refuses a branch touching `old/` (the legacy kit, reference only)
+  or `docs/design/draft/` (the user's input); everything else in this
+  repository lands this way.
   It rebases onto main, runs `bin/fab test`, pushes main fast-forward only,
   deletes the branch and logs `branch.landed`. A conflict or a red logs
   `branch.rejected`.

@@ -323,9 +323,8 @@ before it lands (2).
   detail as a queue log path today and quotes nothing.
 - The cut started by the tick when a draft lands that no plan serves, once
   a draft can say where its plan goes.
-- The designer's calls for repositories other than this one, and changes to
-  designs outside `docs/design/fab*`, once calls land through tools/land or
-  fabrig's queue.
+- The designer's calls for repositories other than this one, once calls land
+  through fabrig's queue.
 - A plan `[[question]]` naming a direct part holds that part's tasks, not
   only its design: today a direct part's specs run while its question is
   open (the first dry cut of the component kit asked the user 6.1 and its
