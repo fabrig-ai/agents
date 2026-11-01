@@ -11,6 +11,7 @@ COMMANDS = {
     "tick": ("fab.dispatch", "collect, land and start every plan's tasks"),
     "wake": ("fab.wake", "wake the tick from any machine; install the tick's units"),
     "test": ("fab.testrun", "run every test; fail past the 30 s budget"),
+    "issues": ("fab.forge", "the user's questions as forge issues: open, converse, close"),
     "page": ("fab.channel", "the user's page: their questions and the latest reports; their answers"),
     "report": ("fab.report", "the standing reports of a plan and of the landing"),
     "serve": ("fab.serve", "the public status page, live from the log"),

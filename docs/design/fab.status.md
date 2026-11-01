@@ -5,6 +5,14 @@
 
 ## Present
 
+- **The user's questions on the forge** (11-01, 13.16): `fab issues sync`
+  opens one labelled issue per subject, reads user comments through medium
+  reply calls, records decisions through `channel.answer`, and closes
+  answered issues. The log holds the state; a nonblocking flock serializes
+  passes. Fake forge, HTTP and Claude runners cover conversations, retries,
+  paging, locking and secret-free diagnostics. Deployment is by hand:
+  provision the bot token file and a transient two-minute timer on hel8.
+
 - **The queue's retire fix and `rejected`'s tests** (11-01, section 6):
   the retire push runs with `--porcelain` and is read per ref; a refused
   source delete is left alone (a `left` line in the detail log); a refused

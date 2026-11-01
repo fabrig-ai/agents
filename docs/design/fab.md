@@ -84,6 +84,10 @@ the user's "Execution modes for the code-producing pipeline" (Claude Docs,
 | `call.finished` | call, role, outcome | the dispatcher landed a call's branch, or failed to |
 | `call.parked` | call, subject, reason, report | a call's branch waits for the user (13.1) |
 | `call.answered` | subject, call, by, question, answer | the user answered a subject's question or parked chain (13.6) |
+| `issue.opened` | subject, kind, number, url | an open user ask has a forge issue (13.16) |
+| `issue.comment` | number, subject, comment | a user comment consumed before its reply call (13.16) |
+| `issue.replied` | number, call; outcome | the loop posted a reply; outcome is failed only for an unreadable or failed call (13.16) |
+| `issue.closed` | number, subject | the subject no longer has an open ask; its issue is closed (13.16) |
 | `tiers.run` / `tiers.red` / `tiers.recovered` | tip, verdict, counts, branches, commits, faults, reds, log; tip, key, state, profile, binary, test, error, branches, log, rerun; tip, key, profile, binary, test | imported from the after-landing machine, `al_ts` its record's time, `host` the machine's name (section 11) |
 | `red.opened` | red, tip, keys, suspects, tasks, draft, route, reason | an after-landing red's tests, grouped, sent to a foreman or to the page (section 11) |
 | `red.settled` | red, run, verdict, reason, owner, section | the tick acted on a red's foreman: fix or none (a repair task follows) or left (the page) (13.1) |
@@ -2335,6 +2339,73 @@ session still walks by hand; walks run by fab are the section's last part.
     `fab/roles/foreman-finding.md`, `finding_actions` and the
     `examine-fix`/`remedy-fix` pair in `fab/dispatch.py`: the repair path.
   - **Last, separable:** walks run by fab.
+
+### 13.16 The user's questions on the forge
+
+- **One issue per subject** (`fab/forge.py`): `fab issues sync` takes the
+  log's open asks (`fab.channel.asks((), events)`, 13.6), calls and parked
+  chains only. A plan's questions stay in plan.toml. One pass opens,
+  converses, then closes, under `FAB_HOME/issues.lock`; a second pass while
+  it runs exits 0 at once. The log is the only state. No webhook or router;
+  one conversation call runs at a time.
+- **The forge** is Forgejo on hel8: API
+  `http://127.0.0.1:3000/api/v1`, links `https://git.fabrig.ai`, repository
+  `fabrig-ai/agents`, label 1 (`waiting-on-user`). The bot's `write:issue`
+  token is read from `~/.config/fab/forgejo.token` and sent as
+  `Authorization: token ...`. Standard-library `urllib.request` only;
+  requests have a 30-second timeout and refuse redirects. Neither token,
+  response bodies nor exception text is printed or logged. A forge error
+  stops the pass with exit 1 and one line naming the step, method and path;
+  earlier records remain for the next pass.
+- **Open:** an ask without `issue.opened` for its subject gets an issue;
+  after `issue.closed`, only a later ask opens another. Log order, not
+  timestamp precision, decides later. Both ask kinds for a subject share
+  one issue, using the newest ask. Title: `<subject>: <first non-blank
+  question line>`, cut to 200 characters. Body: the call report's
+  `channel.excerpt`, or the parked reason and its report's excerpt, then
+  `Read: <report path>` and the footer: "Answer in a comment. Ask for more
+  context if you need it: the loop replies here. Your answer is recorded
+  once the loop reads it as one." Apply label 1 and log `issue.opened`
+  (subject, kind, number, url).
+- **Converse:** read all comments of each issue opened and not closed,
+  paginated, oldest id first. Only `free` is acted on, and only an id not
+  already named by `issue.comment` for that issue. Log `issue.comment`
+  (number, subject, comment id) before starting one `reply` call. Its brief
+  holds the role text, Call facts, the ask's question, report excerpt and
+  path, and the issue thread through this comment as
+  `**<author>** (<time>): <body>` blocks. Later comments wait their turn;
+  bot comments are context. An answer ends the conversation.
+- **The reply** (`fab/roles/reply.md`, `fab.calls.ROLES`, effort medium)
+  reads what the question and report point to: code, designs, FAB_HOME
+  runs and calls. It changes no repository file and pushes nothing. It
+  runs through `calls.start` in the agents clone, with subject
+  `issues/<number>`, keeping the call's artifacts and usage (13.5).
+  No plan owns that subject; the tick reserves no capacity for reply calls
+  and neither reviews, collects nor lands them. Their `call.ended done`
+  cannot close the asking subject (13.6).
+- **The report's first line** is exactly `Done: reply` or `Done: answer`,
+  then a blank line, then only the text to post or record. A request for
+  context or a counter-question gets a short, plain reply, the options and
+  a recommendation when helpful. A decision (an option, yes to the
+  recommendation, the user's own choice) becomes a self-contained answer
+  in one paragraph; wrapped lines become spaces.
+  - Reply: post the text as a comment and log `issue.replied` (number,
+    call).
+  - Answer: `channel.answer(subject, text, events, by="user")` logs
+    `call.answered` and wakes the tick exactly as `fab page answer` does;
+    comment `Recorded as your answer: <text>`.
+  - Anything else, or a failed call: comment "The loop could not read this
+    comment; it will retry on your next comment." and log `issue.replied`
+    with outcome `failed`. A consumed comment never runs again, including
+    after a posting error; the user's next comment starts another call.
+- **Close:** after conversations, reread the log. For each issue opened
+  and not closed whose subject has no open ask, comment "Answered;
+  closing.", PATCH its state to closed, then log `issue.closed` (number,
+  subject). A `fab page answer` follows the same path. Completed mutations
+  are logged before moving on; a crash between a forge mutation and its
+  record can repeat that mutation on the next pass.
+- Deployment (the token file, a transient timer on hel8 running
+  `fab issues sync` every 2 minutes) is by hand.
 
 ## 14. Later
 
