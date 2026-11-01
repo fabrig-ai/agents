@@ -148,36 +148,47 @@
 - **QA findings: designed, not built** (13.15; the user, 11-01, after
   qa-ladder ran v0.1.0's ladder by hand and left 48 off-path findings in
   `coord/qa-ladder/findings.md` with no owner). Nothing of it is in the
-  code: no ladder plan, `fab qa`, finding events, triage call, finding
-  foreman or repair task, page block or report figures. Until it lands,
-  ladder sessions triage, survey, repair, land and rerun by hand, as
-  qa-ladder did. Built first: the plan's rungs, the fold, `fab qa` and the
-  triage call (`fab/plan.py`, `fab/findings.py`, `fab/walks.py`,
-  `fab/triage.py`); the repairs (`fab/fixes.py`) and the tick's steps wait
-  for red-routing's wiring of red tasks into the tick (11, above), whose
-  run path they share through `fab.tier_reds.FIX_KINDS`; the page's
-  `finding-<n>` signal waits for its page work. Walks run by fab are the
-  section's last part, separable. Departures, each with its reason in
-  13.15:
-  - from temper's `domain/findings.md`: the record lives in fab's log, not
-    a labelled forge issue; no signature (QA findings have no test ids), so
-    duplicates are merged by the walker naming them or by triage, never by
-    a key; `area` is the component the walker names, free text; severity
-    is the walker's (its open question 10); states add `asked` and
-    `merged` and a repair's states; a finding closes on its rung's rerun,
-    not on `Fixes #n` once its landing clears;
-  - from `execution-modes.md`'s Fix mode ("Claude designs nothing by
-    default"): every finding meets one Claude call, the triage, in batches,
-    since v0.1.0.md 4 has the director triage every finding; the repair
-    itself is Codex's (foreman and implementer), Claude only after two
-    failed tries (`RED_RUNS`); the public-item wake waits for the api gate,
-    as for reds;
-  - from v0.1.0.md 4, which puts a rung's own walk's findings on the path
-    by definition: the triage call decides each, at the user's request,
-    with the path its default for a finding that failed an acceptance;
-  - from qa-ladder's practice: repairs readied one by one from main and
-    batched by the queue, not merged into hand batches; a kit change gives
-    every rung reading it a new edition, where qa-ladder judged per rung.
+  code. Until it lands, ladder sessions triage, survey, repair, land and
+  rerun by hand, as qa-ladder did.
+  - **Runs before red-routing's tick wiring lands:** the ladder plan's
+    rungs (`fab/plan.py`); the intake (`fab qa walk|result|rungs`,
+    `qa.lock`, `walk.ended` last; `fab/walks.py`); the findings' and rungs'
+    fold, rung states and `rung.passed` (`fab/findings.py`); the triage
+    call, report-only, its due rule and recorded decisions, and the
+    backlog rendered from the log and readied as `ladder/<draft>/backlog-<n>`
+    (`fab/triage.py`, `fab.calls.start`'s `report_only`,
+    `fab.spec_edit.commit_path`, the tick's triage steps); the page's
+    `finding` asks, `finding-<n>` signal and `## The ladder`
+    (`fab/channel.py`); the landing report's QA figures. Built alone, an
+    on-path finding stops at its foreman and holds its rung.
+  - **Runs after it:** the repair path: `fab/fix.py` factored out of
+    `fab/tier_reds.py` (launch, verdict, settle, answers, task,
+    `FIX_KINDS`, `RUNS`), section 11's actions renamed `examine-fix` and
+    `remedy-fix` (red-routing builds them as `examine-red` and
+    `remedy-red`), `fab/fixes.py`, `fab/roles/foreman-finding.md` and
+    `finding_actions`.
+  - **Last, separable:** walks run by fab (the `walk` role, the `build`
+    run, `boxes`, logins per walk, `fab.calls.TIMEOUTS`).
+  - **Departures,** each with its reason in 13.15:
+    - from temper's `domain/findings.md`: the record lives in fab's log,
+      not a labelled forge issue; no signature (QA findings have no test
+      ids), so duplicates are merged by the walker naming them or by
+      triage, never by a key; `area` is the component the walker names,
+      free text; severity is the walker's (its open question 10); states add
+      `asked`, `merged` and a repair's states; a finding closes on its
+      rung's rerun, not on `Fixes #n` once its landing clears;
+    - from `execution-modes.md`'s Fix mode ("Claude designs nothing by
+      default"): every finding meets one Claude call, the triage, in
+      batches, since v0.1.0.md 4 has the director triage every finding; the
+      repair is Codex's (foreman and implementer), Claude only after two
+      failed tries; the public-item wake waits for the api gate, as for
+      reds;
+    - from v0.1.0.md 4, which puts a rung's own walk's findings on the path
+      by definition: the triage call decides each, at the user's request,
+      with the path its default for a finding that failed an acceptance;
+    - from qa-ladder's practice: repairs readied one by one from main and
+      batched by the queue, not merged into hand batches; a kit change gives
+      every rung reading it a new edition, where qa-ladder judged per rung.
 - **Gates and the structure review are a skeleton:** `fab/digest.py` and
   `fab/gates.py` hold section 12's signatures and contracts, and
   `fab.calls.review_brief`, `last_review` and `landed_after` the review
