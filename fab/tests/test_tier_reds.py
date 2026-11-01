@@ -1,6 +1,7 @@
 """Red lifecycle decisions over records; acting shells use temporary homes and fakes."""
 
 import shlex
+import time
 import unittest
 from dataclasses import FrozenInstanceError, replace
 from unittest.mock import patch
@@ -30,7 +31,7 @@ def tier(key=KEY, tip="tip", branches=("demo/a",), **fields):
 
 
 def checked(keys=(KEY,), tip="tip", **fields):
-    return event(reds.TIERS_RUN, tip=tip, reds=list(keys), **fields)
+    return event(reds.TIERS_RUN, **(dict(tip=tip, reds=list(keys), starved=0, unobserved=0) | fields))
 
 
 def opened(**fields):
@@ -132,8 +133,39 @@ class TierRedsOpeningTest(unittest.TestCase):
         self.assertEqual(len(groups), 1)
         self.assertEqual(groups[0].keys, (KEY,))
 
+    def test_red_pass_red_imported_together_uses_last_reds_tip_and_suspects(self):
+        events = [tier(tip="A", branches=("old/a",)), checked(tip="A"),
+                  event(reds.RECOVERED, key=KEY, tip="B"), checked((), tip="B"),
+                  tier(tip="C", branches=("new/b",)), checked(tip="C")]
+        group, = reds.openings(events, {"old/a": "old/a", "new/b": "new/b"})
+        self.assertEqual((group.tip, group.suspects, group.tasks, group.draft),
+                         ("C", ("new/b",), ("new/b",), "new"))
+
+    def test_run_commits_and_branches_belong_to_the_groups_tip(self):
+        events = [tier(branches=("demo/integration", "manual/x"), commits=99),
+                  checked(commits=2, branches=["demo/integration"]),
+                  checked(commits=5, branches=["demo/integration", "demo/b", "manual/x"]),
+                  checked(tip="newest", commits=40, branches=[])]
+        owners = {"demo/integration": "demo"}
+        group, = reds.openings(events, owners)
+        self.assertEqual((group.commits, group.branches),
+                         (5, ("demo/integration", "demo/b", "manual/x")))
+        text = reds.evidence(group, red_id="red-1", machine="tiers", owners=owners, reruns={})
+        for fragment in ("Commits with no branch: 2", "demo/integration: the trunk of plan demo",
+                         "manual/x: hand-pushed"):
+            self.assertIn(fragment, text)
+        self.assertEqual(group.hand_pushed, ("manual/x",))
+        for commits, count in ((0, "0"), (1, "0"), (None, "unknown")):
+            run = checked(branches=["demo/integration"])
+            if commits is not None:
+                run["commits"] = commits
+            group, = reds.openings([events[0], run], owners)
+            text = reds.evidence(group, red_id="red-1", machine="tiers", owners=owners, reruns={})
+            self.assertIn("Commits with no branch: " + count, text)
+
     def test_evidence_limits_counts_paths_and_rerun_tails(self):
-        events = [*(tier(str(n), commits=3) for n in range(22)), checked(tuple(map(str, range(22))))]
+        events = [*(tier(str(n)) for n in range(22)),
+                  checked(tuple(map(str, range(22))), commits=3, branches=["demo/a"])]
         group, = reds.openings(events, {TASK.id: TASK.id})
         text = reds.evidence(group, red_id="red-1", machine="tiers", owners={TASK.id: TASK.id},
                              reruns={"/tier/0": "\n".join(f"line {n}" for n in range(45))})
@@ -269,11 +301,65 @@ class TierRedsFoldTest(unittest.TestCase):
         events += [checked(branches=["demo/red-1"])]
         red, = reds.reds(events)
         self.assertEqual(red.state, "signal")
-        self.assertTrue(red.signal_reason.startswith("unfixed: "))
-        self.assertIn("demo/red-1", red.signal_reason)
+        self.assertEqual(red.signal_reason, "unfixed: demo/red-1 landed, still red at tip")
+        self.assertEqual(red.covered, "tip")
         self.assertEqual(list(reds.repair_tasks(PLAN, events, {})), ["demo/red-1"])
         clear = event("signal.cleared", signal="red-1", text="seen", by="user")
         self.assertEqual(reds.closures(events + [clear]), [("red-1", "cleared", "")])
+
+    def test_rebased_repair_branch_covers_and_unfixes(self):
+        events = repair_events() + [event("branch.landed", task="demo/red-1"),
+                                   checked(tip="rebased", branches=["demo/red-1-r2"])]
+        red, = reds.reds(events)
+        self.assertEqual((red.state, red.covered, red.signal_reason),
+                         ("signal", "rebased", "unfixed: demo/red-1 landed, still red at rebased"))
+
+    def test_starved_covering_run_keeps_coverage_for_a_later_run(self):
+        events = repair_events() + [event("branch.landed", task="demo/red-1")]
+        faulted = checked((), tip="faulted", branches=["demo/red-1-r1"], faults=["pair: offline"])
+        self.assertEqual(reds.reds(events + [faulted])[0].covered, "")
+        events += [faulted, checked((), tip="cover", branches=["demo/red-1-r2"], starved=1)]
+        red, = reds.reds(events)
+        self.assertEqual((red.state, red.covered), ("landed", "cover"))
+        self.assertEqual(reds.closures(events), [])
+        self.assertEqual(reds.reds(events + [checked(tip="partial", faults=["pair: offline"])])[0].state,
+                         "landed")
+        events += [checked(tip="still-red", branches=["other/task"])]
+        red, = reds.reds(events)
+        self.assertEqual((red.state, red.covered, red.signal_reason),
+                         ("signal", "cover", "unfixed: demo/red-1 landed, still red at still-red"))
+
+    def test_covering_run_with_only_unobserved_results_can_recover_later(self):
+        events = repair_events() + [event("branch.landed", task="demo/red-1"),
+                  checked((), tip="cover", branches=["demo/red-1-r2"], unobserved=1),
+                  checked((), tip="green", branches=[])]
+        self.assertEqual(reds.reds(events)[0].covered, "cover")
+        self.assertEqual(reds.closures(events), [("red-1", "absent", "green")])
+
+    def test_fold_routes_twenty_thousand_events_for_one_hundred_reds_quickly(self):
+        events = []
+        for n in range(100):
+            identifier, task = f"red-{n + 1}", f"demo/red-{n + 1}"
+            run_id = f"{task}/foreman-1"
+            events += [opened(red=identifier),
+                       event("run.started", red=identifier, tip="tip", run=run_id,
+                             task=f"{task}/foreman", kind=foreman.KIND),
+                       event("run.ended", run=run_id, outcome="failed")]
+            if n % 2:
+                events += [event(reds.CLOSED, red=identifier, reason="recovered", tip="green")]
+            else:
+                events += [event("branch.landed", task=task)]
+        unrelated = [event("note", text="unrelated"),
+                     event("run.started", run="other/a-1", task="other/a", kind="implement"),
+                     event("run.ended", run="other/a-1", outcome="done"),
+                     event("branch.landed", task="other/a")]
+        events += [unrelated[n % len(unrelated)] for n in range(20000 - len(events))]
+        start = time.perf_counter()
+        folded = reds.reds(events)
+        elapsed = time.perf_counter() - start
+        self.assertEqual(len(folded), 100)
+        self.assertEqual([red.state for red in folded], ["landed", "closed"] * 50)
+        self.assertLess(elapsed, 0.08, f"20k events / 100 reds took {elapsed:.3f}s")
 
 
 class TierRedsClosingTest(unittest.TestCase):
@@ -288,10 +374,15 @@ class TierRedsClosingTest(unittest.TestCase):
             self.assertEqual(reds.close_reds(events + appended, log_path=home / "events"), [])
             self.assertEqual(log.read(home / "events"), appended)
 
-    def test_absent_requires_reds_list_no_faults_and_not_wall_starved(self):
+    def test_absent_requires_reds_list_no_faults_and_nothing_starved_or_unobserved(self):
         for run in (event(reds.TIERS_RUN, tip="old"), checked((), faults=["live: offline"]),
-                    checked((), wall_starved=True)):
-            self.assertEqual(reds.closures([opened(), run]), [])
+                    checked((), wall_starved=True), checked((), starved=1),
+                    checked((), unobserved=1), checked((), starved=None),
+                    checked((), unobserved=None),
+                    event(reds.TIERS_RUN, tip="old", reds=[], unobserved=0),
+                    event(reds.TIERS_RUN, tip="old", reds=[], starved=0)):
+            with self.subTest(run=run):
+                self.assertEqual(reds.closures([opened(), run]), [])
         self.assertEqual(reds.closures([opened(), checked((), tip="gone")]), [("red-1", "absent", "gone")])
 
     def test_every_key_must_close_and_last_key_supplies_reason_tip(self):
@@ -309,11 +400,21 @@ class TierRedsClosingTest(unittest.TestCase):
         self.assertEqual(reds.closures([opened(), *foreman_run("done"), settled("left"), clear]),
                          [("red-1", "cleared", "")])
 
+    def test_clear_before_signal_does_not_close_even_with_equal_timestamps(self):
+        clear = event("signal.cleared", signal="red-1")
+        events = [opened(), *foreman_run("done"), clear, settled("left")]
+        self.assertEqual(reds.closures(events), [])
+        self.assertEqual(reds.closures(events + [clear]), [("red-1", "cleared", "")])
+
     def test_partial_closures_are_remembered_and_last_key_uses_log_order(self):
         events = [opened(keys=["a", "b"]), checked(("a",), tip="b-absent"),
                   event(reds.RECOVERED, key="b", tip="duplicate-b"),
                   event(reds.RECOVERED, key="a", tip="a-recovered")]
         self.assertEqual(reds.closures(events), [("red-1", "recovered", "a-recovered")])
+
+    def test_malformed_opening_does_not_start_a_future_reds_closure(self):
+        events = [event(reds.OPENED, red="red-1"), checked((), tip="before"), opened()]
+        self.assertEqual(reds.closures(events), [])
 
     def test_recovery_before_open_or_other_red_clear_cannot_close(self):
         self.assertEqual(reds.closures([event(reds.RECOVERED, key=KEY, tip="before"), opened(),
@@ -357,6 +458,34 @@ class TierRedsTaskTest(unittest.TestCase):
             self.assertNotIn("Foreign.", body)
             atomic.write(reds.evidence_path("red-1"), "evidence from disk")
             self.assertIn("evidence from disk", reds.tasks(PLAN, events)["demo/red-1"].body)
+
+    def test_answers_for_several_reds_keep_their_own_log_order(self):
+        second = "demo/red-2/foreman-1"
+        events = repair_events() + [opened(red="red-2"),
+                  event("run.started", run=second, task="demo/red-2/foreman", kind=foreman.KIND,
+                        red="red-2", tip="tip"), event("run.ended", run=second, outcome="done"),
+                  settled(red="red-2", run=second)]
+        events += [event("question.answered", task=task, answer=answer) for task, answer in
+                   (("demo/red-1", "First."), ("demo/red-2", "Second."),
+                    ("demo/red-1", "Third."), ("demo/red-2", "Fourth."))]
+        tasks = reds.repair_tasks(PLAN, events, {})
+        self.assertTrue(tasks["demo/red-1"].body.endswith("## Answers\n\n- First.\n- Third.\n"))
+        self.assertTrue(tasks["demo/red-2"].body.endswith("## Answers\n\n- Second.\n- Fourth.\n"))
+
+    def test_prefolded_snapshot_is_reused_by_all_decisions_and_reading_tasks(self):
+        events = repair_events() + [tier("new", branches=("demo/red-1-r2",)),
+                  event("question.answered", task="demo/red-1", answer="Use the unit test."),
+                  checked((KEY, "new"))]
+        folded = reds.reds(events)
+        with tmp_home(), patch.object(reds, "reds", side_effect=AssertionError("folded again")):
+            owners = reds.owners([(PLAN, {TASK.id: TASK})], events, folded=folded)
+            self.assertEqual(owners["demo/red-1-r2"], "demo/red-1")
+            group, = reds.openings(events, owners, folded=folded)
+            self.assertEqual(group.tasks, ("demo/red-1",))
+            self.assertEqual(reds.closures(events, folded=folded), [])
+            task, = reds.repair_tasks(PLAN, events, {}, folded=folded).values()
+            self.assertIn("Use the unit test.", task.body)
+            self.assertIn("Use the unit test.", reds.tasks(PLAN, events, folded=folded)[task.id].body)
 
 
 class TierRedsRemedyTest(unittest.TestCase):
@@ -418,6 +547,17 @@ class TierRedsForemanTest(unittest.TestCase):
                          "Your checkout is fabrig at tip, read-only."):
             self.assertIn(fragment, text)
         self.assertTrue(text.endswith("\n"))
+
+    def test_red_task_suspect_has_no_spec_and_hand_pushed_branches_are_exposed(self):
+        red, = reds.reds([opened(suspects=["demo/red-2-r1", "demo/integration", "manual/x"],
+                                tasks=["demo/red-2", "demo"])])
+        self.assertEqual(red.hand_pushed, ("manual/x",))
+        repair = replace(TASK, id="demo/red-2", path="", kind="red")
+        text = reds.brief(red, run_id=FOREMAN, report="/report", evidence="red", role="role",
+                          plan_tasks={repair.id: repair}, specs={repair.id: repair.body})
+        self.assertIn("demo/red-2-r1: task demo/red-2, (no spec)", text)
+        self.assertNotIn("spec ``", text)
+        self.assertIn("manual/x: hand-pushed, no fab task", text)
 
     def test_brief_quotes_newest_five_specs_then_only_ids(self):
         tasks = {f"demo/t{n}": replace(TASK, id=f"demo/t{n}") for n in range(7)}
