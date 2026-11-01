@@ -57,3 +57,16 @@ success and on failure; an existing call's argvs are unchanged.
 ## Report
 
 The change to `start`, and the role text's sections in one line each.
+
+## Repair (2026-11-01, step gate:shape, foreman findings-loop/triage-shell/foreman-1)
+
+correct the task kind to interface and extract preparation logic from start.
+`gate:shape` rejects the required `report_only` parameter in `fab/calls.py:start`.
+The spec declares `kind = "feature"`; `docs/design/fab.md`, section 12, permits signature changes only for interface or migration tasks.
+The plan owner must correct the task kind to `interface`; the spec is outside this task's allowed files.
+If that correction has not occurred, return `Question:` per `docs/plan/findings-loop/notes/common.md`, Scope.
+Keep the required public signature; do not weaken the gate or hide the signature change.
+`gate:size` also reports `fab/calls.py:469`: start is 74 lines, cap 60.
+Extract fetch/worktree preparation into a private function in `fab/calls.py`, bringing start to at most 60 lines.
+Preserve report-only behavior and existing command argvs; retain coverage in `fab/tests/test_calls.py`.
+No role-text or design change is needed.
