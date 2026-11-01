@@ -325,9 +325,13 @@ def _prepare_and_launch(task: Task, host: Host, kind: str, remote, *, run_id: st
         remote(["git", "-C", str(worktree), "fetch", "origin"])
     source = base
     clone = worktree if slot is not None else repo
-    if kind in ("implement", "repair") and sh(ssh(host.ssh, ["git", "-C", str(clone), "rev-parse",
-                                                            "-q", "--verify", f"refs/remotes/origin/{branch}"])).ok:
-        source = f"origin/{branch}"
+    if kind in ("implement", "repair"):
+        argv = ssh(host.ssh, ["git", "-C", str(clone), "rev-parse", "-q", "--verify",
+                              f"refs/remotes/origin/{branch}"])
+        probe = sh(argv)
+        if probe.code not in (0, 1):
+            raise Failed(argv, probe)
+        source = f"origin/{branch}" if probe.code == 0 else base
     if slot is not None:
         # A slot keeps only its build cache between runs: an earlier run's uncommitted edits
         # and untracked files go (ignored files, target/ among them, stay warm). Clean first:

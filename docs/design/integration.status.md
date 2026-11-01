@@ -72,10 +72,13 @@
 - **An integration trunk through the queue is untried live:** the catch-up
   with main (before a check and along the way), catch-up repairs, the
   re-check after a rejection and the stops are tested against fakes and real
-  git only; no plan has yet run with `ready = true`. So are the stop's
-  question and its lift, the retire from main and the plan checkout
-  detached at `origin/main` (dogfood-faults, 11-01): no trunk has stopped
-  or landed since they were built.
+  git only. So are the stop's question and its lift. The retire from main
+  ran live once (the probe phase-case, 11-01): its trunk landed through the
+  queue at 17:17:58Z, its retire started from main (17:27:16Z), went through
+  `ready/calls/retire-2c39…` and landed at fc1651448b, and the plan
+  checkout detached there; its landing was never imported (no
+  `branch.landed` or `call.finished`; tick.md 5, start-commands item 4).
+  No trunk has stopped since the stop's records were built.
 - **The flow of a real run (3) is on main, not run live yet**
   (10-31): the options with the run's defaults (agents-rebuild names the
   old flow), the trunk throughout, the tick's merges with the baseline

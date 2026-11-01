@@ -362,8 +362,9 @@ def answer_brief(questions: list[dict], tasks: dict[str, Task], root: Path, *, c
         sections.append(("The user's drafts", drafts_text(plan, root)))
     for question in questions:
         if "stop" in question:
+            stop_report = f"`{question['stop']}`" if question["stop"] else "(none: the findings are quoted below)"
             sections.append((f"Question: {question['task']} (stop)",
-                             f"- Task: {question['task']}\n- Report: `{question['stop']}`\n\n{question['text']}"))
+                             f"- Task: {question['task']}\n- Report: {stop_report}\n\n{question['text']}"))
             continue
         task = tasks[question["task"]]
         path = Path(task.path)

@@ -30,7 +30,8 @@
   `question.asked` with `park` (calls.md 2), so it queues at once; it parked
   unheard before.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
-  run by hand, live since 20:27Z.
+  on hel8 started by `fab-events.path` and the 10-minute `fab-backstop.timer`
+  (Events drive the tick, below).
 - **A ladder plan in the tick** (qa.md 2; plan findings-loop, retired
   11-01): `[ladder]` and `[[rung]]` in plan.toml and `triage` reserved (1);
   each round a plan with rungs records ended triage calls' decisions, then

@@ -594,6 +594,47 @@ class RunStartTest(unittest.TestCase):
                     self.assertFalse(any("--abort" in argv for argv in commands))
                     self.assertEqual(log.read()[-1]["base"], f"origin/{trunk}")
 
+    def test_an_implement_rerun_without_a_pushed_branch_starts_from_the_base(self):
+        for repo in ("agents", "fabrig"):
+            with self.subTest(repo=repo), tmp_home():
+                fake = starter()
+                run_id = run.start(replace(TASK, repo=repo), HOST, events=[started()], sh=fake,
+                                   trunk="component-kit/integration")
+                commands = [command(call) for call in fake.calls]
+                base = "origin/component-kit/integration"
+                if repo == "fabrig":
+                    setup = ["git", "-C", str(ROOT.parent / "slots/2"), "switch",
+                             "--discard-changes", "-C", TASK.id, base]
+                else:
+                    setup = ["git", "-C", str(ROOT / "repos/agents"), "worktree", "add", "-B",
+                             TASK.id, str(ROOT / "wt" / run_id), base]
+                self.assertIn(setup, commands)
+                self.assertFalse(any("merge" in argv for argv in commands))
+                self.assertEqual(commands[-1][:3], ["fab", "codex", "start"])
+                self.assertEqual(log.read()[-1]["base"], base)
+
+    def test_a_branch_probe_error_starts_no_checkout_or_codex(self):
+        for repo in ("agents", "fabrig"):
+            for kind in ("implement", "repair"):
+                for code in (255, 128):
+                    with self.subTest(repo=repo, kind=kind, code=code), tmp_home():
+                        clone = ROOT.parent / "slots/2" if repo == "fabrig" else ROOT / "repos/agents"
+                        argv = ssh(HOST.ssh, ["git", "-C", str(clone), "rev-parse", "-q", "--verify",
+                                             f"refs/remotes/origin/{TASK.id}"])
+                        result = Result(code, err="branch probe failed")
+                        fake = FakeRunner().on(argv, result)
+                        fake.rules.extend(starter().rules)
+                        with self.assertRaises(Failed) as raised:
+                            run.start(replace(TASK, repo=repo), HOST, kind=kind,
+                                      events=[started()], sh=fake)
+                        self.assertEqual(raised.exception.argv, argv)
+                        self.assertIs(raised.exception.result, result)
+                        commands = [command(call) for call in fake.calls]
+                        self.assertEqual(fake.argvs().count(argv), 1)
+                        self.assertFalse(any("switch" in args or args[3:5] == ["worktree", "add"]
+                                             or "codex" in args or "codex-run" in args for args in commands))
+                        self.assertEqual(log.read(), [])
+
     def test_an_implement_rerun_aborts_a_conflicting_base_merge_and_launches(self):
         fallback = starter(pushed=True).rules[0][1]
         def answer(call):

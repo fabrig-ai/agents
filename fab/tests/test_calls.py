@@ -526,7 +526,7 @@ class BriefTest(unittest.TestCase):
             self.assertNotIn("# Question:", empty)
 
     def test_answer_stop_section_has_its_report_and_no_spec(self):
-        for report in ("/runs/demo/check-3/report.md", "gate:/queue/rejected.log", ""):
+        for report in ("/runs/demo/check-3/report.md", "gate:/queue/rejected.log"):
             with self.subTest(report=report), tmp_home() as root:
                 plan, tasks = fixture(root)
                 question = dict(task="demo/integration", run="demo/check-3", text="Third red: choose a repair?",
@@ -538,6 +538,21 @@ class BriefTest(unittest.TestCase):
                                          f"- Report: `{report}`\n\nThird red: choose a repair?\n\n")
                 self.assertNotIn("Task spec", text)
                 self.assertNotIn("- Run:", section)
+
+    def test_answer_stop_without_a_report_quotes_the_findings_below(self):
+        with tmp_home() as root:
+            plan, tasks = fixture(root)
+            question = dict(task="demo/integration", run="demo/check-3", text="Third red: choose a repair?",
+                            stop="")
+            text = calls.answer_brief([question], tasks, root, plan=plan,
+                                      call_id="a", branch="b", report="r")
+            section = text.split("# Question:", 1)[1].split("# Inventory", 1)[0]
+            self.assertEqual(section, " demo/integration (stop)\n\n- Task: demo/integration\n"
+                                     "- Report: (none: the findings are quoted below)\n\n"
+                                     "Third red: choose a repair?\n\n")
+            self.assertNotIn("``", text)
+            self.assertNotIn("Task spec", text)
+            self.assertNotIn("- Run:", section)
 
     def test_answer_limit(self):
         with tmp_home() as root:
