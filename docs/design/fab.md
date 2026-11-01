@@ -224,3 +224,7 @@ go); they are readable in history at 7a7df4f.
 - Deleting the frozen legacy checkouts on the machines (`~/src/rust/agents`,
   `~/src/fabrig/agents`, `~/src/fabrig/current`) and the disabled old units'
   files, once nothing reads them.
+- `fab/atomic.py`'s citation, once a design holds the hidden-sibling rule or
+  the docstring names `AGENTS.md`, and the old name in
+  `fab/tests/test_dispatch.py`'s `"see fab-gates.md, 2"`, a test's string
+  (`fab.status.md`, citation-sweep).

@@ -222,7 +222,11 @@
   edge-fixes' retire (11-01): `retire-spelling` landed as 32deb33 at 19:11:55Z,
   the brief is 19:12:24Z, and its worktree and inventory were 717f4d5, one
   commit behind, so it showed the old `_retire_plan` and no calls.md diff for
-  a part it called done. The call fast-forwarded by hand.
+  a part it called done. The call fast-forwarded by hand. Seen again at
+  citation-sweep's retire (11-01): its worktree and inventory were 15a7d55,
+  one commit behind its only part, 032cb12, and `changed_designs` on the stale
+  ref listed no designs, though that commit changed `qa.status.md`. The call
+  fast-forwarded by hand.
 - **Retire's changed designs are main's window, not the plan's** (3,
   11-01, seen at paper-cuts' retire): `changed_designs` takes every design
   a commit on main changed since the cut's parent. paper-cuts' designs
