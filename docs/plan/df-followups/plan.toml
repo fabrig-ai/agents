@@ -14,6 +14,7 @@ sources = [
   "docs/design/draft/execution-modes.md",
 ]
 
+retired = true
 [buffer]
 low = 1.0
 high = 2.0
