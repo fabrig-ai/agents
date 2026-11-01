@@ -1,0 +1,52 @@
+landing = "queue"
+
+# The thin cut of trunk-overlaps: docs/design/fab.md 13.17 (drafts beside each
+# other) whole, report only. Every part is direct; its task specs are in
+# tasks/, the shared notes in notes/. 13.17's Later items are out of scope.
+draft = "trunk-overlaps"
+repo = "agents"
+sources = [
+  "docs/plan/trunk-overlaps/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+# Slice 1: the tick probes the trunks and the page shows their overlaps.
+
+[[part]]
+id = "probe"
+title = "The overlap probe: fab/overlaps.py, its cache and its call from the tick, trunks.overlap"
+mode = "direct"
+needs = []
+design = "docs/design/fab.md, 13.17"
+
+[[part]]
+id = "page"
+title = "The status page's overlaps: the snapshot key and its panel after Drafts"
+mode = "direct"
+needs = ["probe"]
+design = "docs/design/fab.md, 13.14 and 13.17"
+
+# Slice 2: the cut sees the drafts beside it.
+
+[[part]]
+id = "beside"
+title = "The cut brief's Drafts beside this one and its line in the cut's role texts"
+mode = "direct"
+needs = ["probe"]
+design = "docs/design/fab.md, 13.3 and 13.17"
+
+[[slice]]
+id = 1
+story = "Each tick probes the ready integration trunks of one repository pairwise as if caught up with main, logs trunks.overlap when a pair's conflicting files change or the pair leaves, and the status page lists each overlapping pair with its count, never a path"
+parts = ["probe", "page"]
+walk = true
+
+[[slice]]
+id = 2
+story = "A cut's brief lists the tasks and files of the other drafts of its repository not yet on main, and the cut's role text asks it to keep early work off them"
+parts = ["beside"]
+walk = false
