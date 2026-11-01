@@ -160,6 +160,13 @@ class DeliveryTest(WakeTestCase):
 
 
 class RoundTest(WakeTestCase):
+    def test_finding_settled_wants_another_round(self):
+        records = [dict(ev="finding.settled", finding="finding-1", verdict="fix")]
+        self.assertEqual(wake.wanted(records), ["finding.settled"])
+        self.assertEqual(wake.settle("event", [], records, path=self.want, log_path=self.log_path),
+                         ["again - tick 1: finding.settled"])
+        self.assertWanted("tick 1: finding.settled")
+
     def test_wanted_keeps_first_occurrences_in_record_order(self):
         records = [started("demo/a-1"), landed("demo/a"), ended("demo/a-1"),
                    landed("demo/b"), {"ev": "note"}]

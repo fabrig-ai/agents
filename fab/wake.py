@@ -27,7 +27,8 @@ WANT = "tick.want"  # beside the log: one reason per line; its existence is the 
 TAKEN = ".tick.want.taken"  # the want a tick has taken, beside it, until read
 TRIGGERS = ("hand", "event", "backstop")  # what started a tick round
 AGAIN = ("run.ended", "branch.landed", "branch.rejected", "question.asked", "question.answered",
-         "refusal.settled", "call.finished", "call.parked", "call.answered", "red.settled", "red.closed")  # a round's records that want another
+         "refusal.settled", "call.finished", "call.parked", "call.answered", "red.settled",
+         "finding.settled", "red.closed")  # a round's records that want another
 AGAIN_LIMIT = 5  # rounds in a row that may want another with no outside wake between them
 EVENT_PATH = "fab-events.path"  # starts EVENT_SERVICE while the want exists
 EVENT_SERVICE = "fab-events.service"  # `fab tick --trigger event`

@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
-from fab import atomic, call_review, channel, cli, designer, dispatch, drafts, fix, flow, foreman, gates, integration, log, overlaps, plan, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
+from fab import atomic, call_review, channel, cli, designer, dispatch, drafts, findings, fix, fixes, flow, foreman, gates, integration, log, overlaps, plan, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
 from fab.dispatch import Action, MAX_RUNS
 from fab.hosts import Host
 from fab.sh import Failed, Result, run, ssh
@@ -1024,6 +1024,220 @@ class LadderTickTest(unittest.TestCase):
 
     def tick(self, **kwargs):
         return dispatch.tick(self.directory, sh=self.fake, hosts=kwargs.pop("hosts", {}), **kwargs)
+
+    def finding_hosts(self, *, places=2):
+        self.finding_reports, self.finding_queue, self.finding_tiers = {}, [], []
+        self.fake.on(["git", "rev-parse", "origin/main"], Result(0, "main-tip\n"))
+        self.fake.rules.insert(0, (["git", "rev-parse", "--verify"], Result(0, "a" * 40 + "\n")))
+        package = Path(runs.__file__).resolve().parent.parent
+        self.fake.on(["git", "-C", str(package), "rev-parse", "HEAD"], Result(0, "a" * 40 + "\n"))
+        self.fake.on(["ssh"], self.finding_remote)
+        self.enterContext(patch.object(rust_gates, "screen", return_value=[]))
+        return {"builder": Host("builder", "fake@builder", ("builder",), places=places),
+                "gate": Host("gate", "fake@gate", ("gate",))}
+
+    def finding_remote(self, call):
+        argv = shlex.split(shlex.split(call.argv[-1])[2])
+        if argv[:3] == ["fab", "queue", "log"]:
+            return Result(0, "\n".join(json.dumps(record) for record in self.finding_queue))
+        if argv[:3] == ["fab", "after-landing", "log"]:
+            return Result(0, "\n".join(json.dumps(record) for record in self.finding_tiers))
+        if argv[:2] == ["bash", "-c"] and "printf 'running" in argv[2]:
+            report = next((text for run_id, text in self.finding_reports.items()
+                           if f"/runs/{run_id}/report.md" in argv[2]), None)
+            return Result(0, "running\n" if report is None else "ended\n{}\n" + report)
+        if argv[:1] == ["git"] and "rev-parse" in argv and "-q" in argv:
+            return Result(1)
+        if argv == ["fab", "slot", "list"]:
+            return Result(0, json.dumps(dict(slot=1, claim=None, idle=0)) + "\n")
+        if argv[:3] == ["fab", "slot", "release"]:
+            return Result(0, "0\n")
+        if argv[:3] == ["fab", "codex", "start"]:
+            return Result(0, "codex-finding /state/finding\n")
+        if argv[:1] == ["cat"] and "/precheck/" in argv[-1]:
+            return Result(1)
+        return Result(0)
+
+    def test_finding_tick_actions_are_pure_in_raise_order_and_scoped_to_draft(self):
+        self.add_walk(identifiers=("finding-9", "finding-2"))
+        self.add_walk(2, identifiers=("finding-3",), draft="other")
+        for identifier in ("finding-9", "finding-2", "finding-3"):
+            self.append(qa.finding_triaged(identifier, "path"))
+        self.append(run_started("ladder/finding-2/foreman", kind="foreman",
+                                finding="finding-2", tip="tip"),
+                    run_ended("ladder/finding-2/foreman"))
+        events = log.read()
+        before = deepcopy(events)
+        with patch.object(log, "read", side_effect=AssertionError("read log")), \
+             patch.object(log, "home", side_effect=AssertionError("read home")):
+            actions = dispatch.finding_actions(self.plan, events)
+        self.assertEqual(actions, [
+            Action("examine-fix", task="ladder/finding-9", detail="finding-9", run_kind="finding"),
+            Action("remedy-fix", task="ladder/finding-2", run="ladder/finding-2/foreman-1",
+                   detail="finding-2", run_kind="finding")])
+        self.assertEqual(events, before)
+
+    def test_finding_tick_fix_is_collected_started_readied_and_landed_for_rerun(self):
+        hosts = self.finding_hosts()
+        self.add_walk()
+        self.end_triage("Done: routed\nfinding-1: path ctl: Repair the story\n")
+        actions = self.tick(hosts=hosts)
+        self.assertIn(Action("examine-fix", task="ladder/finding-1", detail="finding-1",
+                             run_kind="finding"), actions)
+        survey, = [entry for entry in log.read() if entry["ev"] == "run.started"]
+        self.assertEqual((survey["base"], survey["tip"], survey["host"]),
+                         ("main-tip", "main-tip", "builder"))
+        brief = (log.home() / "runs" / survey["run"] / "brief.md").read_text()
+        self.assertIn("`plan/briefs/b0.md`", brief)
+        self.assertFalse(any(a.kind == "examine-fix" for a in self.tick(hosts=hosts)))
+        self.finding_reports[survey["run"]] = "Done: fix: Repair the story\nUnit reproduction.\n"
+        actions = self.tick(hosts=hosts)
+        self.assertTrue(any(a.kind == "remedy-fix" for a in actions))
+        settlement, = [entry for entry in log.read() if entry["ev"] == "finding.settled"]
+        self.assertEqual((settlement["verdict"], settlement["run"]), ("fix", survey["run"]))
+        self.assertIn("Unit reproduction.", settlement["section"])
+        self.tick(hosts=hosts)
+        repair = [entry for entry in log.read() if entry["ev"] == "run.started"][-1]
+        self.assertEqual((repair["task"], repair["base"], repair["kind"], repair["slot"]),
+                         ("ladder/finding-1", "origin/main", "implement", 1))
+        brief = (log.home() / "runs" / repair["run"] / "brief.md").read_text()
+        self.assertIn(settlement["section"].rstrip(), brief)
+        self.finding_reports[repair["run"]] = "Done: repaired\n"
+        self.tick(hosts=hosts)
+        self.assertTrue(any(a.kind == "ready" and a.task == repair["task"]
+                            for a in self.tick(hosts=hosts)))
+        ready, = [entry for entry in log.read() if entry["ev"] == "branch.ready"
+                  and entry.get("task") == repair["task"]]
+        self.assertEqual((ready["branch"], ready["tip"]), (repair["task"], "a" * 40))
+        self.finding_queue.append(dict(ev="landed", ts="queue-1", branch=ready["branch"],
+                                       tip=ready["tip"], main="fixed-main"))
+        self.tick(hosts=hosts)
+        self.tick(hosts=hosts)
+        landed, = [entry for entry in log.read() if entry["ev"] == "branch.landed"]
+        self.assertEqual((landed["task"], landed["main"]), (repair["task"], "fixed-main"))
+        self.assertEqual(sum(entry["ev"] == "finding.settled" for entry in log.read()), 1)
+        rung = findings.rungs(self.plan, log.read(), self.editions, qa.STAMP)[0]
+        self.assertEqual((rung.state, rung.due, rung.at), ("due", "rerun", "fixed-main"))
+
+    def test_finding_tick_retry_settles_left_once_and_releases_the_rung(self):
+        hosts = self.finding_hosts()
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path"))
+        self.tick(hosts=hosts)
+        self.finding_reports["ladder/finding-1/foreman-1"] = "Done: retry: Backend outage\n"
+        self.tick(hosts=hosts)
+        self.tick(hosts=hosts)
+        settlement, = [entry for entry in log.read() if entry["ev"] == "finding.settled"]
+        self.assertEqual((settlement["verdict"], settlement["section"]), ("left", ""))
+        self.assertEqual(fixes.tasks(self.plan, log.read()), {})
+        self.assertEqual(findings.findings(log.read())["finding-1"].state, "left")
+        self.assertEqual(findings.rungs(self.plan, log.read(), self.editions, qa.STAMP)[0].state, "due")
+        self.assertFalse(any(entry["kind"] == "implement" for entry in log.read()
+                             if entry["ev"] == "run.started"))
+
+    def test_finding_tick_failed_foreman_starts_with_the_finding_alone(self):
+        hosts = self.finding_hosts()
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path", reason="Blocks the story"))
+        self.tick(hosts=hosts)
+        self.finding_reports["ladder/finding-1/foreman-1"] = "Failed: Cannot decide\n"
+        self.tick(hosts=hosts)
+        self.assertTrue(any(a.kind == "start" and a.task == "ladder/finding-1"
+                            for a in self.tick(hosts=hosts)))
+        brief = (log.home() / "runs/ladder/finding-1-1/brief.md").read_text()
+        self.assertIn("Blocks the story", brief)
+        self.assertIn("The story stalled", brief)
+        self.assertNotIn("## Repair (", brief)
+        self.assertFalse(any(entry["ev"] == "finding.settled" for entry in log.read()))
+
+    def test_finding_tick_unreadable_foreman_report_settles_none(self):
+        hosts = self.finding_hosts()
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path"))
+        self.tick(hosts=hosts)
+        self.append(run_ended("ladder/finding-1/foreman", report=str(self.home / "missing")))
+        self.tick(hosts=hosts)
+        settlement, = [entry for entry in log.read() if entry["ev"] == "finding.settled"]
+        self.assertEqual((settlement["verdict"], settlement["section"]), ("none", ""))
+        self.assertTrue(any(a.kind == "start" and a.task == "ladder/finding-1"
+                            for a in self.tick(hosts=hosts)))
+
+    def test_finding_tick_foremen_share_one_tip_even_at_zero_places(self):
+        hosts = self.finding_hosts(places=0)
+        self.add_walk(identifiers=("finding-9", "finding-2"))
+        self.append(qa.finding_triaged("finding-9", "path"), qa.finding_triaged("finding-2", "path"))
+        self.tick(hosts=hosts)
+        started = [entry for entry in log.read() if entry["ev"] == "run.started"]
+        self.assertEqual([(entry["finding"], entry["host"], entry["tip"]) for entry in started],
+                         [("finding-9", "builder", "main-tip"), ("finding-2", "builder", "main-tip")])
+        self.tick(hosts=hosts)
+        tips = [call for call in self.fake.calls if call.argv == ["git", "rev-parse", "origin/main"]]
+        self.assertEqual([call.cwd for call in tips], [str(self.home)])
+        self.assertEqual(sum(entry["ev"] == "run.started" for entry in log.read()), 2)
+
+    def test_finding_tick_chooses_builder_with_most_free_places(self):
+        hosts = self.finding_hosts(places=1)
+        hosts["other"] = Host("other", "fake@other", ("builder",), places=3)
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path"))
+        self.tick(hosts=hosts)
+        survey, = [entry for entry in log.read() if entry["ev"] == "run.started"]
+        self.assertEqual(survey["host"], "other")
+
+    def test_finding_tick_failed_tip_notes_once_for_all_foremen_and_retries(self):
+        hosts = self.finding_hosts()
+        self.add_walk(identifiers=("finding-1", "finding-2"))
+        self.append(qa.finding_triaged("finding-1", "path"), qa.finding_triaged("finding-2", "path"))
+        failure = (["git", "rev-parse", "origin/main"], Result(1, err="main unavailable"))
+        self.fake.rules.insert(0, failure)
+        self.tick(hosts=hosts)
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn("main unavailable", notes[0]["text"])
+        self.assertFalse(any(entry["ev"] == "run.started" for entry in log.read()))
+        self.fake.rules.remove(failure)
+        self.tick(hosts=hosts)
+        self.assertEqual(sum(entry["ev"] == "run.started" for entry in log.read()), 2)
+
+    def test_finding_tick_red_and_finding_share_examine_and_remedy_rounds(self):
+        hosts = self.finding_hosts()
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path"),
+                    log.record("red.opened", red="red-1", tip="red-tip", keys=["key"],
+                               suspects=[], tasks=[], draft="ladder", route="foreman"))
+        actions = self.tick(hosts=hosts)
+        self.assertEqual([a.run_kind for a in actions if a.kind == "examine-fix"], ["red", "finding"])
+        self.finding_reports.update({"ladder/red-1/foreman-1": "Done: fix: Repair the red\n",
+                                     "ladder/finding-1/foreman-1": "Done: fix: Repair the finding\n"})
+        actions = self.tick(hosts=hosts)
+        self.assertEqual([a.run_kind for a in actions if a.kind == "remedy-fix"], ["red", "finding"])
+        self.assertEqual([entry["ev"] for entry in log.read()
+                          if entry["ev"] in ("red.settled", "finding.settled")],
+                         ["red.settled", "finding.settled"])
+        self.assertEqual([call.argv for call in self.fake.calls].count(
+            ["git", "rev-parse", "origin/main"]), 1)
+
+    def test_finding_tick_landed_repair_is_an_after_landing_suspect_with_its_body(self):
+        hosts = self.finding_hosts()
+        hosts["tiers"] = Host("tiers", "fake@tiers", ("after-landing",))
+        self.add_walk()
+        self.append(qa.finding_triaged("finding-1", "path"))
+        self.tick(hosts=hosts)
+        self.finding_reports["ladder/finding-1/foreman-1"] = "Failed: Cannot decide\n"
+        self.tick(hosts=hosts)
+        self.tick(hosts=hosts)
+        self.finding_queue.append(dict(ev="landed", ts="queue-1", branch="ladder/finding-1",
+                                       tip="repair-tip", main="fixed-main"))
+        self.finding_tiers += [dict(ev="test", state="new", ts="tiers-1", key="new-key", tip="fixed-main",
+                                   branches=["ladder/finding-1"]),
+                               dict(ev="run", ts="tiers-2", tip="fixed-main", reds=["new-key"],
+                                    branches=["ladder/finding-1"])]
+        self.tick(hosts=hosts)
+        opened, = [entry for entry in log.read() if entry["ev"] == "red.opened"]
+        self.assertEqual((opened["draft"], opened["route"], opened["tasks"]),
+                         ("ladder", "foreman", ["ladder/finding-1"]))
+        brief = (log.home() / "runs/ladder/red-1/foreman-1/brief.md").read_text()
+        self.assertIn("# Repair a QA finding (finding-1)", brief)
 
     def test_failed_walk_starts_one_triage_call_with_subject_unit_and_plan(self):
         self.add_walk()

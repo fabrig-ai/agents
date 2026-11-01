@@ -21,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, fix, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, fix, fixes, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -244,6 +244,19 @@ def red_actions(plan: Plan, folded: Sequence[tier_reds.Red]) -> list[Action]:
             for red in folded if red.draft == plan.draft and red.state in ("foreman", "decided")]
 
 
+def finding_actions(plan: Plan, events: list[dict]) -> list[Action]:
+    """Return actions to start or settle this draft's finding foremen in raise order; pure
+    (docs/design/qa.md, 2).
+    """
+    surveys = fixes.foremen(events)
+    return [Action("examine-fix", task=fixes.repair_id(finding), detail=finding.id,
+                   run_kind="finding") if finding.state == "foreman"
+            else Action("remedy-fix", task=fixes.repair_id(finding), run=surveys[finding.id].run,
+                        detail=finding.id, run_kind="finding")
+            for finding in findings.findings(events).values()
+            if finding.draft == plan.draft and finding.state in ("foreman", "decided")]
+
+
 def retire_ready(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict],
                  folded: Sequence[tier_reds.Red], *, after_landing: bool) -> bool:
     """A fabrig plan waits for its last main landing's verdict and its active reds."""
@@ -267,11 +280,16 @@ def retire_ready(plan: Plan, tasks: Mapping[str, Task], events: Sequence[dict],
 
 
 def _fix_steps(actions: list[Action], tasks: Mapping[str, Task], folded: Sequence[tier_reds.Red],
-               hosts: Mapping[str, Host], *, sh: Runner, log_path: Path | None) -> list[Action]:
+               hosts: Mapping[str, Host], *, plan: Plan, directory: Path, checkout: Path,
+               sh: Runner, log_path: Path | None) -> list[Action]:
     """Dispatch the round's fix actions by run_kind, noting failures for a later tick
-    (docs/design/fab-qa.md, 2). Return the actions, printing one line for each.
+    (docs/design/qa.md, 2). Return the actions, printing one line for each.
     """
     by_id = {red.id: red for red in folded}
+    events = log.read(log_path)
+    found, surveys = findings.findings(events), fixes.foremen(events)
+    tip = (_finding_tip(checkout, sh=sh, log_path=log_path)
+           if any(a.run_kind == "finding" and a.kind == "examine-fix" for a in actions) else "")
     for action in actions:
         detail = action.detail
         try:
@@ -282,11 +300,21 @@ def _fix_steps(actions: list[Action], tasks: Mapping[str, Task], folded: Sequenc
                     tier_reds.start(red, host, log.read(log_path), plan_tasks=tasks, sh=sh, log_path=log_path)
                     detail += " " + host.name
                 else:
-                    try:
-                        report = Path(red.report).read_text()
-                    except (OSError, UnicodeError):
-                        report = ""
-                    record = tier_reds.settle(red, report, plan_tasks=tasks, log_path=log_path)
+                    record = tier_reds.settle(red, _fix_report(red.report), plan_tasks=tasks, log_path=log_path)
+                    detail = f"{record['verdict']} {record['reason']}"
+            elif action.run_kind == "finding":
+                finding = found[action.detail]
+                if action.kind == "examine-fix":
+                    if not tip:
+                        detail = "deferred: main tip unavailable"
+                    else:
+                        host = _builder(hosts, log.read(log_path))
+                        fixes.start(finding, plan, directory.relative_to(checkout), host, tip,
+                                    log.read(log_path), sh=sh, log_path=log_path)
+                        detail += " " + host.name
+                else:
+                    survey = surveys[action.detail]
+                    record = fixes.settle(finding, survey, _fix_report(survey.report), log_path=log_path)
                     detail = f"{record['verdict']} {record['reason']}"
             else:
                 raise ValueError(f"unknown fix kind: {action.run_kind}")
@@ -295,6 +323,28 @@ def _fix_steps(actions: list[Action], tasks: Mapping[str, Task], folded: Sequenc
             log.append("note", path=log_path, text=f"{action.kind} {action.task} {detail}")
         print(f"{action.kind} {action.task} {detail}")
     return actions
+
+
+def _fix_report(report: str) -> str:
+    """Read a collected fix foreman's report, falling back to no verdict."""
+    try:
+        return Path(report).read_text()
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _finding_tip(checkout: Path, *, sh: Runner, log_path: Path | None) -> str:
+    """Read main once for finding foremen; note a failure and defer them this round."""
+    try:
+        tip = sh(["git", "rev-parse", "origin/main"], cwd=str(checkout), check=True).out.strip()
+        if not tip:
+            raise ValueError("origin/main has no tip")
+        return tip
+    except (OSError, ValueError, Failed) as error:
+        detail = " ".join(str(error).splitlines())
+        log.append("note", path=log_path, text=f"finding foremen deferred: {detail}")
+        print(f"finding - failed: {detail}")
+        return ""
 
 
 def in_flight(events: Iterable[dict]) -> list[dict]:
@@ -584,6 +634,7 @@ def _queue_record(entry: dict, tasks: Mapping[str, Task], owners: Mapping[str, s
 
     Owned collateral and unloaded fab branches are skipped; backlog landings keep
     task equal to branch and into empty (docs/design/fab.md, 13.8 and 13.15).
+    Finding repairs land into main so their fold releases the rung (docs/design/qa.md, 2).
     """
     branch = entry.get("branch")
     if not isinstance(branch, str):
@@ -601,8 +652,11 @@ def _queue_record(entry: dict, tasks: Mapping[str, Task], owners: Mapping[str, s
         fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
                   if field in entry}
         fields["task"] = identifier
-        if branch in backlog_owners and entry["ev"] == "landed":
-            fields["into"] = ""
+        if entry["ev"] == "landed":
+            if branch in backlog_owners:
+                fields["into"] = ""
+            elif identifier in tasks and tasks[identifier].kind == fixes.KIND:
+                fields["into"] = "main"
     else:
         fields = {"gate": gate}
         names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
@@ -981,7 +1035,8 @@ def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
     events = log.read(log_path)
     folded = tier_reds.reds(events)
     tasks = {key: task for plan, plan_tasks, _, _ in loaded
-             for key, task in {**plan_tasks, **tier_reds.repair_tasks(plan, events, {}, folded=folded)}.items()}
+             for key, task in {**plan_tasks, **tier_reds.repair_tasks(plan, events, {}, folded=folded),
+                               **fixes.tasks(plan, events)}.items()}
     imported_from = len(events)
     _import_queue(tasks, events, hosts, sh=sh, log_path=log_path,
                   plan_drafts=[plan.draft for plan, _, _, _ in loaded])
@@ -994,7 +1049,8 @@ def _reconcile_reds(loaded: Sequence[tuple[Plan, dict[str, Task], Path, Path]],
     if closed:
         events += closed
         folded = tier_reds.reds(events)
-    owner_map = tier_reds.owners(((plan, tasks) for plan, tasks, _, _ in loaded), events, folded=folded)
+    owner_map = tier_reds.owners(((plan, {**tasks, **fixes.tasks(plan, events)})
+                                  for plan, tasks, _, _ in loaded), events, folded=folded)
     if not only and after_host is not None and not openings_deferred:
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
@@ -1027,7 +1083,8 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         loaded, load_actions, hosts, sh=sh, log_path=log_path, only=only)
     if loaded:
         plan_tasks = {key: task for plan, tasks, _, _ in loaded
-                      for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded)}.items()}
+                      for key, task in {**tasks, **tier_reds.tasks(plan, events, folded=folded),
+                                       **fixes.tasks(plan, events)}.items()}
         calm = flow.measure(hosts, log.now(), sh=sh)
         for plan, tasks, directory, checkout in loaded:
             taken = _tick_loaded(plan, tasks, directory, checkout, hosts, calm, folded, plan_tasks,
@@ -1123,7 +1180,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
         events = log.read(log_path)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
     tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind not in fix.FIX_KINDS},
-             **tier_reds.tasks(plan, events, folded=folded)}
+             **tier_reds.tasks(plan, events, folded=folded), **fixes.tasks(plan, events)}
     actions = decide(plan, tasks, events, hosts, calm, pushed=_pushed_branches(plan, checkout, sh=sh))
     for action in actions:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
@@ -1136,7 +1193,9 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     for action in settlements:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
     actions.extend(settlements)
-    actions.extend(_fix_steps(red_actions(plan, folded), {**plan_tasks, **tasks}, folded, hosts, sh=sh, log_path=log_path))
+    actions.extend(_fix_steps(red_actions(plan, folded) + finding_actions(plan, events),
+                              {**plan_tasks, **tasks}, folded, hosts, plan=plan, directory=directory,
+                              checkout=checkout, sh=sh, log_path=log_path))
     design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
     followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
     followups = [action for action in followups if action.run_kind != "retire" or only
@@ -1645,7 +1704,7 @@ def main(argv: list[str]) -> int:
             hosts = machines.load() if loaded else {}
             folded = tier_reds.reds(events)
             for plan, tasks, _, _ in loaded:
-                tasks = {**tasks, **tier_reds.tasks(plan, events, folded=folded)}
+                tasks = {**tasks, **tier_reds.tasks(plan, events, folded=folded), **fixes.tasks(plan, events)}
                 for action in decide(plan, tasks, events, hosts):
                     print(f"{action.kind} {action.task or '-'} {action.detail}")
         else:
