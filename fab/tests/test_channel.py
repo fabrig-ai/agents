@@ -194,6 +194,23 @@ class ChannelTest(unittest.TestCase):
         self.assertIn("due: rerun", page)
         self.assertNotIn("## Unread", page)
 
+    def test_compose_defers_reader_binding_until_walks_finishes_importing(self):
+        directory = write_ladder(self.home / "ladder")
+        sh = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.home)))
+        sh.on(["git", "show"], Result(0, "The committed brief.\n"))
+        read_editions = walks.editions
+        with patch.object(channel, "read_editions", channel._deferred_editions):
+            with patch.object(walks, "editions", side_effect=lambda plan, directory:
+                              read_editions(plan, directory, sh=sh)):
+                first = channel.compose([directory], [], ts(4))
+            with patch.object(walks, "editions") as shared_editions:
+                second = channel.compose([directory], [], ts(4))
+                shared_editions.assert_not_called()
+        self.assertEqual(first, second)
+        self.assertIn("### ladder", first)
+        self.assertNotIn("## Unread", first)
+        self.assertEqual(len(sh.argvs()), 10)
+
     def test_compose_unreadable_editions_list_the_plan_and_keep_other_ladders(self):
         directories = [write_ladder(self.home / name, draft=name)
                        for name in ("outside", "missing-brief", "readable")]

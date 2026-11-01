@@ -19,11 +19,21 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
-from fab import atomic, findings, log, plan, tier_reds, triage, wake
+from fab import atomic, findings, log, plan, tier_reds, triage, wake, walks
 from fab.plan import Plan
 from fab.report import LANDING
 from fab.sh import Failed
-from fab.walks import editions as read_editions
+
+
+def _deferred_editions(loaded: Plan, directory: Path) -> dict[str, str]:
+    """Bind the edition reader after walks finishes importing this module first."""
+    global read_editions
+    from fab.walks import editions as read_editions
+    return read_editions(loaded, directory)
+
+
+# Keep an independent reader binding; walks may still be importing channel.
+read_editions = getattr(walks, "editions", _deferred_editions)
 
 PAGE = "user.md"  # the page, under FAB_HOME
 PLANS = "plans"  # FAB_HOME/plans: the ticked plans' directories, one per line (fab-tick.md 5)
@@ -430,7 +440,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
     and signals, sharing one tier_reds.reds fold.
     Finding bodies quote title, rung and QUESTION_LINES of reproduction before the
     question. Loaded ladders add backlog signals at the current render and rung lines
-    from walks.editions and findings.rungs after After landing, before Unread (13.15).
+    from walks.editions and findings.rungs after After landing, before Unread (docs/design/fab-qa.md, 2).
     An unreadable edition adds the plan directory to Unread."""
     plans, unread = _load_plans(directories)
     found = findings.findings(events)
@@ -472,7 +482,7 @@ def compose(directories: Sequence[Path], events: Sequence[dict], now: str) -> st
 
 
 def _load_plans(directories: Sequence[Path]) -> tuple[list[tuple[Plan, Path]], list[str]]:
-    """Load page plans and collect one-line read failures (docs/design/fab.md, 13.6)."""
+    """Load page plans and collect one-line read failures (docs/design/fab-channel.md, 2)."""
     plans, unread = [], []
     for directory in directories:
         path = directory / "plan.toml"
@@ -485,7 +495,7 @@ def _load_plans(directories: Sequence[Path]) -> tuple[list[tuple[Plan, Path]], l
 
 
 def _backlog_signals(plans: Sequence[tuple[Plan, Path]], events: Sequence[dict]) -> list[Signal]:
-    """The loaded ladders held at their current backlog render; pure (13.6, 13.15)."""
+    """The loaded ladders held at their current backlog render; pure (docs/design/fab-channel.md, 2)."""
     opened = []
     records = list(events)
     for loaded, _ in plans:
