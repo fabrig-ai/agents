@@ -97,11 +97,13 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     - The amend brief carries the refusal's `log` (the last 20 lines of
       `fab land`'s output, whose `CONFLICT` lines name the paths), under a
       heading naming `fab land`'s refusal, not a queue rejection. For
-      `rebase`, the amender (`fab/roles/amender.md`) rebases the branch onto
-      `origin/main`, resolves each conflict keeping both sides' intent
-      (main's side is others' landed work) and pushes with
-      `--force-with-lease` (its worktree tracks `origin/calls/<root>`); its
-      "one commit" and `git push origin HEAD` rules give way for this case.
+      `rebase`, and for `test` before it reproduces and fixes what the log
+      names (`fab land` tested the branch rebased onto main), the amender
+      (`fab/roles/amender.md`) rebases the branch onto `origin/main`,
+      resolves each conflict keeping both sides' intent (main's side is
+      others' landed work) and pushes with `--force-with-lease` (its
+      worktree tracks `origin/calls/<root>`); its "one commit" and `git push
+      origin HEAD` rules give way for these cases.
       A Claude amend rather than the Codex foreman (execution-modes.md's
       rebases) because the conflict is in text the call wrote and the amend
       chain already exists. For a retire, the brief also lists the designs

@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of call-rebase-fixes: call-rebase's acceptance fixes, so the
 # code and role texts match docs/design/calls.md 2's "A `fab land` refusal

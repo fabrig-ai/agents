@@ -49,7 +49,9 @@
   `<draft>/finding-<n>`, whose questions skip the foreman and queue for
   the answerer as a red task's do.
 - **A `fab land` refusal counts as a refusal of the chain** (2; plan
-  `docs/plan/call-rebase`, retired 11-01; baaf496, ab3a6d5). The tick's
+  `docs/plan/call-rebase`, retired 11-01; baaf496, ab3a6d5; its acceptance
+  fixes by plan `docs/plan/call-rebase-fixes`, retired 11-01; bb8b86b,
+  c99a936). The tick's
   finish (`fab/dispatch.py`, `_finish_outcome` through `_record_finish`)
   logs no `call.finished` when `fab land` logged a `branch.rejected` for
   the branch during it, at any step; it logs done for a branch a
@@ -63,14 +65,22 @@
   lists the designs changed at `origin/main` and not at `origin/<branch>`.
   The hold's reason is `LAND_HOLD`; its settle brief allows amend or user,
   then user only, and `_judge_chain` parks a land verdict on it with
-  `settle failed`. Tested with temporary homes, fake runners and log folds;
-  not yet run live.
+  `settle failed`. Any other `ls-remote` code (128 for network or auth, 1)
+  leaves the refusal open for its amend; `test_dispatch.py`'s
+  `test_finish_land_refusal_steps_and_terminal_exceptions` holds 2, 128
+  and 1. `fab/roles/settle.md` says land is not an option when the brief
+  says it would land a tip `fab land` refused; `fab/roles/amender.md`
+  rebases onto `origin/main` at `test` as at `rebase` before it reproduces
+  and fixes what the log names, then force-pushes with lease. Tested with
+  temporary homes, fake runners and log folds; not yet run live.
 
 ## Gaps and departures
 
 - **A `fab land` refusal amended from its own heading** (2, 11-01): the
-  amender's rebase, its `--force-with-lease` push and a retire's listed
-  designs are role text (`fab/roles/amender.md`), not checked by code; a
+  amender's rebase at `rebase` and `test`, its `--force-with-lease` push
+  and a retire's listed designs are role text (`fab/roles/amender.md`), as
+  settle's refusal to land a refused tip is (`fab/roles/settle.md`, which
+  `_judge_chain`'s park on a land verdict backs), not checked by code; a
   failing `git fetch` in `_retire_designs` fails the amend's start like
   any brief that cannot be compiled (5, its first bullet).
 - **Retire's changed designs are main's window, not the plan's** (3,
