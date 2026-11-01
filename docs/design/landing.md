@@ -143,7 +143,11 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 - **Precheck receipts are reused:** a batch of one branch whose precheck
   receipt names the same main and passed lands on the receipt's checks
   alone, after fmt; the queue's own full checks still run on every fifth
-  batch and on every batch of more than one.
+  batch and on every batch of more than one. A receipt with starved or
+  unobserved tests is green for its run but is never reused: a test not
+  run because the run stopped is unobserved, never passed (fabrig's
+  `skein/docs/foundation/testing-strategy.md` 8.1), so the queue runs that
+  tip's checks itself (11-01).
   - **The receipt travels with the ready:** when the dispatcher readies a
     fabrig tip, it reads `FAB_HOME/precheck/<tip>.json` on the builder of
     the task's last implement, repair or rebase run and hands it to the
