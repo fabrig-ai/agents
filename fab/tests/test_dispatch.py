@@ -2621,18 +2621,31 @@ class MultiPlanTickTest(unittest.TestCase):
         one = self.plan_dir("one", tasks=("a",), repo="fabrig")
         two = self.fabrig_plan(draft="two", tasks=("a",))
         self.hosts["tiers"] = Host("tiers", "fake@tiers", ("after-landing",))
-        self.append(dict(ev="tiers.red", key="key", tip="tip", branches=["one/a"]),
-                    dict(ev="tiers.run", tip="tip", reds=["key"], branches=["one/a"]))
+        agents = self.plan_dir("agents", tasks=("a",))
+        for draft in ("one", "agents"):
+            self.append(dict(ev="branch.landed", task=f"{draft}/a", branch=f"{draft}/a",
+                             tip="tip", main="main"))
+        records = [dict(ev="test", ts="001", state="new", key="key", tip="tip",
+                        profile="default", binary="b", test="t", branches=["one/a"]),
+                   dict(ev="run", ts="002", tip="tip", reds=["key"], branches=["one/a"])]
+        self.fake.on(ssh("fake@tiers", ["fab", "after-landing", "log"])[:-1],
+                     Result(0, "\n".join(json.dumps(record) for record in records)))
         self.fake.rules.insert(0, (["git", "fetch", "origin"], lambda call:
-            Result(1, err="fetch failed") if call.cwd == str(self.checkout) else Result(0)))
-        actions = self.tick(one, two)
+            Result(1, err="fetch failed") if call.cwd == str(self.fabrig_checkout) else Result(0)))
+        actions = self.tick(one, two, agents)
         self.assertTrue(any(a.kind == "load" and "fetch failed" in a.detail for a in actions))
         self.assertFalse(any(e["ev"] == "red.opened" for e in log.read()))
+        verdict, = [e for e in log.read() if e["ev"] == "tiers.run"]
+        self.assertEqual(verdict["branches"], ["one/a"])
+        self.assertEqual([a.task for a in actions if a.run_kind == "retire"], ["agents/retire"])
+        self.assertNotIn(drafts.unit("retire", "one/retire"), units(self.fake))
         self.fake.rules.pop(0)
-        self.tick(one, two)
+        actions = self.tick(one, two, agents)
         opened, = [e for e in log.read() if e["ev"] == "red.opened"]
         self.assertEqual((opened["draft"], opened["route"], opened["tasks"]),
                          ("one", "foreman", ["one/a"]))
+        self.assertFalse(any(a.run_kind == "retire" and a.task == "one/retire" for a in actions))
+        self.assertNotIn(drafts.unit("retire", "one/retire"), units(self.fake))
 
     def test_retired_among_plans_is_skipped(self):
         one, two = self.plan_dir("one"), self.plan_dir("two")

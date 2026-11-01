@@ -886,8 +886,9 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     Fetch each checkout once; print load failures and skip retired plans. With no loaded
     plan, import unowned queue records and refresh the page, without measuring. Otherwise
     close recovered reds, then open new reds against all loaded owners, unless any plan
-    failed to load. Decide each plan on fresh events and spend calm extras once. Question,
-    refusal and red actions share a log snapshot before fresh call decisions. Collect
+    failed to load; fabrig retirement waits in that round too. Decide each plan on fresh
+    events and spend calm extras once. Question, refusal and red actions share a log
+    snapshot before fresh call decisions. Collect
     unowned runs last and refresh the page.
     """
     # only: the given plans alone, and no page (a replay's own tick beside fab's, coord/fab-replay).
@@ -895,6 +896,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     if not directories:
         print("plans - none")
     loaded, actions = _load_plans(directories, log.read(log_path), sh=sh)
+    openings_deferred = bool(actions)
     hosts = machines.load() if hosts is None else hosts
     events = log.read(log_path)
     folded = tier_reds.reds(events)
@@ -918,7 +920,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
         folded = tier_reds.reds(events)
     owner_map = tier_reds.owners(((plan, tasks) for plan, tasks, _, _ in loaded), events, folded=folded)
     after_host = next((host for _, host in sorted(hosts.items()) if "after-landing" in host.roles), None)
-    if after_host is not None and not actions:
+    if after_host is not None and not openings_deferred:
         opened = tier_reds.open_reds(events, owner_map, after_host, sh=sh, log_path=log_path, folded=folded)
         events += opened
         folded = [*folded, *tier_reds.reds(opened)] if opened else folded
@@ -927,7 +929,7 @@ def _round(plan_dirs: Sequence[Path], *, sh: Runner, hosts: Mapping[str, Host] |
     calm = flow.measure(hosts, log.now(), sh=sh)
     for plan, tasks, directory, checkout in loaded:
         taken = _tick_loaded(plan, tasks, directory, checkout, hosts, calm, folded, plan_tasks,
-                             sh=sh, log_path=log_path)
+                             sh=sh, log_path=log_path, openings_deferred=openings_deferred)
         actions.extend(taken)
         calm = drafts.spend(calm, (action.host for action in taken if action.kind == "start"))
     events = log.read(log_path)
@@ -992,8 +994,9 @@ def _load_plans(directories: Sequence[Path], events: list[dict], *, sh: Runner,
 
 def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkout: Path,
                  hosts: Mapping[str, Host], calm: Mapping[str, bool], folded: Sequence[tier_reds.Red],
-                 plan_tasks: Mapping[str, Task], *, sh: Runner, log_path: Path | None) -> list[Action]:
-    """Tick a loaded plan using the round's red snapshot and all loaded suspect specs."""
+                 plan_tasks: Mapping[str, Task], *, sh: Runner, log_path: Path | None,
+                 openings_deferred: bool = False) -> list[Action]:
+    """Tick with the round's reds and suspect specs; deferred openings hold fabrig retirement."""
     released = _merge_cut(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     if released:
         plan, tasks = _load_plan(directory, log.read(log_path), checkout=checkout, sh=sh)
@@ -1017,8 +1020,10 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     design = [part for action in actions if action.kind == "design" for part in action.detail.split(", ")]
     followups = call_actions(plan, tasks, log.read(log_path), design, log.now())
     followups = [action for action in followups if action.run_kind != "retire"
-                 or retire_ready(plan, tasks, log.read(log_path), folded,
-                                 after_landing=any("after-landing" in host.roles for host in hosts.values()))]
+                 or ((plan.repo != "fabrig" or not openings_deferred)
+                     and retire_ready(plan, tasks, log.read(log_path), folded,
+                                      after_landing=any("after-landing" in host.roles
+                                                        for host in hosts.values())))]
     actions.extend(followups)
     for action in followups:
         _take(action, tasks, hosts, directory, plan=plan, checkout=checkout, sh=sh, log_path=log_path)
