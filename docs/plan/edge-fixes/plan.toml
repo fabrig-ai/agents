@@ -1,0 +1,5 @@
+draft = "edge-fixes"
+repo = "agents"
+sources = ["docs/plan/edge-fixes/inputs/request.md", "docs/design/draft/execution-modes.md"]
+# Plan options, written by fab call cut --set; keep them
+landing = "queue"
