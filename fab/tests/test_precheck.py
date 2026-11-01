@@ -88,7 +88,9 @@ class PrecheckGitTest(unittest.TestCase):
 
     def assert_receipt(self, receipt, tip, main, *, home=None):
         directory = (home or self.home / "fab") / "precheck"
-        self.assertEqual(set(receipt), {"tip", "main", "selection", "steps", "outcome", "starved", "log", "at"})
+        self.assertEqual(set(receipt), {"tip", "main", "selection", "steps", "outcome",
+                                        "starved", "unobserved", "log", "at"})
+        self.assertIs(type(receipt["unobserved"]), int)
         self.assertIs(type(receipt["starved"]), int)
         self.assertGreaterEqual(receipt["starved"], 0)
         self.assertEqual(receipt["tip"], tip)
@@ -148,7 +150,7 @@ class PrecheckGitTest(unittest.TestCase):
         self.assertFalse((self.slot / "generated").exists())
         self.assert_restored(tip)
 
-    def _global_timeout_checks(self, *, assertion=False):
+    def _global_timeout_checks(self, *, assertion=False, records=False):
         cases = [("b", "cancelled-a", "fail"), ("b", "cancelled-b", "fail"),
                  ("b", "ok", "pass")]
         if assertion:
@@ -158,7 +160,10 @@ class PrecheckGitTest(unittest.TestCase):
 
         def collect(request, repo):
             result = original(request, repo)
-            path = Path(request["directory"]) / "summary.json"
+            directory = Path(request["directory"])
+            if records:
+                atomic.write(directory / "records/x", "collector record\n")
+            path = directory / "summary.json"
             measured = json.loads(path.read_text())
             for test in measured["tests"]:
                 test["starved"] = int(test["test_name"].startswith("cancelled-"))
@@ -168,6 +173,31 @@ class PrecheckGitTest(unittest.TestCase):
             return Result(result.code, err="Cancelling due to global timeout\n")
 
         self.nextest.collect = collect
+
+    def test_skipped_cases_counted_without_naming_them(self):
+        tip = self.commit("Cargo.toml", "workspace input\n")
+        self.nextest.results = {None: [("b", "ok", "pass"), ("b", "never", "skipped")]}
+        receipt = self.check(tip)
+        self.assert_receipt(receipt, tip, self.base)
+        self.assertEqual((receipt["outcome"], receipt["unobserved"], receipt["starved"]),
+                         ("green", 2, 0))
+        self.assertNotIn("never", Path(receipt["log"]).read_text())
+
+    def test_collector_records_removed_and_reports_kept_on_green_and_red(self):
+        tip = self.commit("Cargo.toml", "workspace input\n")
+        for assertion in (False, True):
+            with self.subTest(assertion=assertion):
+                self._global_timeout_checks(assertion=assertion, records=True)
+                receipt = self.check(tip)
+                self.assertEqual(receipt["outcome"], "red" if assertion else "green")
+                directory = Path(receipt["log"]).with_suffix("")
+                profiles = ("default",) if assertion else ("default", "fuzzy")
+                for profile in profiles:
+                    self.assertFalse((directory / profile / "records").exists())
+                    for filename in ("junit.xml", "gate-junit.xml", "summary.json"):
+                        self.assertTrue((directory / profile / filename).is_file())
+                if assertion:
+                    self.assertFalse((directory / "fuzzy").exists())
 
     def test_global_timeout_starvation_green_counted_and_named_in_build_lane(self):
         tip = self.commit("Cargo.toml", "workspace input\n")

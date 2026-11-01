@@ -46,6 +46,17 @@ class ReceiptTest(unittest.TestCase):
             with self.subTest(receipt=value):
                 self.assertFalse(receipts.reusable(value, TIP, MAIN))
 
+    def test_reusable_requires_nothing_starved_or_unobserved(self):
+        for field in ('starved', 'unobserved'):
+            for count in (0, 1):
+                with self.subTest(field=field, count=count):
+                    self.assertEqual(receipts.reusable(receipt() | {field: count}, TIP, MAIN),
+                                     count == 0)
+            value = receipt()
+            value.pop(field, None)
+            with self.subTest(missing=field):
+                self.assertTrue(receipts.reusable(value, TIP, MAIN))
+
     def test_covers_step_and_binary_package(self):
         for binary in ('pkg', 'pkg::wire'):
             self.assertTrue(receipts.covers(receipt(), 'default', binary))

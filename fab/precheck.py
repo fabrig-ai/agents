@@ -25,8 +25,8 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
     With full, select "full" and ratchet every tree with scripts/old_forms.py.
     The receipt {tip, main (onto's sha), selection ("full", "docs" or sorted names), steps
     (as "name:code:seconds"), starved (reconciled starved cases summed across test profiles),
-    outcome ("green", "red" or "conflict"), log, at (fab.log.now())} is written to
-    FAB_HOME/precheck/<tip>.json and returned.
+    unobserved (skipped cases summed across test profiles), outcome ("green", "red" or
+    "conflict"), log, at (fab.log.now())} is written to FAB_HOME/precheck/<tip>.json and returned.
     """
     slot = slot.resolve()
 
@@ -43,7 +43,7 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
     log_path = directory / f"{tip}.log"
     atomic.write(log_path, "")
     receipt = {"tip": tip, "main": main_tip, "selection": "docs", "steps": [],
-               "outcome": "conflict", "starved": 0, "log": str(log_path)}
+               "outcome": "conflict", "starved": 0, "unobserved": 0, "log": str(log_path)}
     load_metadata = gate.loader(load, sh=sh)
 
     try:
@@ -63,7 +63,8 @@ def precheck(slot: Path, tip: str, *, onto: str = "origin/main", full: bool = Fa
 
 
 def _checks(slot, main_tip, full, without, load_metadata, receipt, log_path, sh):
-    """Select checks and collect them, counting and naming reconciled starvation."""
+    """Select and collect checks; count and name reconciled starvation, count skipped cases
+    as unobserved without naming them, then remove each run profile's collector records."""
     paths = gate.changed_paths(slot, base=main_tip, sh=sh)
     selected = ("full" if full else
                 gate.select(slot, paths, base=main_tip, sh=sh, load=load_metadata))
@@ -87,6 +88,10 @@ def _checks(slot, main_tip, full, without, load_metadata, receipt, log_path, sh)
             if case.result == "starved":
                 receipt["starved"] += 1
                 atomic.extend(log_path, f"{profile}: starved {case.binary} {case.test}\n")
+            elif case.result == "skipped":
+                receipt["unobserved"] += 1
+    for profile in reports:
+        shutil.rmtree(directory / profile / "records", ignore_errors=True)
 
 
 def _restore(git, original, branch):

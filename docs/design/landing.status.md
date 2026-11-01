@@ -4,6 +4,18 @@
 
 ## Present
 
+- **Precheck receipts require every test observed for reuse** (3; plan
+  `docs/plan/acceptance-fixes`, 11-01): `fab.precheck.precheck` records
+  `unobserved`, the skipped cases summed across test profiles, without
+  naming them in the log. `fab.receipts.reusable` refuses green receipts
+  with starved or unobserved tests; missing counts still mean 0 for older
+  receipts. Parsing, delivery and test coverage stay as they are. After
+  reading each profile's reports, precheck removes the collector's `records`
+  directories, keeping JUnit and summary files, on green and red runs.
+  Tested with fake nextest and collector records (`test_precheck.py`,
+  `test_receipts.py`). The reuse change is live once the gate's
+  `fab-queue.service` restarts on it: run `bin/install.sh <gate host>` once
+  landed. Builders follow main at their next run start (tick.md 3).
 - **The queue's retire fix and `rejected`'s tests** (11-01, section 2):
   the retire push runs with `--porcelain` and is read per ref; a refused
   source delete is left alone (a `left` line in the detail log); a refused
@@ -32,8 +44,9 @@
   assertion failure stays red. Its other steps keep `gate.run_steps`, inside
   `run_steps`. The receipt gains `starved`, the reconciled starved cases
   summed over both profiles (0 on a conflict). `outcome` is still `green`,
-  `red` or `conflict`, so receipt parsing and reuse (3) did not change. The
-  precheck log names each starved case as `<profile>: starved <binary>
+  `red` or `conflict`, so receipt parsing did not change. Reuse (3) now
+  requires every test observed, as described in the Present bullet above.
+  The precheck log names each starved case as `<profile>: starved <binary>
   <test>` after the collector's per-tree lines. A second check of the same
   tip replaces the collector directory along with the log. Tested with
   fake nextest and collector records (`test_precheck.py`,
@@ -87,12 +100,6 @@
   and refused, until the answerer had the run squash the change into one
   ordinary commit (53dfbf6). Code and design agree; the fault is the
   design's (4, Later).
-- **A starved receipt still stands in for the gate** (3, the line changed
-  in 992fce7): `fab.receipts.reusable` holds for `outcome: green, starved: 7`
-  and the receipt has no `unobserved`, so a batch of one on the same main
-  runs only fmt, with its starved tests unobserved. The code is behind the
-  design; item 1 of `docs/plan/acceptance-fixes/inputs/request.md`, not yet
-  cut, builds it.
 - **`bin/fab land` gives the suite 120 s of wall time** (`fab/land.py`; 2
   does not name it): the budget is CPU time (`docs/design/fab.md` 4), but a
   machine that stretches the suite's 23 s of CPU past 120 s still refuses a

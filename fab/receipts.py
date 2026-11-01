@@ -2,8 +2,9 @@
 
 Precheck writes a receipt on the builder (fab.precheck). The dispatcher carries it to the gate
 when it readies the tip (`deliver`, received by `fab queue receipt`), and the queue reads it
-there (`load`): a batch of one lands on a receipt that names its tip and main (`reusable`), and
-a failing test its precheck ran green is retried before the red counts (`covers`, fab.reds).
+there (`load`): a batch of one lands on a green receipt that names its tip and main and has
+nothing starved or unobserved (`reusable`); a failing test its precheck ran green is retried
+before the red counts (`covers`, fab.reds).
 A receipt that is missing or does not parse is no receipt: the queue checks the tip in full.
 """
 
@@ -82,9 +83,11 @@ def load(home: Path, tip: str) -> dict | None:
 
 def reusable(receipt: dict | None, tip: str, main: str) -> bool:
     """Whether a batch of tip alone, merged on main, may land on receipt's checks: receipt is not
-    None, its outcome is green, its tip is tip and its main is main."""
+    None, its outcome is green, its tip is tip, its main is main, and nothing is starved or
+    unobserved. A missing starved or unobserved key counts as 0, keeping older receipts reusable."""
     return receipt is not None and receipt.get("outcome") == "green" and \
-        receipt.get("tip") == tip and receipt.get("main") == main
+        receipt.get("tip") == tip and receipt.get("main") == main and \
+        not receipt.get("starved") and not receipt.get("unobserved")
 
 
 def covers(receipt: dict | None, step: str, binary: str) -> bool:
