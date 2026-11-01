@@ -977,8 +977,12 @@ class LadderTickTest(unittest.TestCase):
             for rung in self.plan.rungs.values()}
         self.fake = FakeRunner().on(["git", "rev-parse", "--show-toplevel"],
                                     Result(0, str(self.home)))
-        self.fake.on(["git", "show"], lambda call: Result(
-            0, (self.home / call.argv[-1].split(":", 1)[1]).read_text()))
+        self.backlog = triage.backlog_text(self.plan, [])
+        self.fake.on(["git", "ls-tree"], lambda call: Result(
+            0, self.plan.ladder.backlog if self.backlog is not None else ""))
+        self.fake.on(["git", "show"], self.read_origin)
+        self.fake.on(["git", "worktree", "add"], self.add_worktree)
+        self.fake.on(["git", "rev-parse", "--verify"], Result(0, "backlog-tip\n"))
         self.now = self.enterContext(patch.object(log, "now", return_value=qa.STAMP))
         self.out = io.StringIO()
         self.enterContext(redirect_stdout(self.out))
@@ -1005,8 +1009,21 @@ class LadderTickTest(unittest.TestCase):
         if report is not None:
             atomic.write(log.home() / "calls" / call / "report.md", report)
 
+    def read_origin(self, call):
+        path = call.argv[-1].split(":", 1)[1]
+        if path == self.plan.ladder.backlog:
+            return Result(0, self.backlog) if self.backlog is not None else Result(1)
+        return Result(0, (self.home / path).read_text())
+
+    def add_worktree(self, call):
+        path = Path(call.argv[-2]) / self.plan.ladder.backlog
+        path.unlink(missing_ok=True)
+        if self.backlog is not None:
+            atomic.write(path, self.backlog)
+        return Result(0)
+
     def tick(self, **kwargs):
-        return dispatch.tick(self.directory, sh=self.fake, hosts={}, **kwargs)
+        return dispatch.tick(self.directory, sh=self.fake, hosts=kwargs.pop("hosts", {}), **kwargs)
 
     def test_failed_walk_starts_one_triage_call_with_subject_unit_and_plan(self):
         self.add_walk()
@@ -1122,8 +1139,8 @@ finding-7: drop: Walk setup
             with patch.object(dispatch, "decide", wraps=dispatch.decide) as decide:
                 self.tick()
         editions.assert_called_once_with(self.plan, self.directory, sh=self.fake)
-        self.assertEqual([entry["ev"] for entry in decide.call_args.args[2]][-2:],
-                         ["finding.triaged", "rung.passed"])
+        self.assertEqual([entry["ev"] for entry in decide.call_args.args[2]][-3:],
+                         ["finding.triaged", "rung.passed", "branch.ready"])
         self.assertEqual(units(self.fake), [])
         self.assertLess(self.out.getvalue().index("triage ladder"),
                         self.out.getvalue().index("passes ladder"))
@@ -1137,7 +1154,9 @@ finding-7: drop: Walk setup
     def test_unreadable_edition_logs_one_note_and_keeps_triage_moving(self):
         self.add_walk(verdict="pass", identifiers=tuple(f"finding-{n}" for n in range(1, 5)))
         self.add_walk(2, verdict="pass", identifiers=())
-        self.fake.rules.insert(0, (["git", "show"], Result(1, err="missing brief")))
+        brief = str((self.directory / "briefs/kit.md").relative_to(self.home))
+        self.fake.rules.insert(0, (["git", "show", f"origin/main:{brief}"],
+                                  Result(1, err="missing brief")))
         self.tick()
         notes = [entry for entry in log.read() if entry["ev"] == "note"]
         self.assertEqual(len(notes), 1)
@@ -1163,6 +1182,157 @@ finding-7: drop: Walk setup
         self.assertEqual([entry["ev"] for entry in log.read(path)
                           if entry["ev"] in ("finding.triaged", "rung.passed")],
                          ["finding.triaged", "rung.passed"])
+
+
+    def ready_backlogs(self, path=None):
+        return [entry for entry in log.read(path) if entry["ev"] == "branch.ready"
+                and entry["branch"].startswith("ladder/ladder/backlog-")]
+
+    def test_backlog_changed_readies_once_without_receipt_from_main(self):
+        self.add_walk()
+        self.end_triage("Done: 1 decisions\nfinding-1: backlog: Off path\n")
+        self.tick()
+        ready, = self.ready_backlogs()
+        branch = "ladder/ladder/backlog-1"
+        render = triage.backlog_text(self.plan, log.read())
+        self.assertEqual(ready, log.record("branch.ready", task=branch, branch=branch,
+                                          tip="backlog-tip", render=triage.render_key(render)))
+        worktree = log.home() / "backlog/ladder-1"
+        self.assertEqual((worktree / self.plan.ladder.backlog).read_text(), render)
+        self.assertIn(["git", "show", f"origin/main:{self.plan.ladder.backlog}"],
+                      self.fake.argvs())
+        self.assertIn(["git", "worktree", "add", "-B", branch, str(worktree), "origin/main"],
+                      self.fake.argvs())
+        self.assertIn([*dispatch.FAB_GIT, "commit", "-q", "-m",
+                       "ladder ladder: the backlog from the log (1 findings)", "--",
+                       self.plan.ladder.backlog], self.fake.argvs())
+        self.assertIn(["git", "push", "origin", f"backlog-tip:refs/heads/ready/{branch}"],
+                      self.fake.argvs())
+        self.assertFalse(any("receipt" in argv for argv in self.fake.argvs()))
+        self.fake.calls.clear()
+        self.tick()
+        self.assertEqual(self.ready_backlogs(), [ready])
+        self.assertFalse(any(argv[:2] == ["git", "worktree"] for argv in self.fake.argvs()))
+
+    def test_backlog_missing_on_main_is_added_even_without_findings(self):
+        self.backlog = None
+        self.tick()
+        ready, = self.ready_backlogs()
+        self.assertEqual(ready["branch"], "ladder/ladder/backlog-1")
+        self.assertIn(["git", "add", "--", self.plan.ladder.backlog], self.fake.argvs())
+        self.assertEqual((log.home() / "backlog/ladder-1" / self.plan.ladder.backlog).read_text(),
+                         triage.backlog_text(self.plan, []))
+
+    def test_backlog_unchanged_on_main_readies_nothing_despite_local_edit(self):
+        atomic.write(self.home / self.plan.ladder.backlog, "local edits\n")
+        self.tick()
+        self.assertEqual(self.ready_backlogs(), [])
+        self.assertFalse(any(argv[:2] == ["git", "worktree"] for argv in self.fake.argvs()))
+
+    def test_backlog_queue_landing_advances_cursor_and_next_decision_readies_two(self):
+        self.add_walk()
+        self.end_triage("Done: 1 decisions\nfinding-1: backlog: Off path\n")
+        self.tick()
+        branch = self.ready_backlogs()[0]["branch"]
+        self.backlog = triage.backlog_text(self.plan, log.read())
+        queue = [dict(ev="landed", ts="queue-1", branch=branch, tip="backlog-tip", main="main-tip")]
+        self.fake.on(["ssh"], lambda call: Result(0, "\n".join(json.dumps(e) for e in queue)))
+        hosts = {"gate": Host("gate", "fake@gate", ("gate",))}
+        self.tick(hosts=hosts)
+        landed, = [entry for entry in log.read() if entry["ev"] == "branch.landed"]
+        self.assertEqual((landed["task"], landed["branch"], landed["queue_ts"], landed["into"]),
+                         (branch, branch, "queue-1", ""))
+        self.assertFalse(any(entry["ev"].startswith("queue.") for entry in log.read()))
+        self.fake.calls.clear()
+        self.add_walk(2, identifiers=("finding-2",))
+        self.end_triage("Done: 1 decisions\nfinding-2: backlog: Later work\n", call="triage-2")
+        self.tick(hosts=hosts)
+        self.assertIn(ssh("fake@gate", ["fab", "queue", "log", "--since", "queue-1"]),
+                      self.fake.argvs())
+        self.assertEqual([entry["branch"] for entry in self.ready_backlogs()],
+                         [branch, "ladder/ladder/backlog-2"])
+        self.assertEqual(len([entry for entry in log.read() if entry["ev"] == "branch.landed"]), 1)
+
+    def reject_backlog_twice(self):
+        self.add_walk()
+        self.end_triage("Done: 1 decisions\nfinding-1: backlog: Off path\n")
+        queue = []
+        self.fake.on(["ssh"], lambda call: Result(
+            0, "\n".join(json.dumps(entry) for entry in queue)))
+        hosts = {"gate": Host("gate", "fake@gate", ("gate",))}
+        self.tick(hosts=hosts)
+        for number in (1, 2):
+            branch = f"ladder/ladder/backlog-{number}"
+            queue.append(dict(ev="rejected", ts=f"queue-{number}", branch=branch,
+                              tip="backlog-tip", step="test", log="/gate/log"))
+            self.tick(hosts=hosts)
+        self.tick(hosts=hosts)
+        self.assertEqual(len(self.ready_backlogs()), 2)
+        rejections = [entry for entry in log.read() if entry["ev"] == "branch.rejected"]
+        self.assertEqual([entry["task"] for entry in rejections],
+                         [f"ladder/ladder/backlog-{number}" for number in (1, 2)])
+        render = triage.render_key(triage.backlog_text(self.plan, log.read()))
+        self.assertEqual(triage.backlog_held(self.plan, log.read(), render), rejections[-1])
+        return queue, hosts
+
+    def test_backlog_two_queue_rejections_hold_until_render_changes(self):
+        queue, hosts = self.reject_backlog_twice()
+        self.add_walk(2, identifiers=("finding-2",))
+        self.end_triage("Done: 1 decisions\nfinding-2: backlog: Another\n", call="triage-2")
+        self.tick(hosts=hosts)
+        self.assertEqual(self.ready_backlogs()[-1]["branch"], "ladder/ladder/backlog-3")
+        self.assertEqual(len(self.ready_backlogs()), 3)
+
+    def test_backlog_two_queue_rejections_hold_until_clear(self):
+        queue, hosts = self.reject_backlog_twice()
+        self.append(log.record("signal.cleared", signal="backlog:ladder", by="user", text="Try again"))
+        self.tick(hosts=hosts)
+        self.assertEqual(self.ready_backlogs()[-1]["branch"], "ladder/ladder/backlog-3")
+        self.assertEqual(len(self.ready_backlogs()), 3)
+
+    def test_backlog_queue_landing_clears_rejection_hold(self):
+        queue, hosts = self.reject_backlog_twice()
+        self.backlog = triage.backlog_text(self.plan, log.read())
+        queue.append(dict(ev="landed", ts="queue-3", branch="ladder/ladder/backlog-2",
+                          tip="backlog-tip", main="main-tip"))
+        self.tick(hosts=hosts)
+        render = triage.render_key(self.backlog)
+        self.assertIsNone(triage.backlog_held(self.plan, log.read(), render))
+        self.assertEqual(len(self.ready_backlogs()), 2)
+
+    def test_backlog_failed_commit_notes_path_and_retries_later(self):
+        self.backlog = None
+        failure = (["git", "add"], Result(1, err="cannot stage backlog"))
+        self.fake.rules.insert(0, failure)
+        self.tick()
+        self.assertEqual(self.ready_backlogs(), [])
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn(self.plan.ladder.backlog, notes[0]["text"])
+        self.assertIn("cannot stage backlog", notes[0]["text"])
+        self.fake.rules.remove(failure)
+        self.tick()
+        self.assertEqual(self.ready_backlogs()[0]["branch"], "ladder/ladder/backlog-1")
+
+    def test_backlog_unreadable_main_notes_path_and_keeps_triage_moving(self):
+        self.add_walk()
+        self.fake.rules.insert(0, (["git", "show", f"origin/main:{self.plan.ladder.backlog}"],
+                                  Result(1, err="cannot read backlog")))
+        self.tick()
+        self.assertEqual(self.ready_backlogs(), [])
+        notes = [entry for entry in log.read() if entry["ev"] == "note"]
+        self.assertEqual(len(notes), 1)
+        self.assertIn(self.plan.ladder.backlog, notes[0]["text"])
+        self.assertEqual(units(self.fake), [drafts.unit("triage", "ladder/triage")])
+
+    def test_backlog_forms_of_unloaded_and_unreadied_plans_stay_out_of_queue_records(self):
+        branches = ("ladder/other/backlog-1", "ladder/ladder/backlog-1", "ladder/other/manual")
+        self.append(log.record("branch.ready", task=branches[0], branch=branches[0], tip="tip"))
+        queue = [dict(ev="rejected", ts=str(index), branch=branch, tip="tip", step="test")
+                 for index, branch in enumerate(branches)]
+        self.fake.on(["ssh"], lambda call: Result(0, "\n".join(json.dumps(e) for e in queue)))
+        self.tick(hosts={"gate": Host("gate", "fake@gate", ("gate",))})
+        self.assertFalse(any("queue_ts" in entry for entry in log.read()))
 
 
 class TickTest(unittest.TestCase):

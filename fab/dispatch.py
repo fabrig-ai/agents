@@ -11,6 +11,7 @@ import argparse
 import fcntl
 import io
 import json
+import re
 import sys
 import tempfile
 from collections import Counter
@@ -20,7 +21,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, state, tier_reds, triage, wake, walks
+from fab import after_landing, buffer, call_review, calls, channel, designer, drafts, findings, flow, foreman, gates, hosts as machines, integration, land, log, overlaps, plan as specs, receipts, repairs, run as runs, rust_gates, spec_edit, state, tier_reds, triage, wake, walks
 from fab.hosts import Host
 from fab.plan import Plan, Task
 from fab.sh import Failed, Result, Runner, run, ssh
@@ -529,6 +530,9 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
     owners.update({event["branch"]: draft for event in events
               if event.get("ev") == "call.started" and isinstance(event.get("branch"), str)
               for draft in plan_drafts if drafts.under(draft, event.get("subject"))})
+    backlog_owners = {branch: draft for draft in plan_drafts
+                      for branch in _backlog_branches(draft, events)}
+    owners.update(backlog_owners)
     for event in events:
         if (event.get("ev") == "run.started" and event.get("kind") == foreman.KIND
                 and isinstance(event.get("run"), str) and isinstance(event.get("task"), str)):
@@ -568,7 +572,7 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
             if owned and entry["ev"] == "collateral":
                 continue
             if not owned and (branch in known_branches or identifier in known_tasks
-                              or branch.startswith(("calls/", "answers/", "repairs/"))
+                              or branch.startswith(("calls/", "answers/", "repairs/", "ladder/"))
                               or branch.endswith("/integration")):
                 continue
             ev = ("branch." if owned else "queue.") + entry["ev"]
@@ -579,6 +583,8 @@ def _import_queue(tasks: Mapping[str, Task], events: list[dict], hosts: Mapping[
                 fields = {field: entry[field] for field in ("tip", "main", "step", "log", "findings")
                           if field in entry}
                 fields["task"] = identifier
+                if branch in backlog_owners and entry["ev"] == "landed":
+                    fields["into"] = ""
             else:
                 fields = {"gate": gate_hosts[0]}
                 names = ("tip", "main") if entry["ev"] == "landed" else ("tip", "step", "log")
@@ -736,8 +742,8 @@ def _deliver(branch: str, plan: Plan, checkout: Path, *, sh: Runner,
 
 
 def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | None,
-                  section: str = "") -> bool:
-    """Ready a call or spec branch once; return True only after its queue landing imports."""
+                  section: str = "", **fields) -> bool:
+    """Ready a fab branch with fields; return True only after its queue landing imports."""
     events = log.read(log_path)
     if any(event.get("ev") == "branch.landed" and event.get("branch") == branch
            and "queue_ts" in event for event in events):
@@ -758,7 +764,8 @@ def _queue_branch(branch: str, checkout: Path, *, sh: Runner, log_path: Path | N
         raise ValueError("branch has no tip")
     sh(["git", "push", "origin", f"{tip}:refs/heads/ready/{branch}"],
        cwd=str(checkout), check=True)
-    fields = {"section": section} if section else {}
+    if section:
+        fields["section"] = section
     log.append("branch.ready", path=log_path, task=branch, branch=branch, tip=tip, **fields)
     return False
 
@@ -1096,6 +1103,7 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     if plan.rungs:
         _record_triage(plan, events, log_path=log_path)
         _record_passes(plan, log.read(log_path), directory, sh=sh, log_path=log_path)
+        _ready_backlog(plan, log.read(log_path), checkout, sh=sh, log_path=log_path)
         events = log.read(log_path)
     tasks = _integration_tasks(plan, specs.checked_tasks(plan, tasks, events), events)
     tasks = {**{identifier: task for identifier, task in tasks.items() if task.kind != tier_reds.KIND},
@@ -1126,6 +1134,50 @@ def _tick_loaded(plan: Plan, tasks: Mapping[str, Task], directory: Path, checkou
     _check_calls(plan, directory, checkout, hosts, sh=sh, log_path=log_path)
     _integration(plan, tasks, checkout, hosts, sh=sh, log_path=log_path)
     return released + actions
+
+
+def _backlog_branches(draft: str, events: list[dict]) -> set[str]:
+    """The draft's readied backlog branches (docs/design/fab.md, 13.15)."""
+    form = re.compile(rf"ladder/{re.escape(draft)}/backlog-[1-9][0-9]*")
+    return {event["branch"] for event in events if event.get("ev") == "branch.ready"
+            and isinstance(event.get("branch"), str) and form.fullmatch(event["branch"])}
+
+
+def _ready_backlog(plan: Plan, events: list[dict], checkout: Path, *, sh: Runner,
+                   log_path: Path | None) -> None:
+    """Ready a changed backlog after decisions and passes (docs/design/fab.md, 13.15).
+
+    Pending branches and two rejections of one render wait. Read main through git;
+    missing paths start empty. Failures get a note and retry on a later round.
+    """
+    render = triage.backlog_text(plan, events)
+    key = triage.render_key(render)
+    ready = _backlog_branches(plan.draft, events)
+    finished = {event.get("branch") for event in events
+                if event.get("ev") in ("branch.landed", "branch.rejected")}
+    if ready - finished or triage.backlog_held(plan, events, key) is not None:
+        return
+    path = plan.ladder.backlog
+    branch = f"ladder/{plan.draft}/backlog-{len(ready) + 1}"
+    try:
+        listed = sh(["git", "ls-tree", "--name-only", "origin/main", "--", path],
+                    cwd=str(checkout), check=True)
+        previous = (sh(["git", "show", f"origin/main:{path}"], cwd=str(checkout), check=True).out
+                    if listed.out.strip() else "")
+        if previous == render:
+            return
+        count = sum(finding.draft == plan.draft and finding.state == "backlog"
+                    for finding in findings.findings(events).values())
+        committed = spec_edit.commit_path(
+            path, checkout, lambda previous: render, branch=branch,
+            message=f"ladder {plan.draft}: the backlog from the log ({count} findings)",
+            worktree=log.home() / "backlog" / f"{plan.draft}-{len(ready) + 1}", sh=sh)
+        if committed:
+            _queue_branch(committed, checkout, sh=sh, log_path=log_path, render=key)
+    except (OSError, ValueError, Failed) as error:
+        failure = " ".join(str(error).splitlines())
+        log.append("note", path=log_path, task=branch, text=f"backlog {path} failed: {failure}")
+        print(f"backlog {plan.draft} failed: {failure}")
 
 
 def _record_triage(plan: Plan, events: list[dict], *, log_path: Path | None) -> None:
