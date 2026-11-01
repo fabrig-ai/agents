@@ -13,6 +13,13 @@
   closes older parked asks for forge sync; legacy automatic parks settle when
   their plan next ticks. Tested with temporary homes, fake runners and log
   folds; not run live.
+- **Report-only calls** (2; fab-qa.md 2, plan findings-loop, retired
+  11-01): `fab.calls.start(report_only=True)` detaches a worktree at
+  `origin/<base>`, logs no branch and pushes nothing; `settle` and the
+  `triage` call (`fab call triage --plan PLAN_DIR`, `fab/triage.py`,
+  `fab/roles/triager.md`, effort medium, outside
+  `fab.call_review.REVIEWED`) run so. The tick starts triage when
+  `fab.triage.due` holds and records its decisions from the report.
 
 ## Gaps and departures
 
@@ -20,11 +27,10 @@
   cut's design index names designs the cut reads itself: a departure from
   `execution-modes.md`'s "compiled by code" only for what the budget leaves
   out.
-- **Retire's brief is bounded** (3, 11-01): designed, to be built by plan
-  `docs/plan/paper-cuts`. Until then a retire brief quotes changed designs
-  whole, and one over the limit is started again every tick (trunk-overlaps
-  was retired by hand; findings-loop's, started before the split, would
-  quote ~404k characters).
+- **Retire's brief is bounded** (3, 11-01): on main (38f8e66, plan
+  `docs/plan/paper-cuts`, not yet retired). findings-loop's retire, which
+  would have quoted ~404k characters whole, came to ~194 KB with six
+  designs listed for the call to read.
 - **Claude calls** are made by the tick (skeleton, review, amend, answer);
   the cut still starts by hand.
 - **The review of calls' output is a skeleton:** `fab/call_review.py`

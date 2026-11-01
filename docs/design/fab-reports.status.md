@@ -14,22 +14,22 @@
   custody details stay private. Pure folds and parsers, fake commands and
   fixture log tests cover it. Deployment remains by hand: update the
   serving checkout and install a 30-minute check timer on hel8.
+- **The standing reports** (2): `fab report` (`fab/report.py`) with the
+  code report (`fab/code_report.py`) and the landing report
+  (`fab/landing_report.py`), computed from records alone.
+- **The landing report's QA figures** (2, fab-qa.md 2; plan findings-loop,
+  retired 11-01): walks by verdict, findings raised and merged, triaged by
+  decision, finding repairs landed, rungs passed and the median hours from
+  a failed walk to its rung's next pass, from the log. Tested with fixture
+  logs; `finding_repairs_landed` counts nothing until the repair path lands
+  (fab-qa.status.md).
+- **Accounting** (3): `fab/accounting.py`'s weights and the draft's calls
+  and runs, under every subject of the draft; `fab.calls.Usage` read from
+  claude's stream-json (tokens, peak, turns, cache writes on call.ended);
+  `fab run status` reading the run's tokens for run.ended.
 
 ## Gaps and departures
 
-- **Reports are a skeleton:** `fab/report.py`, `fab/code_report.py` and
-  `fab/landing_report.py` hold section 2's signatures and contracts, filled
-  by the tasks `report-base`, `report-code`, `report-landing` and
-  `report-command`; `fab report` is not a command until the last lands. No
-  timer runs `fab report daily` yet.
-- **Accounting is a skeleton:** `fab/accounting.py` holds 3's weights,
-  the draft's calls and runs and the code report's Claude and Codex
-  figures; `fab.calls.Usage` and `claude_usage` the reading of claude's
-  stream, and `fab.codex.tokens_field` the run's tokens. The task
-  `accounting` fills them, switches calls to claude's stream-json output,
-  makes `fab run status` read the run's result and adds the figures and the
-  Calls table to the code report. Until it lands, run.ended carries no
-  tokens, call.ended no peak, turns or cache writes, and no weight is shown.
-  A call's subject draws its calls into the report only when it is the draft
-  or one of its parts; the task widens that to every subject under the
-  draft (review, cut, retire, decision).
+- **No unit in this repository runs `fab report daily`;** a timer, if one
+  runs, was installed by hand.
+

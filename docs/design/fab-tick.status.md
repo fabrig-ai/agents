@@ -16,6 +16,12 @@
   Services still move and restart only with `bin/install.sh`.
 - **The dispatcher:** `fab tick PLAN_DIR` collects, lands, starts and parks;
   run by hand, live since 20:27Z.
+- **A ladder plan in the tick** (fab-qa.md 2; plan findings-loop, retired
+  11-01): `[ladder]` and `[[rung]]` in plan.toml and `triage` reserved (1);
+  each round a plan with rungs records ended triage calls' decisions, then
+  `rung.passed`, then readies its backlog branch, before `decide`, and
+  starts the triage call when due; `fab qa result` wakes the tick
+  (`qa <walk>`). Tested with fake runners and fixture logs.
 
 ## Gaps and departures
 

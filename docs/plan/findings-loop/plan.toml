@@ -1,4 +1,5 @@
 landing = "queue"
+retired = true
 
 # The thin cut of findings-loop: the first build of QA findings in fab
 # (docs/design/fab.md, 13.15, "Built in this order", "Now, independent"), on

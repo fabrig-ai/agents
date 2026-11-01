@@ -26,6 +26,12 @@
 - **Landing this repository:** `bin/fab land`, live since 20:22Z; every
   change to `fab/` since then landed through it.
 - **fabrig's landing:** `fab gate`, `fab queue`, `fab precheck` on main.
+- **A ladder's backlog branch is fab's** (3, fab-qa.md 2; plan
+  findings-loop, retired 11-01): `ladder/` joins the branch forms kept out
+  of `queue.*`, and `_import_queue` maps each readied
+  `ladder/<draft>/backlog-<n>` to its draft, so its `landed` and `rejected`
+  come home as `branch.landed` and `branch.rejected` with task the branch
+  and advance the cursor. Tested with fixture queue records.
 
 ## Gaps and departures
 

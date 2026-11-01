@@ -451,7 +451,7 @@ session still walks by hand; walks run by fab are the section's last part.
     for the rest.
 - **Built in this order; what waits for red-routing** (fab-after-landing.md 2's code:
   `fab/tier_reds.py` and the page's red and fault signals are on main,
-  21e391c; its wiring into the tick is being built, 11-01):
+  21e391c; its wiring into the tick followed, 11-01):
   - **Now, independent of red-routing's wiring:** the plan's `[[rung]]` and
     `[ladder]` (`fab/plan.py`); the findings' and rungs' fold
     (`fab/findings.py`); `fab qa`, `qa.lock` and the intake (`fab/walks.py`,
@@ -462,7 +462,7 @@ session still walks by hand; walks run by fab are the section's last part.
     branch form and the import's owners); the tick's triage steps (the call
     started when due, its decisions recorded, the backlog readied,
     `rung.passed`) in `fab/dispatch.py`, rebased on red-routing's
-    `_tick_plan` wiring if that lands first; the page's `finding` asks, `finding-<n>` signal and
+    `_tick_plan` wiring if that lands first; the page's `finding` asks, `backlog:<draft>` signal and
     `## The ladder` (`fab/channel.py`); the landing report's QA figures
     (fab-reports.md 2). With these alone, findings enter, are triaged, the backlog lands,
     questions reach the page and rungs show their state; an on-path finding
@@ -472,7 +472,9 @@ session still walks by hand; walks run by fab are the section's last part.
     answer call seeing red tasks): `fab/fix.py` factored out of
     `fab/tier_reds.py`, then `fab/fixes.py` and
     `fab/roles/foreman-finding.md`, `finding_actions` and the
-    `examine-fix`/`remedy-fix` pair in `fab/dispatch.py`: the repair path.
+    `examine-fix`/`remedy-fix` pair in `fab/dispatch.py`, and the page's
+    `finding-<n>` signal, which opens at `finding.settled` left: the repair
+    path.
   - **Last, separable:** walks run by fab.
 
 ## 3. Later
