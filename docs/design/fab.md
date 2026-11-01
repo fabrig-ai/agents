@@ -1389,6 +1389,42 @@ login that still works reused across them before more are signed in.
   login, as it does places), and checks of `chatgpt` records, which only a
   temper box can read: their live runs show whether they work.
 
+### 13.14 The status page
+
+- **Public counts from the log.** `fab serve [--port 8370] [--bind 127.0.0.1]`
+  serves one HTML page at `/`, its JSON snapshot at `/api/status` and `ok` at
+  `/healthz`. GET only; other methods return 405, other paths 404, and query
+  strings are ignored. It prints its bound address, including a port chosen
+  by `--port 0`.
+- **Pure core, read-only shell.** `fab.serve.snapshot(events, now, hosts)`
+  computes counts; `render(snapshot)` returns escaped HTML. Each request
+  reads `FAB_HOME/log.jsonl` through `fab.log.read` and host names through
+  `fab.hosts.load`. No lock, writes, cache, ssh or plan files. An unreadable
+  log still returns 200, with `log: "unreadable"` and no figures; failures
+  show fixed classifications, never exception text.
+- **Now and waiting.** The last event's age; runs and calls started within
+  24 hours without a matching end, by host and role. A task's latest
+  `question.asked` waits until a later `question.answered` names that task;
+  a subject's latest `call.parked` waits until `call.answered` names it.
+  Waiting counts include the oldest open item's age, without a 24-hour cut.
+- **Today is UTC.** Landings in the last hour and since midnight, rejected
+  branches and ended runs by done, question, infra, failed or other.
+  `fab.accounting.run_weight` and `call_weight` sum today's measured endings
+  in millions, to one decimal; missing weights are skipped. Drafts with a
+  run in flight or a landing today show those two counts. Invalid timestamps
+  and future events are skipped; today ends at the snapshot's time.
+- **Only public labels leave the fold.** Known host names, call roles from
+  `fab.calls.ROLES` (others become `other`), and draft names matching
+  `[a-z0-9][a-z0-9.-]{0,63}` (others become `other`). A draft is the task up
+  to its first `/`; a task without `/` becomes `other`. No task, run, call
+  or login ids, branches, shas, paths,
+  question or answer text, notes, reports or holders in HTML or JSON.
+- **One plain document.** Title `fab status`, inline CSS, no JavaScript,
+  refresh every 30 seconds, phone width and light and dark colours. Now,
+  Waiting on the user, Today and Drafts; ages in seconds, minutes or hours.
+- **Deployment is by hand at the user's OK:** a transient unit on hel8 and
+  Caddy's `status.fabrig.ai` moved to `reverse_proxy 127.0.0.1:8370`.
+
 ## 14. Later
 
 - (The self-critique is 13.1's, part `critique`, not later.)
@@ -1442,7 +1478,7 @@ login that still works reused across them before more are signed in.
   designs outside `docs/design/fab*`, once calls land through tools/land or
   fabrig's queue.
 - The user's page published where the user reads it without hel8 (the
-  status page, a doc), once the user says where; a notification when a
+  status page in 13.14, a doc), once the user says where; a notification when a
   question joins it.
 - A plan's question answered by `fab page answer`, writing plan.toml and
   landing it as the foreman lands its answers.
