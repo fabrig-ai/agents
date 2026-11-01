@@ -64,3 +64,15 @@ Tests in `fab/tests/test_dispatch.py` and `fab/tests/test_spec_edit.py`
 ## Report
 
 The step, the import's change, and `commit_path`'s argvs.
+
+## Repair (2026-11-01, step gate:size, foreman findings-loop/backlog-branch/foreman-1)
+
+Extract queue-record classification from `_import_queue` to meet the 60-line cap.
+`gate:size` reports `fab/dispatch.py:468`: `_import_queue` is 79 lines (cap 60).
+In `fab/dispatch.py`, extract the per-entry classification and field construction into a private helper, from branch validation through the owned/unowned fields.
+Return the event kind and fields, or None for skipped records; keep cursor selection, fetching, deduplication and appending in `_import_queue`.
+Keep both functions within the size cap without compressing statements.
+Preserve docs/design/fab.md §13.15: readied backlog branches belong to their draft, import with task equal to the branch, and landed records retain `into=""`.
+Preserve §13.8 filtering, collateral handling, string-only test names and deduplication.
+Keep this a behavior-preserving refactor within `fab/dispatch.py`; retain the existing queue-import and backlog tests in `fab/tests/test_dispatch.py`.
+Run `python3 -B -m fab.testrun` and the size gate before handing back the branch.
