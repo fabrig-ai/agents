@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 from fab import gate, log, queue, receipts, reds, wake
 from fab.sh import Failed, Result, run
-from fab.tests.landing_checks import MAIN, TIP, FakeNextest, alone, kept, receipt, receipt_text
+from fab.tests.landing_checks import MAIN, TIP, FakeNextest, alone, junit_xml, kept, receipt, receipt_text
 from fab.tests.support import FakeRunner, GIT_ENV, git, git_pair, tmp_home
 
 
@@ -754,10 +754,121 @@ class ShellTest(unittest.TestCase):
                     self.assertEqual(batch['sweep_error'], 'sweep refused')
                     self.assertNotIn('freed', batch)
 
+    def test_retirement_source_refusal_leaves_green_landing_tried(self):
+        branch = queue.Branch('ops/hand', TIP, 0)
+        for reason in ('[rejected] (stale info)', '[remote rejected] (protected branch)'):
+            with self.subTest(reason=reason):
+                output = (f'To /remote\n-\t:refs/heads/ready/{branch.name}\t[deleted]\n'
+                          f'!\t:refs/heads/{branch.name}\t{reason}\nDone\n')
+                fake = FakeRunner().on(['git', 'rev-parse', '--verify'], Result(0, TIP + '\n')).on(
+                    ['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+                    ['git', 'push', '--porcelain'], Result(1, output, 'failed to push some refs'))
+                q = queue.Queue(self.home / 'clone', sh=fake)
+                with patch('fab.queue.build_batch', return_value=([branch], [])), \
+                        patch('fab.gate.changed_paths', return_value=['README.md']), \
+                        patch('fab.gate.check_steps', return_value=[]):
+                    self.assertTrue(q.attempt([branch]))
+                landed, batch = log.read(q.log_path)[-2:]
+                self.assertEqual((landed['ev'], landed['branch'], landed['tip']),
+                                 ('landed', branch.name, branch.tip))
+                self.assertEqual(batch['outcome'], 'green')
+                self.assertNotIn('error', batch)
+                self.assertEqual(q.state['tried'], {branch.name: branch.tip})
+                self.assertEqual(Path(batch['log']).read_text().splitlines(),
+                                 [f'left {branch.name}: {reason}'])
+                push, = [argv for argv in fake.argvs() if argv[:3] == ['git', 'push', '--porcelain']]
+                self.assertEqual(push, ['git', 'push', '--porcelain',
+                    f'--force-with-lease=refs/heads/ready/{branch.name}:{TIP}',
+                    f'--force-with-lease=refs/heads/{branch.name}:{TIP}', 'origin',
+                    f':refs/heads/ready/{branch.name}', f':refs/heads/{branch.name}'])
+                self.assertFalse(any(argv[:2] == ['git', 'ls-remote'] for argv in fake.argvs()))
+
+    def test_retirement_ready_refusals_only_leave_remaining_tips_untried(self):
+        branches = [queue.Branch('draft/' + name, name, 0) for name in 'abc']
+        reason = '[remote rejected] (deletion prohibited)'
+        output = ''.join(f'!\t:refs/heads/ready/{branch.name}\t{reason}\n' for branch in branches[:2])
+        output += f'-\t:refs/heads/ready/{branches[2].name}\t[deleted]\n'
+        fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+            ['git', 'push', '--porcelain'], Result(1, output)).on(
+            ['git', 'ls-remote'], lambda call: Result(0, next(
+                f'{branch.tip}\trefs/heads/ready/{branch.name}\n'
+                for branch in branches if call.argv[-1] == 'refs/heads/ready/' + branch.name)))
+        q = queue.Queue(self.home / 'clone', sh=fake)
+        with patch('fab.queue.build_batch', return_value=([], [])):
+            self.assertTrue(q.attempt(branches))
+        records = log.read(q.log_path)
+        self.assertEqual([entry['branch'] for entry in records if entry['ev'] == 'landed'],
+                         [branch.name for branch in branches])
+        batch = records[-1]
+        self.assertEqual(batch['outcome'], 'error')
+        self.assertEqual(batch['error'], '; '.join(
+            f'cleanup: ready/{branch.name} {reason}' for branch in branches[:2]))
+        self.assertEqual(q.state['tried'], {branches[2].name: branches[2].tip})
+        self.assertEqual([argv for argv in fake.argvs() if argv[:2] == ['git', 'ls-remote']],
+                         [['git', 'ls-remote', 'origin', 'refs/heads/ready/' + branch.name]
+                          for branch in branches[:2]])
+
+    def test_retirement_ready_refused_or_unreported_but_gone_or_moved_is_green(self):
+        branch = queue.Branch('draft/task', TIP, 0)
+        ref = 'refs/heads/ready/' + branch.name
+        for output in (f'!\t:{ref}\t[rejected] (stale info)\n', '', 'stray line\n'):
+            for remote in ('', MAIN + '\t' + ref + '\n'):
+                with self.subTest(output=output, remote=remote):
+                    fake = FakeRunner().on(['git', 'rev-parse'], Result(0, MAIN + '\n')).on(
+                        ['git', 'push'], Result(1, output)).on(['git', 'ls-remote'], Result(0, remote))
+                    q = queue.Queue(self.home / 'clone', sh=fake)
+                    with patch('fab.queue.build_batch', return_value=([], [])):
+                        self.assertTrue(q.attempt([branch]))
+                    landed, batch = log.read(q.log_path)[-2:]
+                    self.assertEqual((landed['ev'], landed['branch']), ('landed', branch.name))
+                    self.assertEqual(batch['outcome'], 'green')
+                    self.assertEqual(q.state['tried'], {branch.name: branch.tip})
+                    self.assertIn(['git', 'ls-remote', 'origin', ref], fake.argvs())
+
+    def test_test_step_rejection_carries_derived_failed_tests(self):
+        branch = queue.Branch('draft/task', TIP, 0)
+        cases = [('pkg::wire', 'round_trip', 'fail'), ('pkg', 'unit', 'pass'),
+                 ('pkg', 'slow', 'starved'), ('pkg', 'cancelled', 'skipped')]
+        for profile in reds.STEPS:
+            with self.subTest(profile=profile):
+                fake = FakeNextest({None: cases}, fallback=FakeRunner().on(
+                    ['git', 'rev-parse'], Result(0, MAIN + '\n')))
+                q = queue.Queue(self.home / 'clone', home=self.home / profile, sh=fake)
+                write(q.repo / '.config/nextest.toml', '[profile.fuzzy]\n')
+                # The tip's collateral bound must not suppress the rejection's test names.
+                q.state['collateral'][branch.name] = {'tip': TIP, 'count': reds.LIMIT}
+                with patch('fab.queue.build_batch', return_value=([branch], [])), \
+                        patch('fab.gate.changed_paths', return_value=['Cargo.toml']), \
+                        patch('fab.gate.check_steps', return_value=[gate.Step(
+                            profile, ('heavy', '--gate', 'cargo', 'nextest', 'run', '--profile', profile),
+                            str(q.repo))]):
+                    self.assertFalse(q.attempt([branch]))
+                rejected, batch = log.read(q.log_path)
+                self.assertEqual((rejected['ev'], rejected['step'], rejected['tests']),
+                                 ('rejected', profile, ['pkg::wire round_trip']))
+                self.assertEqual(rejected['log'], batch['log'])
+                self.assertTrue((Path(batch['log']).with_suffix('') / profile / 'gate-junit.xml').exists())
+
+    def test_merge_rejection_has_no_tests_even_beside_a_failed_test_report(self):
+        branch = queue.Branch('draft/task', TIP, 0)
+        q = queue.Queue(self.home / 'clone', sh=FakeRunner())
+
+        def build(repo, branches, base, *, sh):
+            detail, = (q.home / 'queue').glob('*.log')
+            write(detail.with_suffix('') / 'default/gate-junit.xml',
+                  junit_xml([('pkg', 'unit', 'fail')]))
+            return [], [(branch, 'conflict')]
+
+        with patch('fab.queue.build_batch', side_effect=build):
+            self.assertTrue(q.attempt([branch]))
+        rejected, batch = log.read(q.log_path)
+        self.assertEqual((rejected['step'], rejected['tests'], batch['outcome']), ('merge', [], 'conflict'))
+
     def test_failed_cleanup_keeps_contained_tip_eligible_for_retry(self):
         branch = queue.Branch('draft/task', 'tip', 0)
         fake = FakeRunner().on(['git', 'rev-parse'], Result(0, 'parent\n')).on(
-            ['git', 'push'], Result(1, err='remote unavailable'))
+            ['git', 'push'], Result(1, err='remote unavailable')).on(
+                ['git', 'ls-remote'], Result(0, f'{branch.tip}\trefs/heads/ready/{branch.name}\n'))
         q = queue.Queue(self.home / 'clone', sh=fake)
         with patch('fab.queue.build_batch', return_value=([], [])):
             self.assertTrue(q.attempt([branch]))
@@ -854,7 +965,7 @@ class QueueWakeTest(unittest.TestCase):
             if len(group) == 2:
                 return False
             if group == [a]:
-                self.q._retire(group, 'main')
+                self.q._retire(group, 'main', self.home / 'checks.log')
                 return True
             self.q._reject(b, 'test', self.home / 'checks.log')
             return False
@@ -879,7 +990,7 @@ class QueueWakeTest(unittest.TestCase):
         q = queue.Queue(self.home / 'clone', sh=FakeRunner())
 
         def attempt(group):
-            q._retire(group[:1], 'main')
+            q._retire(group[:1], 'main', self.home / 'checks.log')
             q._reject(group[1], 'test', self.home / 'checks.log')
             return True
 

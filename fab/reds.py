@@ -75,6 +75,18 @@ def with_junit(steps: Sequence[Step], repo: Path, directory: Path,
     return result, reports
 
 
+def failed_tests(report: Path, step: str) -> list[str]:
+    """The first 20 failed tests in JUnit order, as "<binary> <test>". An unreadable report
+    or a step outside STEPS gives []; starved, skipped and passing cases are excluded."""
+    if step not in STEPS:
+        return []
+    try:
+        return [f"{case.binary} {case.test}" for case in nextest.junit(report, step)
+                if case.result == "fail"][:20]
+    except (OSError, ValueError):
+        return []
+
+
 def suspect(case: Case, step: str, receipts: Sequence[dict | None]) -> bool:
     """Whether a test that failed at step may have failed for the batch's load rather than its
     code: receipts, one per branch of the batch, is not empty and fab.receipts.covers(receipt,

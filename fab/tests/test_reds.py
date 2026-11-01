@@ -133,6 +133,33 @@ class RedsTest(ChecksTestCase):
         self.assertFalse(self.report.exists())
         self.assertFalse(self.report.with_suffix(".toml").exists())
 
+    def test_failed_tests_keeps_only_failures_in_junit_order_up_to_twenty(self):
+        cases = [('pkg', 'passed', 'pass'), ('pkg', 'slow', 'starved'),
+                 ('pkg', 'cancelled', 'skipped')]
+        cases += [('pkg', f'failed_{n}', 'fail') for n in range(25)]
+        atomic.write(self.report, junit_xml(cases))
+        for step in reds.STEPS:
+            with self.subTest(step=step):
+                self.assertEqual(reds.failed_tests(self.report, step),
+                                 [f'pkg failed_{n}' for n in range(20)])
+        atomic.write(self.report, junit_xml(cases[:3]))
+        self.assertEqual(reds.failed_tests(self.report, 'default'), [])
+
+    def test_failed_tests_does_not_read_other_steps(self):
+        with patch('fab.reds.nextest.junit', side_effect=AssertionError('JUnit read')):
+            self.assertEqual(reds.failed_tests(self.report, 'merge'), [])
+            self.assertEqual(reds.failed_tests(self.report, 'fmt'), [])
+
+    def test_failed_tests_unreadable_report_is_empty(self):
+        self.assertEqual(reds.failed_tests(self.report, 'default'), [])
+        for content in ('<torn', '<testsuite/>', '<testsuites><testsuite/></testsuites>',
+                        '<testsuites tests="1"/>'):
+            with self.subTest(content=content):
+                atomic.write(self.report, content)
+                self.assertEqual(reds.failed_tests(self.report, 'default'), [])
+        with patch('fab.reds.nextest.junit', side_effect=PermissionError('unreadable')):
+            self.assertEqual(reds.failed_tests(self.report, 'fuzzy'), [])
+
     def test_suspect_requires_every_branch_to_cover_the_case(self):
         self.assertTrue(reds.suspect(self.case, "default", [receipt(), receipt(selection="full")]))
         for values in ([], [None], [receipt(), receipt(selection=("other",))],

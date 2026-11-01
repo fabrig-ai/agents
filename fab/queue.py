@@ -158,19 +158,23 @@ class Queue:
         atomic.write(self.state_path, json.dumps(self.state) + "\n")
 
     def _reject(self, branch: Branch, step: str, detail: Path) -> None:
-        """Record a rejection and note it for the cycle's wake."""
+        """Record a rejection with up to 20 failures from the test step's derived JUnit,
+        or [] when unreadable or not a test step; note it for the cycle's wake."""
+        tests = reds.failed_tests(detail.with_suffix("") / step / "gate-junit.xml", step)
         self.state["tried"][branch.name] = branch.tip
         self.state["collateral"].pop(branch.name, None)
         log.append("rejected", path=self.log_path, branch=branch.name, tip=branch.tip,
-                   step=step, log=str(detail))
+                   step=step, tests=tests, log=str(detail))
         self._wake_notes.append(f"rejected {branch.name}")
 
-    def _retire(self, branches: Sequence[Branch], main: str) -> str | None:
+    def _retire(self, branches: Sequence[Branch], main: str, detail: Path) -> str | None:
         """Retire pinned refs, recording each landing and noting it for the cycle's wake.
 
         Each ready/<name> is deleted with a lease on its tip, and <name> too when the fetched
         refs/remotes/origin/<name> is that tip: a branch readied by hand may have no <name>,
-        or one that has moved on, and either is left alone."""
+        or one that has moved on, and either is left alone. A refused source delete is logged
+        in detail and left alone. Refused or unreported ready deletes are read back; only a
+        ready ref still at the landed tip is a cleanup error and leaves that tip untried."""
         if not branches:
             return
         refs = []
@@ -181,15 +185,35 @@ class Queue:
             if source.ok and source.out.strip() == branch.tip:
                 refs.append(("refs/heads/" + branch.name, branch.tip))
         # Without --atomic, an updated head does not prevent retiring the other pinned refs.
-        result = self._git("push", *(f"--force-with-lease={ref}:{tip}" for ref, tip in refs),
+        result = self._git("push", "--porcelain",
+                           *(f"--force-with-lease={ref}:{tip}" for ref, tip in refs),
                            "origin", *(":" + ref for ref, _ in refs), check=False)
+        statuses = {}
+        for line in result.out.splitlines():
+            fields = line.split("\t", 2)
+            if len(fields) == 3 and fields[0] in ("-", "!"):
+                ref = fields[1].partition(":")[2]
+                statuses[ref] = (fields[0], fields[2].strip())
+        errors = []
         for branch in branches:
+            source_ref = "refs/heads/" + branch.name
+            if source_ref in statuses and statuses[source_ref][0] == "!":
+                atomic.extend(detail, f"left {branch.name}: {statuses[source_ref][1]}\n")
+            ready_ref = "refs/heads/ready/" + branch.name
+            status, reason = statuses.get(ready_ref, ("", result.err.strip() or "delete not reported"))
+            remaining = False
+            if status != "-":
+                remote = self._git("ls-remote", "origin", ready_ref)
+                remaining = any(line.split() == [branch.tip, ready_ref]
+                                for line in remote.out.splitlines())
             self.state["collateral"].pop(branch.name, None)
-            if result.ok:
+            if remaining:
+                errors.append(f"cleanup: ready/{branch.name} {reason}")
+            else:
                 self.state["tried"][branch.name] = branch.tip
             log.append("landed", path=self.log_path, branch=branch.name, tip=branch.tip, main=main)
             self._wake_notes.append(f"landed {branch.name}")
-        return None if result.ok else f"cleanup: {result.out}{result.err}"
+        return "; ".join(errors) or None
 
     def attempt(self, branches: Sequence[Branch]) -> bool:
         """Check branches as one batch on origin/main and land it when green; return green.
@@ -205,7 +229,7 @@ class Queue:
         error, not a red: nothing is rejected or marked tried, and the batch goes again.
         Records: `batch` (branches, parent, selection, steps as "name:code:seconds", outcome
         green, red, conflict or error, log), `landed` (branch, tip, main), `rejected` (branch,
-        tip, step, log). The checkout is left clean and detached.
+        tip, step, tests, log). The checkout is left clean and detached.
 
         A receipt (docs/design/fab.md, 13.8): when exactly one branch merged, the batch is not a
         full one (not forced, and batches_since_full + 1 < full_every) and
@@ -294,7 +318,7 @@ class Queue:
         cleanup_error = None
         if green:
             main = self._git("rev-parse", "origin/main").out.strip()
-            cleanup_error = self._retire([*merged, *reachable], main)
+            cleanup_error = self._retire([*merged, *reachable], main, detail)
         elif len(merged) == 1 and record["outcome"] != "collateral":
             failed = next(step.name for step in outcomes if not step.green)
             self._reject(merged[0], failed, detail)
