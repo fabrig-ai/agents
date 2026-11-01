@@ -926,6 +926,31 @@ class CallActionsTest(unittest.TestCase):
         self.assertEqual(self.actions([self.call("skeleton"), *landed]),
                          [Action("call", task="draft/review", run_kind="review")])
 
+    def test_brief_park_blocks_only_its_subject_until_answer_or_start(self):
+        park = dict(ev="call.parked", subject="draft/core", role="skeleton", call="",
+                    reason="brief failed: oversized", report="", ts=self.now)
+        expected = [Action("call", task="core", run_kind="skeleton")]
+        self.assertEqual(self.actions([], ["core"]), expected)
+        self.assertEqual(self.actions([park], ["core"]), [])
+        for subject in ("other/core", "draft/next"):
+            self.assertEqual(self.actions([dict(park, subject=subject)], ["core"]), expected)
+        self.assertEqual(dispatch._parked_subjects([dict(park, call="chain")]), set())
+        answered = dict(ev=channel.ANSWERED, subject="draft/core")
+        self.assertEqual(self.actions([park, answered], ["core"]), expected)
+        started = call_started("retry", "skeleton", "draft/core", ts=self.now)
+        self.assertEqual(dispatch._parked_subjects([park, started]), set())
+        ended = call_ended("retry", "failed", subject="draft/core", role="skeleton")
+        self.assertEqual(self.actions([park, started, ended], ["core"]), expected)
+
+    def test_call_argv_ends_in_tick_for_each_role(self):
+        directory = log.home().parent / "plan"
+        for role in calls.ROLES:
+            sh = FakeRunner()
+            with self.subTest(role=role):
+                dispatch._call(Action("call", task="core", run_kind=role), directory, "draft", sh=sh)
+                argv, = sh.argvs()
+                self.assertEqual(argv[-3:], ["--plan", str(directory.resolve()), "--tick"])
+
     def test_review_question_parks_subject_until_matching_answer(self):
         asked = [dict(self.call("review", "r1"), ts="2026-10-30T12:00:00.000Z", subject="draft/review"),
                  dict(ev="call.ended", call="r1", role="review", subject="draft/review",
@@ -1248,6 +1273,21 @@ class LadderTickTest(unittest.TestCase):
         brief = (log.home() / "runs/ladder/red-1/foreman-1/brief.md").read_text()
         self.assertIn("# Repair a QA finding (finding-1)", brief)
 
+    def test_brief_park_blocks_triage_until_answer_or_later_start(self):
+        self.add_walk()
+        park = dict(ev="call.parked", subject="ladder/triage", call="", role="triage",
+                    reason="brief failed: oversized", report="", ts="2026-11-01T00:01:00.000Z")
+        events = log.read()
+        actions = lambda records: dispatch.call_actions(self.plan, {}, records, [], "2026-11-01T01:00:00.000Z")
+        self.assertTrue(any(action.run_kind == "triage" for action in actions(events)))
+        self.assertFalse(any(action.run_kind == "triage" for action in actions(events + [park])))
+        answered = dict(ev=channel.ANSWERED, subject="ladder/triage")
+        started = call_started("retry", "triage", "ladder/triage", ts="2026-11-01T00:02:00.000Z")
+        ended = call_ended("retry", "failed", role="triage", subject="ladder/triage",
+                           ts="2026-11-01T00:03:00.000Z")
+        for lifted in ([answered], [started, ended]):
+            self.assertTrue(any(action.run_kind == "triage" for action in actions(events + [park, *lifted])))
+
     def test_failed_walk_starts_one_triage_call_with_subject_unit_and_plan(self):
         self.add_walk()
         actions = self.tick()
@@ -1258,7 +1298,7 @@ class LadderTickTest(unittest.TestCase):
                            drafts.unit("triage", "ladder/triage"),
                            f"--setenv=FAB_HOME={log.home()}",
                            FAB, "call", "triage",
-                           "--plan", str(self.directory.resolve())]])
+                           "--plan", str(self.directory.resolve()), "--tick"]])
 
     def test_passing_walk_waits_until_thirty_minutes(self):
         self.add_walk(verdict="pass")
@@ -1894,7 +1934,7 @@ parts = []
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("skeleton", "draft/next"),
                           f"--setenv=FAB_HOME={log.home()}",
-                          FAB, "call", "skeleton", "next", "--plan", str(self.directory)])
+                          FAB, "call", "skeleton", "next", "--plan", str(self.directory), "--tick"])
         self.assertEqual(self.calls, [])
         self.assertEqual(self.out.getvalue(), "flow draft target 2, 0 in flight\ndesign - next\ncall next \n"
                          + f"page - {log.home() / channel.PAGE}\n")
@@ -1909,7 +1949,7 @@ parts = []
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("answer", "draft"),
                           f"--setenv=FAB_HOME={replay_home}", FAB, "call", "answer",
-                          "--plan", str(self.directory)])
+                          "--plan", str(self.directory), "--tick"])
 
     def test_direct_part_without_specs_starts_no_design_call(self):
         path = self.directory / "plan.toml"
@@ -1934,7 +1974,7 @@ parts = []
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("contract", "draft/core"),
                           f"--setenv=FAB_HOME={log.home()}",
-                          FAB, "call", "contract", "core", "--plan", str(self.directory)])
+                          FAB, "call", "contract", "core", "--plan", str(self.directory), "--tick"])
         self.assertEqual(self.calls, [])
 
     def test_retire_unit_takes_no_part_and_uses_subject(self):
@@ -1946,7 +1986,7 @@ parts = []
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("retire", "draft/retire"),
                           f"--setenv=FAB_HOME={log.home()}",
-                          FAB, "call", "retire", "--plan", str(self.directory)])
+                          FAB, "call", "retire", "--plan", str(self.directory), "--tick"])
         self.assertEqual(self.calls, [])
 
     def test_uncut_plan_moves_its_cut_chain_after_fetch_with_no_tasks(self):
@@ -2056,7 +2096,7 @@ parts = []
         self.assertEqual(self.fake.argvs()[-1],
                          ["systemd-run", "--user", "--collect", "--unit", drafts.unit("answer", "draft"),
                           f"--setenv=FAB_HOME={log.home()}",
-                          FAB, "call", "answer", "--plan", str(self.directory)])
+                          FAB, "call", "answer", "--plan", str(self.directory), "--tick"])
         self.assertEqual(len([e for e in log.read() if e["ev"] == "call.started"]), 2)
 
     def test_call_decisions_see_questions_written_by_collect(self):
@@ -2065,8 +2105,8 @@ parts = []
             event("question.asked", ts="2000-01-01T00:00:00Z", text="Which?"))
         actions = self.tick()
         self.assertEqual([a.kind for a in actions], ["collect", "call"])
-        self.assertEqual(self.fake.argvs()[-1][-5:],
-                         [FAB, "call", "answer", "--plan", str(self.directory)])
+        self.assertEqual(self.fake.argvs()[-1][-6:],
+                         [FAB, "call", "answer", "--plan", str(self.directory), "--tick"])
 
     def test_vet_selects_freest_builder_then_name_even_with_no_free_places(self):
         self.append(event("question.asked", text="Which?"))
@@ -2275,7 +2315,7 @@ parts = []
         with patch.object(foreman, "start") as start, patch.object(log, "now", return_value=now):
             self.assertEqual([action.kind for action in self.tick()], ["collect", "call"])
         start.assert_not_called()
-        self.assertEqual(self.fake.argvs()[-1][-5:], [FAB, "call", "answer", "--plan", str(self.directory)])
+        self.assertEqual(self.fake.argvs()[-1][-6:], [FAB, "call", "answer", "--plan", str(self.directory), "--tick"])
 
     def test_foreman_actions_recompute_questions_before_acting(self):
         for status in ("foreman", "settled"):
@@ -2345,7 +2385,7 @@ parts = []
         self.assertEqual(self.tick(log_path=path), [Action("call", task="root", run_kind="settle")])
         self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("settle", "root/settle"),
                        f"--setenv=FAB_HOME={log.home()}",
-                       FAB, "call", "settle", "root", "--plan", str(self.directory)], self.fake.argvs())
+                       FAB, "call", "settle", "root", "--plan", str(self.directory), "--tick"], self.fake.argvs())
         self.append(dict(ev="call.started", call="settle-1", role="settle", subject="draft/core/settle",
                          settles="root"), path=path)
         self.assertEqual(self.tick(log_path=path), [])
@@ -2481,7 +2521,7 @@ parts = []
         self.assertEqual(self.tick(), [Action("call", task="root", run_kind="amend")])
         self.assertIn(["systemd-run", "--user", "--collect", "--unit", drafts.unit("amend", "root"),
                        f"--setenv=FAB_HOME={log.home()}",
-                       FAB, "call", "amend", "root", "--plan", str(self.directory)], self.fake.argvs())
+                       FAB, "call", "amend", "root", "--plan", str(self.directory), "--tick"], self.fake.argvs())
         self.land.assert_not_called()
 
     def test_finish_answer_uses_latest_call_line_then_root_fallback(self):
@@ -6023,7 +6063,7 @@ class IntegrationCheckTickTest(unittest.TestCase):
         self.assertEqual([action for action in actions if action.kind == "call"],
                          [Action("call", task="draft", run_kind="answer")])
         self.assertTrue(any(argv[:2] == ["systemd-run", "--user"]
-                            and argv[-4:-2] == ["call", "answer"] for argv in self.fake.argvs()))
+                            and argv[-5:-3] == ["call", "answer"] for argv in self.fake.argvs()))
         self.assertEqual([entry["task"] for entry in log.read(self.path) if entry["ev"] == "question.asked"],
                          ["draft/integration"])
 
@@ -6607,7 +6647,7 @@ class FindingAnswerDispatchTest(unittest.TestCase):
                          [Action("call", task="ladder", run_kind="answer")])
         launched = [argv for argv in self.fake.argvs() if argv[:1] == ["systemd-run"] and "answer" in argv]
         self.assertEqual(len(launched), 1)
-        self.assertEqual(launched[0][-4:], ["call", "answer", "--plan", str(self.directory.resolve())])
+        self.assertEqual(launched[0][-5:], ["call", "answer", "--plan", str(self.directory.resolve()), "--tick"])
         output = io.StringIO()
         with patch.object(calls, "run", self.fake), redirect_stdout(output):
             self.assertEqual(calls.main(["answer", "--plan", str(self.directory), "--brief-only"]), 0)

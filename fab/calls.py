@@ -44,6 +44,20 @@ BRIEF_LIMIT = 200_000  # characters, about 50k tokens: what code puts in; the ca
 TIMEOUT = 60 * 60  # seconds; 40 minutes until the playground replay's cut ran out with its designers in flight (the user, 10-31)
 
 
+class BriefError(ValueError):
+    """A brief builder could not compile its text after the call's preconditions held."""
+
+
+def park(role: str, subject: str, error: Exception, *, call: str = "",
+         log_path: Path | None = None) -> None:
+    """Log a failed brief's park and wake the tick so the user's page shows its reason."""
+    lines = str(error).splitlines()
+    reason = "brief failed: " + (lines[0] if lines else "")
+    log.append("call.parked", path=log_path, subject=subject, role=role,
+               reason=reason, report="", call=call)
+    wake.want(f"park {subject}", path=wake.want_path(log_path))
+
+
 @dataclass(frozen=True)
 class Usage:
     """A call's Claude usage, as claude_usage reads it from claude's stream and call.ended
@@ -651,6 +665,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
             command.add_argument("part" if role == "skeleton" else "root")
         command.add_argument("--plan", type=Path, required=True)
         command.add_argument("--brief-only", action="store_true")
+        command.add_argument("--tick", action="store_true")
     return parser.parse_args(argv)
 
 
@@ -679,14 +694,20 @@ def _chain_call(role: str, root: str, repo: Path, events: list[dict],
         designs = ()
         if chain.role == "retire" and chain.refusals and call_review.land_refusal(chain.refusals[-1]):
             designs = _retire_designs(repo, draft, plan_path, chain.branch)
-        return (call_review.amend_brief(chain, designs=designs, **facts), chain.subject,
-                dict(branch=chain.branch, amends=chain.root))
+        try:
+            text = call_review.amend_brief(chain, designs=designs, **facts)
+        except (ValueError, OSError) as error:
+            raise BriefError(str(error)) from error
+        return text, chain.subject, dict(branch=chain.branch, amends=chain.root)
     attempts = call_review.settle_calls(chain, events) if chain else []
     recorded = {event.get("settle") for event in events if event.get("ev") == "chain.settled"}
     if (chain is None or chain.state != "hold" or len(attempts) >= 2
             or (attempts and attempts[-1] not in recorded)):
         raise ValueError(f"chain {root!r} must be held with a settle attempt left")
-    text = call_review.settle_brief(chain, repo, events, sh=run, **facts)
+    try:
+        text = call_review.settle_brief(chain, repo, events, sh=run, **facts)
+    except (ValueError, OSError) as error:
+        raise BriefError(str(error)) from error
     return text, chain.subject + "/settle", dict(report_only=True, fields={"settles": chain.root})
 
 
@@ -724,6 +745,46 @@ def _answer_questions(tasks: Mapping[str, Task], events: list[dict]) -> list[dic
     return questions
 
 
+def _compile_call(args, plan, tasks, root, repo, events, facts, plan_path):
+    """Validate a fresh call's part, then translate only brief builder failures."""
+    if args.role in ("amend", "settle"):
+        return _chain_call(args.role, args.root, repo, events, facts,
+                           draft=plan.draft, plan_path=plan_path)
+    if args.role == "skeleton" and args.part not in plan.parts:
+        raise ValueError(f"unknown part {args.part!r}")
+    if args.role == "skeleton":
+        statuses = {key: view.status for key, view in fold(tasks, events).items()}
+    if args.role == "answer":
+        tasks = answer_tasks(plan, tasks, events)
+        questions = _answer_questions(tasks, events)
+    try:
+        if args.role == "skeleton":
+            text = skeleton_brief(plan, args.part, tasks, statuses, root, **facts)
+            subject = f"{plan.draft}/{args.part}"
+        elif args.role == "review":
+            text = review_brief(plan, tasks, events, root, plan_path=plan_path, **facts)
+            subject = f"{plan.draft}/review"
+        else:
+            text = answer_brief(questions, tasks, root, plan=plan, **facts)
+            subject = plan.draft
+    except (ValueError, OSError) as error:
+        raise BriefError(str(error)) from error
+    return text, subject, {}
+
+
+def _park_call(args, plan, events, error):
+    """Name a chain's root and subject when its amend or settle brief failed."""
+    from fab import call_review
+
+    if args.role in ("amend", "settle"):
+        chain = call_review.chains(events)[args.root]
+        park(args.role, chain.subject, error, call=chain.root)
+    else:
+        subject = (f"{plan.draft}/{args.part}" if args.role == "skeleton" else
+                   f"{plan.draft}/review" if args.role == "review" else plan.draft)
+        park(args.role, subject, error)
+
+
 def main(argv: list[str]) -> int:
     """Compile and run skeleton PART, answer, review or amend ROOT with --plan PLAN_DIR.
     Delegate cut, contract, decision and retire to fab.designer.main, and triage
@@ -750,31 +811,19 @@ def main(argv: list[str]) -> int:
         plan_path = directory.relative_to(root).as_posix()
         events = log.read()
         facts = dict(call_id="(assigned at start)", branch="(assigned at start)", report="(assigned at start)")
-        options = {}
         repo = log.home() / "repos/fabrig" if plan.repo == "fabrig" else root
-        if args.role in ("amend", "settle"):
-            text, subject, options = _chain_call(args.role, args.root, repo, events, facts,
-                                                draft=plan.draft, plan_path=plan_path)
-        elif args.role == "skeleton":
-            if args.part not in plan.parts:
-                raise ValueError(f"unknown part {args.part!r}")
-            statuses = {key: view.status for key, view in fold(tasks, events).items()}
-            text = skeleton_brief(plan, args.part, tasks, statuses, root, **facts)
-            subject = f"{plan.draft}/{args.part}"
-        elif args.role == "review":
-            text = review_brief(plan, tasks, events, root, plan_path=plan_path, **facts)
-            subject = f"{plan.draft}/review"
-        else:
-            tasks = answer_tasks(plan, tasks, events)
-            questions = _answer_questions(tasks, events)
-            text = answer_brief(questions, tasks, root, plan=plan, **facts)
-            subject = plan.draft
+        text, subject, options = _compile_call(args, plan, tasks, root, repo, events, facts, plan_path)
         if args.brief_only:
             print(text)
             return 0
         result = start(args.role, subject, repo, text, sh=run, base=plan.trunk, **options)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
+    except BriefError as error:
+        if args.tick and not args.brief_only:
+            _park_call(args, plan, events, error)
+        print(f"fab call: {error}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, Failed) as error:
         print(f"fab call: {error}", file=sys.stderr)
         return 1

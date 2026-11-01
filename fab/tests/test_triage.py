@@ -1,16 +1,20 @@
 """Pure triage rules over temporary-home log fixtures (docs/design/fab.md, 4; qa.md, 2)."""
 
 import copy
+import io
 import unittest
+from contextlib import redirect_stderr
+from dataclasses import replace
 from unittest.mock import patch
 
-from fab import atomic, calls, channel, dispatch, findings as qa, log, triage
+from fab import atomic, calls, channel, dispatch, findings as qa, log, triage, wake
 from fab.plan import load_plan
+from fab.sh import Result
 from fab.tests.ladder_plans import write_ladder
 from fab.tests.qa_records import (
     STAMP, finding_merged, finding_raised, finding_triaged, walk_ended, walk_started,
 )
-from fab.tests.support import tmp_home
+from fab.tests.support import FakeRunner, tmp_home
 
 
 def _stamp(minutes=0, seconds=0):
@@ -418,6 +422,45 @@ class TriageBacklogTest(TriageTest):
         for branch in ("ladder/ladder/backlog-2/extra", "ladder/ladder/backlog-no", "ladder/ladder/backlog-0"):
             events += [{**_ready(3), "branch": branch}, {**_rejected(3), "branch": branch}]
         self.assertIsNone(triage.backlog_held(self.plan, events, "render"))
+
+
+class TriageMainTest(TriageTest):
+    def test_tick_brief_failure_parks_with_empty_report_and_wakes(self):
+        root = log.home().parent
+        fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+        atomic.write(root / "docs/design/draft/path.md", "## 2. Story\nStory.\n## 4. Bar\nBar.\n")
+        with patch.object(calls, "run", fake), patch.object(calls, "BRIEF_LIMIT", 10), \
+             patch.object(triage.walks, "editions", return_value={}), redirect_stderr(io.StringIO()):
+            for flags in ((), ("--tick", "--brief-only")):
+                self.assertEqual(triage.main(["--plan", str(root / "plan"), *flags]), 1)
+                self.assertEqual(log.read(), [])
+                self.assertFalse(wake.want_path().exists())
+            self.assertEqual(triage.main(["--plan", str(root / "plan"), "--tick"]), 1)
+        record, = log.read()
+        self.assertEqual((record["ev"], record["subject"], record["role"], record["call"], record["report"]),
+                         ("call.parked", "ladder/triage", "triage", "", ""))
+        self.assertTrue(record["reason"].startswith("brief failed: brief exceeds BRIEF_LIMIT"))
+        self.assertEqual(wake.want_path().read_text(), "park ladder/triage\n")
+
+    def test_tick_unreadable_triage_input_parks_its_first_error_line(self):
+        root = log.home().parent
+        runner = FakeRunner().on(["git", "rev-parse"], Result(0, str(root)))
+        with patch.object(calls, "run", runner), patch.object(triage.walks, "editions", return_value={}), \
+             patch.object(triage, "brief", side_effect=OSError("report unreadable\nmore detail")), \
+             redirect_stderr(io.StringIO()):
+            self.assertEqual(triage.main(["--plan", str(root / "plan"), "--tick"]), 1)
+        record, = log.read()
+        self.assertEqual(record["reason"], "brief failed: report unreadable")
+        self.assertEqual(wake.want_path().read_text(), "park ladder/triage\n")
+
+    def test_tick_plan_without_rungs_or_ladder_never_parks(self):
+        for plan in (replace(self.plan, rungs=()), replace(self.plan, ladder=None)):
+            with self.subTest(plan=plan), patch.object(triage, "load_plan", return_value=plan), \
+                 patch.object(calls, "start") as start, redirect_stderr(io.StringIO()):
+                self.assertEqual(triage.main(["--plan", str(log.home().parent / "plan"), "--tick"]), 1)
+            start.assert_not_called()
+            self.assertEqual(log.read(), [])
+            self.assertFalse(wake.want_path().exists())
 
 
 class TriageBriefTest(TriageTest):

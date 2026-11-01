@@ -511,6 +511,11 @@ def main(argv: list[str]) -> int:
                              repo, text, sh=run, base=base, fields=fields)
         print(f"{result['outcome']} {result['branch']}")
         return 0 if result["outcome"] == "done" else 1
+    except calls.BriefError as error:
+        if args.tick and not args.brief_only:
+            calls.park(args.role, subject(plan.draft, args.role, getattr(args, "part", None)), error)
+        print(f"fab call: {error}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, Failed) as error:
         print(f"fab call: {error}", file=sys.stderr)
         return 1
@@ -524,6 +529,7 @@ def _arguments(argv):
         command = commands.add_parser(role)
         command.add_argument("--plan", type=Path, required=True)
         command.add_argument("--brief-only", action="store_true")
+        command.add_argument("--tick", action="store_true")
         if role in ("contract", "decision"):
             command.add_argument("part")
         if role == "decision":
@@ -565,24 +571,30 @@ def _prepare(args, options):
 
 def _compile(args, plan, tasks, statuses, root, facts, plan_path, events):
     """Build a brief only after the role's preconditions hold."""
-    if args.role == "cut":
-        beside = None
-        if plan.ready:
-            # dispatch imports designer; defer the loader import until the cut is compiled.
-            from fab import channel, dispatch
-            with redirect_stdout(sys.stderr):
-                loaded, _ = dispatch._load_plans(channel.plan_dirs(()), events, sh=run, fetch=False)
-            beside = drafts_beside(plan, [(other, other_tasks) for other, other_tasks, _, _ in loaded], events)
-        return cut_brief(plan, root, plan_path=plan_path, options=args.set, beside=beside, **facts)
-    if args.role == "contract":
+    if args.role in ("contract", "decision"):
         if args.part not in plan.parts:
             raise ValueError(f"unknown part {args.part!r}")
-        if not plan.parts[args.part].contract:
+        if args.role == "contract" and not plan.parts[args.part].contract:
             raise ValueError(f"part {args.part!r} is not a contract")
-        return calls.skeleton_brief(plan, args.part, tasks, statuses, root, role="contract", **facts)
-    if args.role == "decision":
-        return decision_brief(plan, args.part, tasks, statuses, root, args.run, plan_path=plan_path, **facts)
-    if plan.retired:
+        if args.role == "decision" and plan.parts[args.part].mode != "probe":
+            raise ValueError(f"part {args.part!r} is not a probe")
+    if args.role == "retire" and plan.retired:
         raise ValueError(f"plan {plan.draft!r} is already retired")
-    changed = changed_designs(root, plan.draft, sh=run, plan_path=plan_path)
-    return retire_brief(plan, tasks, statuses, root, changed, plan_path=plan_path, sh=run, **facts)
+    beside = None
+    if args.role == "cut" and plan.ready:
+        # dispatch imports designer; defer the loader import until the cut is compiled.
+        from fab import channel, dispatch
+        with redirect_stdout(sys.stderr):
+            loaded, _ = dispatch._load_plans(channel.plan_dirs(()), events, sh=run, fetch=False)
+        beside = drafts_beside(plan, [(other, other_tasks) for other, other_tasks, _, _ in loaded], events)
+    try:
+        if args.role == "cut":
+            return cut_brief(plan, root, plan_path=plan_path, options=args.set, beside=beside, **facts)
+        if args.role == "contract":
+            return calls.skeleton_brief(plan, args.part, tasks, statuses, root, role="contract", **facts)
+        if args.role == "decision":
+            return decision_brief(plan, args.part, tasks, statuses, root, args.run, plan_path=plan_path, **facts)
+        changed = changed_designs(root, plan.draft, sh=run, plan_path=plan_path)
+        return retire_brief(plan, tasks, statuses, root, changed, plan_path=plan_path, sh=run, **facts)
+    except (ValueError, OSError) as error:
+        raise calls.BriefError(str(error)) from error

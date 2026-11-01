@@ -61,6 +61,8 @@ def request(method: str, path: str, payload: dict | None = None) -> dict | list:
 
 def question(ask: channel.Ask) -> str:
     """The report excerpt, prefixed by a parked reason or finding question (13.6)."""
+    if ask.kind == "parked" and not ask.report:
+        return ask.text
     quoted = channel.excerpt(Path(ask.report)) if ask.report else "(report missing)"
     return f"{ask.text}\n\n{quoted}" if ask.kind in ("parked", "finding") else quoted
 
@@ -73,9 +75,10 @@ def reply_brief(ask: channel.Ask, thread: Sequence[dict]) -> str:
     """
     blocks = [f"**{entry['user']['login']}** ({entry.get('created_at', '-')}): {entry['body']}"
               for entry in thread]
+    read = f"Read: {ask.report}\n\n" if ask.report or ask.kind != "parked" else ""
     return (calls.ROLES["reply"].read_text(encoding="utf-8") +
             "\n\n# Call facts\n\n(assigned at start)\n\n# Question\n\n" +
-            f"Subject: {ask.subject}\n\n{question(ask)}\n\nRead: {ask.report}\n\n" +
+            f"Subject: {ask.subject}\n\n{question(ask)}\n\n" + read +
             "# Issue thread\n\n" + "\n\n".join(blocks) + "\n")
 
 
@@ -211,8 +214,9 @@ def sync(repo: Path | None = None, *, api: Callable | None = None, sh: Runner = 
                     continue
                 text = question(ask)
                 first = next(line.strip() for line in text.splitlines() if line.strip())
+                read = f"Read: {ask.report}\n\n" if ask.report or ask.kind != "parked" else ""
                 created = api("POST", ISSUES, {"title": f"{ask.subject}: {first}"[:200],
-                              "body": f"{text}\n\nRead: {ask.report}\n\n{FOOTER}", "labels": [LABEL]})
+                              "body": f"{text}\n\n{read}{FOOTER}", "labels": [LABEL]})
                 if not isinstance(created, dict) or type(created.get("number")) is not int:
                     raise ForgeError(f"POST {ISSUES}")
                 number = created["number"]

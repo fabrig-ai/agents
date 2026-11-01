@@ -660,6 +660,20 @@ class ChannelTest(unittest.TestCase):
         self.assertEqual(result[-1].call, "root-2")
         self.assertEqual(result[-1].report, "")
 
+    def test_call_less_park_is_an_ask_closed_only_by_its_subject_start(self):
+        events = [parked(1, call="", role="skeleton", report="")]
+        ask, = channel.asks((), events)
+        self.assertEqual(ask, channel.Ask("parked", "demo", "demo/core", "Choose capacity", ts(1)))
+        other = event(2, "call.started", call="other", role="skeleton", subject="other/core")
+        self.assertEqual(channel.asks((), events + [other]), [ask])
+        started = event(3, "call.started", call="retry", role="skeleton", subject="demo/core")
+        self.assertEqual(channel.asks((), events + [other, started]), [])
+        self.assertEqual(channel.asks((), [started, *events]), [ask])
+
+    def test_chain_park_remains_across_a_subject_start(self):
+        events = [parked(1), event(2, "call.started", call="retry", role="skeleton", subject="demo/core")]
+        self.assertEqual(channel.asks((), events), channel.asks((), events[:1]))
+
     def test_asks_answer_closes_both_kinds_only_for_its_subject(self):
         events = [question(1), parked(2), question(3, "other"),
                   event(4, channel.ANSWERED, subject="demo/core")]

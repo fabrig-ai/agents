@@ -657,15 +657,22 @@ def main(argv: list[str]) -> int:
         return 1
 
 
+def _close_brief_park(opened, subject):
+    """A successful manual start clears only a brief failure outside a chain."""
+    key = ("parked", subject)
+    if key in opened and not opened[key].call:
+        del opened[key]
+
+
 def _log_asks(events: Iterable[dict]) -> list[Ask]:
-    events = list(events)
+    events, opened, roles = list(events), {}, {}
     found = findings.findings(events)
-    opened, roles = {}, {}
     for event in events:
         try:
             ev = event["ev"]
             if ev == "call.started":
                 roles[event["call"]] = event.get("role")
+                _close_brief_park(opened, event.get("subject"))
                 continue
             if ev == "call.ended" and event.get("role", roles.get(event.get("call"))) in ("amend", "settle"):
                 continue

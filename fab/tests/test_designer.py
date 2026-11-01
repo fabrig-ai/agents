@@ -7,7 +7,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import atomic, calls, cli, designer, dispatch, log
+from fab import atomic, calls, cli, designer, dispatch, log, wake
 from fab import run as runs
 from fab.hosts import Host
 from fab.plan import Part, Plan, Task, load, load_plan, load_tasks, parse_options
@@ -1085,6 +1085,62 @@ class MainTest(unittest.TestCase):
                 result, text, errors = self.invoke(role, *args, brief_only=False)
                 self.assertEqual((result, text, errors), (1, "failed calls/id\n", ""))
                 self.assertEqual(start.call_args.args[:3], (role, subject, self.root))
+
+    def test_retire_brief_failure_parks_only_from_tick(self):
+        with patch.object(calls, "BRIEF_LIMIT", 10):
+            for flags, preview in (((), False), (("--tick",), True), (("--tick",), False)):
+                with self.subTest(flags=flags, preview=preview):
+                    code, _, error = self.invoke("retire", *flags, brief_only=preview)
+                    self.assertEqual(code, 1)
+                    self.assertIn("BRIEF_LIMIT", error)
+        record, = log.read()
+        self.assertEqual((record["ev"], record["subject"], record["role"], record["call"], record["report"]),
+                         ("call.parked", "demo/retire", "retire", "", ""))
+        self.assertEqual(record["reason"], "brief failed: " + error.removeprefix("fab call: ").strip())
+        self.assertEqual(wake.want_path().read_text(), "park demo/retire\n")
+
+    def test_tick_preconditions_and_prepare_refusals_never_park(self):
+        path = self.directory / "plan.toml"
+        atomic.write(path, "retired = true\n" + path.read_text())
+        cases = (("retire", (), self.directory), ("contract", ("absent",), self.directory),
+                 ("contract", ("reader",), self.directory),
+                 ("decision", ("absent", "--run", "x"), self.directory),
+                 ("decision", ("base", "--run", "x"), self.directory),
+                 ("cut", ("--source", "missing"), self.root / "docs/plan/new"))
+        with patch.object(calls, "start") as start:
+            for role, arguments, directory in cases:
+                with self.subTest(role=role, arguments=arguments):
+                    code, _, _ = self.invoke(role, *arguments, "--tick", directory=directory, brief_only=False)
+                    self.assertEqual(code, 1)
+        start.assert_not_called()
+        self.assertEqual(log.read(), [])
+        self.assertFalse(wake.want_path().exists())
+
+    def test_retire_git_failure_from_builder_does_not_park(self):
+        failure = Failed(["git", "log"], Result(1, err="history unavailable"))
+        with patch.object(designer, "changed_designs", side_effect=failure):
+            code, _, error = self.invoke("retire", "--tick", brief_only=False)
+        self.assertEqual(code, 1)
+        self.assertIn("history unavailable", error)
+        self.assertEqual(log.read(), [])
+        self.assertFalse(wake.want_path().exists())
+
+    def test_tick_each_designer_builder_failure_parks_its_subject(self):
+        cases = (("cut", ("--source", SOURCE), "cut_brief", "new/cut"),
+                 ("contract", ("base",), "skeleton_brief", "demo/base"),
+                 ("decision", ("probe", "--run", "demo/probe-1"), "decision_brief", "demo/probe/decision"),
+                 ("retire", (), "changed_designs", "demo/retire"),
+                 ("retire", (), "retire_brief", "demo/retire"))
+        for role, arguments, builder, subject in cases:
+            owner = calls if builder == "skeleton_brief" else designer
+            directory = self.root / "docs/plan/new" if role == "cut" else self.directory
+            with self.subTest(builder=builder), patch.object(owner, builder, side_effect=OSError("unreadable\nrest")):
+                code, _, _ = self.invoke(role, *arguments, "--tick", directory=directory, brief_only=False)
+            self.assertEqual(code, 1)
+            record = log.read()[-1]
+            self.assertEqual((record["subject"], record["role"], record["reason"]),
+                             (subject, role, "brief failed: unreadable"))
+        self.assertEqual(len(log.read()), len(cases))
 
     def test_contract_and_retire_preconditions(self):
         for part, reason in (("missing", "unknown part"), ("reader", "not a contract")):

@@ -110,6 +110,21 @@ class ForgeTest(unittest.TestCase):
         self.assertEqual((opened[0]["subject"], opened[0]["kind"], opened[0]["number"], opened[0]["url"]),
                          ("draft/core", "call", 1, "https://git.fabrig.ai/fabrig-ai/agents/issues/1"))
 
+    def test_brief_park_issue_and_reply_show_only_reason_without_report(self):
+        reason = "brief failed: source cannot be read"
+        log.append("call.parked", subject="draft/core", role="skeleton", reason=reason, call="", report="")
+        ask, = channel.asks((), log.read())
+        self.assertEqual(forge.question(ask), reason)
+        with patch.object(channel, "excerpt", side_effect=AssertionError("no report to read")):
+            self.assertEqual(self.sync(), 0)
+            self.api.comment(1, "The source is readable now.")
+            self.assertEqual(self.sync(), 0)
+        self.assertEqual(self.api.issues[1]["body"], f"{reason}\n\n{forge.FOOTER}")
+        brief, = self.briefs
+        self.assertIn(reason, brief)
+        self.assertNotIn("Read:", brief)
+        self.assertNotIn("(report missing)", brief)
+
     def test_parked_question_and_long_title(self):
         report = self.ask(kind="parked", text="Failed: review\nDetails.")
         self.sync()

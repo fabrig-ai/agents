@@ -107,7 +107,7 @@ def call_actions(plan: Plan, tasks: Mapping[str, Task], events: list[dict], desi
     if (plan.reviews and "review" not in roles and subject not in parked | subjects
             and _review_due(plan.draft, tasks, events, now)):
         actions.append(Action("call", task=subject, run_kind="review"))
-    if plan.rungs and triage.due(plan, events, now):
+    if plan.rungs and triage.subject(plan.draft) not in parked and triage.due(plan, events, now):
         actions.append(Action("call", task=triage.subject(plan.draft), run_kind="triage"))
     subject = designer.subject(plan.draft, "retire")
     if ("retire" not in roles and subject not in parked | subjects
@@ -177,7 +177,8 @@ def _settle_actions(actions: list[Action], chains: Mapping[str, call_review.Chai
 
 def _parked_subjects(events: list[dict]) -> set[str]:
     """The call questions that still wait for the user, shared with the page's fold."""
-    return {ask.subject for ask in channel.asks((), events) if ask.kind == "call"}
+    return {ask.subject for ask in channel.asks((), events)
+            if ask.kind == "call" or (ask.kind == "parked" and not ask.call)}
 
 
 def _review_due(draft: str, tasks: Mapping[str, Task], events: list[dict], now: str) -> bool:
@@ -950,7 +951,7 @@ def _call(action: Action, plan_dir: Path, draft: str, *, sh: Runner) -> None:
     argv = [str(Path(__file__).resolve().parent.parent / "bin/fab"), "call", role]
     if role in ("skeleton", "contract", "amend", "settle"):
         argv.append(action.task)
-    argv.extend(["--plan", str(plan_dir.resolve())])
+    argv.extend(["--plan", str(plan_dir.resolve()), "--tick"])
     sh(["systemd-run", "--user", "--collect", "--unit",
         drafts.unit(role, key), f"--setenv=FAB_HOME={log.home()}", *argv], check=True)
 

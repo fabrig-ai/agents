@@ -313,6 +313,7 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(prog="fab call triage", description=main.__doc__)
     parser.add_argument("--plan", type=Path, required=True)
     parser.add_argument("--brief-only", action="store_true")
+    parser.add_argument("--tick", action="store_true")
     args = parser.parse_args(argv)
     try:
         directory = args.plan.resolve()
@@ -321,9 +322,13 @@ def main(argv: list[str]) -> int:
             raise ValueError("triage requires a plan with rungs and a ladder")
         checkout = calls.run(["git", "rev-parse", "--show-toplevel"], cwd=str(directory), check=True)
         root = Path(checkout.out.strip()).resolve()
-        text = brief(plan, log.read(), root, directory, walks.editions(plan, directory, sh=calls.run),
-                     call_id="(assigned at start)", branch="(assigned at start)",
-                     report="(assigned at start)", now=log.now())
+        editions = walks.editions(plan, directory, sh=calls.run)
+        try:
+            text = brief(plan, log.read(), root, directory, editions,
+                         call_id="(assigned at start)", branch="(assigned at start)",
+                         report="(assigned at start)", now=log.now())
+        except (ValueError, OSError) as error:
+            raise calls.BriefError(str(error)) from error
         if args.brief_only:
             print(text)
             return 0
@@ -332,6 +337,11 @@ def main(argv: list[str]) -> int:
                              base=plan.trunk, report_only=True)
         print(result["outcome"])
         return 0 if result["outcome"] == "done" else 1
+    except calls.BriefError as error:
+        if args.tick and not args.brief_only:
+            calls.park(ROLE, subject(plan.draft), error)
+        print(f"fab call triage: {error}", file=sys.stderr)
+        return 1
     except (OSError, ValueError, Failed) as error:
         print(f"fab call triage: {error}", file=sys.stderr)
         return 1

@@ -11,7 +11,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
-from fab import call_review, calls, channel, cli, designer, fix, fixes, integration, log, tier_reds
+from fab import call_review, calls, channel, cli, designer, fix, fixes, integration, log, tier_reds, wake
 from fab.plan import Part, Plan, Question, Slice, Task, load_plan, load_tasks
 from fab.sh import Failed, Result
 from fab.tests.ladder_plans import write_ladder
@@ -1059,6 +1059,121 @@ class ChainCallTest(unittest.TestCase):
                 self.assertEqual(fake.argvs(), [["git", "fetch", "origin"]])
 
 
+class BriefParkTest(unittest.TestCase):
+    def setUp(self):
+        self.root = self.enterContext(tmp_home())
+        fixture(self.root)
+        self.directory = self.root / "docs/plan/demo"
+        self.fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.root)))
+
+    def invoke(self, role="skeleton", *arguments):
+        errors = io.StringIO()
+        with patch.object(calls, "run", self.fake), redirect_stderr(errors):
+            code = calls.main([role, *arguments, "--plan", str(self.directory)])
+        self.assertEqual(code, 1)
+        return errors.getvalue()
+
+    def assert_park(self, role, subject, message, *, call=""):
+        record = log.read()[-1]
+        self.assertEqual({key: value for key, value in record.items() if key != "ts"},
+                         dict(ev="call.parked", subject=subject, role=role,
+                              reason="brief failed: " + message, report="", call=call))
+        records = [entry for entry in log.read() if entry["ev"] == "call.parked"]
+        self.assertEqual(wake.want_path().read_text().splitlines(),
+                         [f"park {entry['subject']}" for entry in records])
+
+    def test_tick_oversized_brief_parks_once_without_starting(self):
+        with patch.object(calls, "BRIEF_LIMIT", 10):
+            error = self.invoke("skeleton", "core", "--tick")
+        message = error.removeprefix("fab call: ").strip()
+        self.assertIn("BRIEF_LIMIT", message)
+        self.assert_park("skeleton", "demo/core", message)
+        self.assertEqual(len(log.read()), 1)
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
+    def test_tick_unreadable_source_parks_without_starting(self):
+        source = self.root / "source.md"
+        write(source, "User source.\n")
+        plan = replace(load_plan(self.directory / "plan.toml"), sources=("source.md",))
+        read = Path.read_text
+
+        def unreadable(path, *args, **kwargs):
+            if path == source:
+                raise PermissionError("source unreadable\nmore detail")
+            return read(path, *args, **kwargs)
+
+        with patch.object(calls, "load_plan", return_value=plan), patch.object(Path, "read_text", unreadable):
+            error = self.invoke("review", "--tick")
+        self.assertIn("source unreadable", error)
+        self.assert_park("review", "demo/review", "source unreadable")
+        self.assertEqual(len(log.read()), 1)
+        self.assertEqual(self.fake.argvs(), [["git", "rev-parse", "--show-toplevel"]])
+
+    def test_manual_and_brief_only_failures_never_park(self):
+        with patch.object(calls, "BRIEF_LIMIT", 10):
+            for flags in ((), ("--brief-only",), ("--brief-only", "--tick")):
+                with self.subTest(flags=flags):
+                    self.invoke("skeleton", "core", *flags)
+                    self.assertEqual(log.read(), [])
+                    self.assertFalse(wake.want_path().exists())
+
+    def test_every_fresh_builder_converts_only_value_and_os_errors(self):
+        for role, arguments in (("skeleton", ("core",)), ("review", ()), ("answer", ())):
+            for error in (ValueError("bad brief"), OSError("unreadable")):
+                with self.subTest(role=role, error=error):
+                    plan = load_plan(self.directory / "plan.toml")
+                    args = calls._parse_args([role, *arguments, "--plan", str(self.directory)])
+                    with patch.object(calls, role + "_brief", side_effect=error):
+                        with self.assertRaises(calls.BriefError) as raised:
+                            calls._compile_call(args, plan, {}, self.root, self.root, [], {}, "docs/plan/demo")
+                    self.assertIs(raised.exception.__cause__, error)
+
+    def test_preconditions_git_and_start_failures_never_park(self):
+        self.invoke("skeleton", "absent", "--tick")
+        self.invoke("amend", "absent", "--tick")
+        self.fake = FakeRunner().on(["git", "rev-parse"], Result(1, err="git unavailable"))
+        self.invoke("skeleton", "core", "--tick")
+        self.fake = FakeRunner().on(["git", "rev-parse"], Result(0, str(self.root)))
+        with patch.object(calls, "start", side_effect=OSError("cannot write brief")):
+            self.invoke("skeleton", "core", "--tick")
+        failure = Failed(["git", "fetch"], Result(1, err="fetch failed"))
+        with patch.object(calls, "review_brief", side_effect=failure):
+            self.invoke("review", "--tick")
+        self.assertEqual(log.read(), [])
+        self.assertFalse(wake.want_path().exists())
+
+    def chain(self, role="answer", subject="demo"):
+        log.append("call.started", call="root", role=role, subject=subject, branch="calls/root")
+        log.append("call.ended", call="root", outcome="done")
+        log.append("run.started", run="review-1", task="root", kind="review")
+        log.append("run.ended", run="review-1", outcome="failed")
+
+    def test_amend_and_settle_briefs_park_chain_root_and_subject(self):
+        self.chain()
+        for role in ("amend", "settle"):
+            if role == "settle":
+                log.append("call.answered", subject="demo", call="root", answer="Try settlement")
+                log.append("call.started", call="amend-1", role="amend", amends="root")
+                log.append("call.ended", call="amend-1", outcome="failed")
+            before = len(log.read())
+            with self.subTest(role=role), patch.object(call_review, role + "_brief",
+                                                     side_effect=ValueError("too large\nrest")):
+                self.invoke(role, "root", "--tick")
+            self.assertEqual(len(log.read()), before + 1)
+            self.assert_park(role, "demo", "too large", call="root")
+            self.assertEqual(call_review.chains(log.read())["root"].state, "parked")
+
+    def test_retire_amend_fetch_failure_does_not_park(self):
+        log.append("call.started", call="root", role="retire", subject="demo/retire", branch="calls/root")
+        log.append("call.ended", call="root", outcome="done")
+        log.append("branch.rejected", branch="calls/root", step="rebase", log="CONFLICT in x")
+        before = log.read()
+        self.fake.on(["git", "fetch"], Result(1, err="fetch failed"))
+        self.assertIn("fetch", self.invoke("amend", "root", "--tick"))
+        self.assertEqual(log.read(), before)
+        self.assertFalse(wake.want_path().exists())
+
+
 class MainTest(unittest.TestCase):
     def test_triage_runs_report_only_with_medium_effort_in_the_plan_repository(self):
         cases = (("agents", "queue", "done", 0), ("agents", "integration", "done", 0),
@@ -1553,9 +1668,11 @@ class MainTest(unittest.TestCase):
                      patch.object(call_review, "chains", return_value={} if status == "unknown" else {"root": chain}), \
                      redirect_stderr(errors):
                     self.assertEqual(calls.main(["amend", "root", "--plan", str(root / "docs/plan/demo"),
-                                                 "--brief-only"]), 1)
+                                                 "--tick"]), 1)
                 start.assert_not_called()
                 self.assertIn("must be in state amend", errors.getvalue())
+                self.assertEqual(log.read(), [])
+                self.assertFalse(wake.want_path().exists())
 
     def test_main_refuses_unknown_part_and_missing_plan(self):
         with tmp_home() as root:
