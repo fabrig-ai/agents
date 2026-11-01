@@ -171,7 +171,7 @@ go); they are readable in history at 7a7df4f.
 | `docs/design/tick.md` | plans, runs and the tick | 4, 5, 13.2, 13.4, 13.9, 13.10 |
 | `docs/design/calls.md` | Claude calls, review and the designer | 13.1, 13.3, 13.7 |
 | `docs/design/landing.md` | landing | 6, 13.8 |
-| `docs/design/machines.md` | builders, slots, disk and logins | 7, 13.13 |
+| `docs/design/machines.md` | builders, slots, disk and logins, the dispatcher's units | 7, 13.13 |
 | `docs/design/reports.md` | reports, accounting and the status page | 10, 13.5, 13.14 |
 | `docs/design/after-landing.md` | after landing | 11 |
 | `docs/design/gates.md` | gates and the structure review | 12 |

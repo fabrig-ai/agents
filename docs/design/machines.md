@@ -1,4 +1,4 @@
-# fab: builders, slots, disk and logins
+# fab: builders, slots, disk, logins and the dispatcher's units
 
 2026-11-01, split from `docs/design/fab.md` (its section 6 maps the old
 section numbers). Status: `docs/design/machines.status.md`. Shared: the
@@ -8,6 +8,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
 
 - **Builders own their disk:** slots are claimed, swept and reclaimed so no implementer stops for disk.
 - **Logins live on a shelf** (`fab logins`): captured, lent, returned and swapped across machines, and checked for their limits.
+- **The dispatcher's services are fab's units** (`fab serve`/`issues`/`logins check`/`report daily --install`): persistent, enabled, on the code the tick moves.
 
 ## 2. Slots and disk
 
@@ -189,46 +190,110 @@ login that still works reused across them before more are signed in.
 ## 4. The dispatcher's own units
 
 hel8 runs four services besides the tick (tick.md 6): the status page,
-the forge issue loop, the login checks and the daily reports. Each was a
-transient unit started by hand until 11-01; each is now a persistent
-systemd user unit that fab writes, on one pattern (the user, 11-01, via the
-director: "lab.html item 3").
+the forge issue loop, the login checks and the daily reports. Until 11-01
+each was a transient unit started by hand (or, for the reports, nothing);
+each is now a persistent systemd user unit that fab writes, on one pattern
+(the user, 11-01, via the director: lab.html item 3).
 
-| Command | Units | Runs | When |
+| Command | Units | Runs | Schedule and limits |
 |---|---|---|---|
-| `fab serve --install` | `fab-status.service` | `fab serve --port 8370 --bind 127.0.0.1` (reports.md 4) | always, restarted on failure |
-| `fab issues --install` | `fab-issues.service`, `fab-issues.timer` | `fab issues sync` (channel.md 3) | every 2 minutes (`*:0/2`) |
-| `fab logins check --install` | `fab-logins-check.service`, `fab-logins-check.timer` | `fab logins check --all` (3); `StandardOutput=null`, its stderr kept | at :05 and :35 (`*:5/30`), TimeoutStartSec 1800 |
-| `fab report daily --install` | `fab-report-daily.service`, `fab-report-daily.timer` | `fab report daily` with no plan dir, which takes the plans listed in `FAB_HOME/plans` (reports.md 2; with plan dirs given it reports those, as today) | daily at 00:30 UTC |
+| `fab serve --install` | `fab-status.service` | `fab serve --port 8370 --bind 127.0.0.1` (reports.md 4) | always; `Restart=on-failure`, `RestartSec=5`; exit 75 restarts it on new code |
+| `fab issues --install` | `fab-issues.timer`, `fab-issues.service` | `fab issues sync` (channel.md 3) | `OnCalendar=*:1/2`; `TimeoutStartSec=3600` |
+| `fab logins check --install` | `fab-logins-check.timer`, `fab-logins-check.service` | `fab logins check --all` (3); `StandardOutput=null`, `StandardError=journal` (its stdout names emails) | `OnCalendar=*:5/30`; `TimeoutStartSec=1800` |
+| `fab report daily --install` | `fab-report-daily.timer`, `fab-report-daily.service` | `fab report daily` with no plan dir (below) | `OnCalendar=*-*-* 00:33:00 UTC`, `Persistent=true`; `TimeoutStartSec=1800` |
 
-- **One pattern** (`fab/units.py`): each command installs only on a machine
-  whose role in `fab/hosts.toml` is `dispatcher`; elsewhere it does nothing
-  and says so. It writes its files into `~/.config/systemd/user` through
-  `fab.atomic.write`, stops a transient unit of the same name first (check
-  off: it may be gone), then `daemon-reload` and `enable --now` (the timer,
-  or the service when there is none). It is idempotent: a second run
-  rewrites the same text and restarts nothing that is running unchanged,
-  except that a written service whose text changed is restarted. A unit
-  disabled by hand stays disabled, as `fab/units.py` treats a pause. It
-  prints each path written and `enabled <unit>`.
-- **Following main as the tick's units do:** every unit runs fab from
-  `FAB_HOME/install`. A timer's oneshot service first runs `{ git -C
-  <install> fetch -q origin && git -C <install> checkout -q --detach
-  origin/main; } || true`, then `exec <install>/bin/fab <command>`, so a
-  failed fetch still runs on the code it has. The long-running
-  `fab-status.service` cannot move its code under itself: `fab serve`
-  checks its install's `HEAD` every 60 seconds and, when it changed since it
-  started, stops serving and exits with status 75, which `Restart=on-failure`
-  (after 5 seconds) turns into a start on the new code. The tick moves the
-  install at least every 10 minutes (its backstop).
-- **Survives a reboot:** user units of an enabled `WantedBy=` start at boot
-  only with linger on for the user. Each install reads `loginctl show-user
-  <user> -p Linger` and prints a warning when it is not `yes`, without
-  failing.
-- **Deployment:** ops runs the four commands on hel8 once they land; the
-  hand-made clones `FAB_HOME/serve-install` and `FAB_HOME/issues-install`
-  and the scripts `FAB_HOME/bin/start-{status,issues,logins-check}.sh` are
-  then unused.
+- **The installer:** `fab/units.py` gains a second installer for these
+  units, `install_units(files, *, primary, restartable, role="dispatcher",
+  sh, directory, known)`, and a pure text function per unit; `Service`,
+  `text` and `install` and their callers (the queue, after-landing) are
+  unchanged. `files` maps unit names to texts, `primary` is the unit to
+  enable (the timer, or `fab-status.service`), `restartable` is true only
+  for `fab-status.service`. The role is read through `fab.hosts.load()`
+  (`hosts.local.toml` applied) and `fab.hosts.this`.
+- **The texts,** sections in this order, one blank line between them,
+  ending with a newline, as `wake.units` writes them; `<home>` is FAB_HOME
+  and `<install>` is `<home>/install`, both absolute; a path or argument
+  holding a newline, `%`, `$`, `"` or a backslash is a ValueError, as in
+  `units.text`:
+  - `fab-status.service`: `[Unit]` `Description=fab: the public status
+    page`; `[Service]` `Environment=FAB_HOME=<home>`, `ExecStart=/usr/bin/bash
+    -lc "exec <install>/bin/fab serve --port 8370 --bind 127.0.0.1"`,
+    `Restart=on-failure`, `RestartSec=5`, `SuccessExitStatus=75`,
+    `RestartForceExitStatus=75`; `[Install]` `WantedBy=default.target`.
+  - each timer's service: `[Unit]` `Description=fab: <what>`; `[Service]`
+    `Type=oneshot`, `Environment=FAB_HOME=<home>`, `KillSignal=SIGINT`,
+    `TimeoutStartSec=<t>`, the login check's two output lines,
+    `ExecStart=/usr/bin/bash -lc "exec <install>/bin/fab <command>"`; no
+    `[Install]`. `KillSignal=SIGINT` makes a timeout, stop or shutdown run
+    the command's cleanup (a login check gives back its lent login).
+  - each timer: `[Unit]` `Description=fab: <what>, <when>`; `[Timer]`
+    `OnCalendar=<as in the table>`, `Persistent=true` for the report only,
+    `Unit=<its service>`; `[Install]` `WantedBy=timers.target`.
+- **Following main:** no unit fetches. The tick alone moves
+  `FAB_HOME/install` to `origin/main` (every event tick and at least every
+  10 minutes, tick.md 6); a timer's run uses the install as it finds it.
+  The timers sit off the backstop's minutes (`*:1/2`, 00:33) so they rarely
+  start beside it. `fab-status.service` runs for days: `fab serve` takes its
+  install as the running package's checkout
+  (`Path(__file__).resolve().parent.parent`, as `fab.forge.sync` finds
+  it), reads `git -C <it> rev-parse HEAD` once before serving, and a daemon
+  thread rereads it every 60 seconds; a different hash calls
+  `server.shutdown()` and `main` returns 75 once `serve_forever` returns,
+  so systemd starts it again on the new code. An unreadable HEAD, at start
+  or later, is never a change. The reader and the interval are parameters
+  (a test runs in under a second); the thread prints nothing.
+- **An install, in order, all through `fab.sh.run`:**
+  1. Without the role: no unit file present, nothing (`<command>: no
+     dispatcher role here: nothing to do`); a file present, `disable` then
+     `stop --no-block` the primary unit, as `units.install` does
+     (`… disabled and stopping`). Done.
+  2. Transient units first, timer before service: for each of its unit
+     names, `systemctl --user show --property=Transient --value <unit>`.
+     When it prints `yes`: a timer's service that is active refuses the
+     whole install with `<unit> is running; rerun when it ends` (exit 1,
+     nothing written); otherwise `stop <unit>` then `reset-failed <unit>`
+     (both check=False). A unit that is not transient is never stopped.
+  3. Paused: the primary unit's file existed before this run and
+     `systemctl --user is-enabled <primary>` prints `disabled` (a pause by
+     hand, `disable --now`). Its files are still written; nothing is
+     enabled, started or restarted, and it prints `<path> written; <unit>
+     left disabled`.
+  4. Each file through `fab.atomic.write`; then `daemon-reload`; then
+     `enable --now <primary>`.
+  5. Changed text: only `fab-status.service` is ever restarted, when its
+     file existed with other text (`restart fab-status.service`). A timer
+     whose text changed is restarted (`restart <timer>`), which does not
+     start its service. A timer's service is never started, stopped or
+     restarted by an install; its next run reads the new text. Unchanged
+     text restarts nothing.
+  6. Linger: `loginctl show-user <uid> --property=Linger --value`
+     (check=False); any output but `yes`, or a failure, prints `fab
+     <command>: linger is off for <user>: the units start at boot only
+     after loginctl enable-linger` on stderr and the install still
+     succeeds.
+- **CLI:** `fab serve --install` takes no other option (`--port` or
+  `--bind` with it: usage error, exit 2). `fab issues --install` takes no
+  command (the command becomes optional; neither given: exit 2). `fab logins
+  check --install` takes no ids and no `--all`, and is handled before the
+  shelf is opened. `fab report daily --install` takes no plan dirs. Each
+  prints the paths written, then `enabled <unit>` or `<unit> left
+  disabled`, and exits 0; an OSError, ValueError or `fab.sh.Failed` prints
+  `fab <command>: <error on one line>` on stderr and exits 1, as `fab
+  wake` does.
+- **`fab report daily` with no plan dir** (now nargs `*`) takes
+  `fab.channel.plan_dirs()` (FAB_HOME/plans, tick.md 5) and skips a
+  directory without `plan.toml` (a plan being cut) and a plan with
+  `retired = true`, as the tick does, printing `<dir> skipped` for each;
+  with plan dirs given, exactly those, as today.
+- **Reply calls** (channel.md 3) start in the clone holding the running
+  package, now `FAB_HOME/install`: their worktrees and `calls/reply-*`
+  branches live there.
+- **Deployment:** ops runs the four commands on hel8 once they land, and
+  adds them to `bin/install.sh` after `fab after-landing install` (they do
+  nothing on machines without the role). The hand-made clones
+  `FAB_HOME/serve-install` and `FAB_HOME/issues-install` and the scripts
+  `FAB_HOME/bin/start-{status,issues,logins-check}.sh` are then unused;
+  `issues-install` is removed only when no reply call is in flight.
 
 ## 5. Later
 

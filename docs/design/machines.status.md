@@ -38,9 +38,9 @@
   `fab-logins-check` are transient units started by hand
   (`FAB_HOME/bin/start-*.sh`), and `fab report daily` has no timer.
 
-- **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8; the
-  tick (`fab-tick.timer`, every 2 minutes) on hel8, a transient user unit a
-  reboot loses. It becomes a unit installed by `fab wake --install`.
+- **Live, but transient:** fab's heavy on hel8, hetzner6 and hetzner8. The
+  tick's units (`fab-events.path`, `fab-backstop.timer`) are persistent,
+  installed by `fab wake --install` (since 11-01 09:37).
 - **The slot bound of 25 GB is one measurement** (10-30 20:18Z): a
   whole-workspace build from a swept slot. Repeated scoped builds within one
   task are not measured yet; heavy.jsonl and the sweep's freed bytes will

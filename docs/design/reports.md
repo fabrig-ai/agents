@@ -59,7 +59,7 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
   signals), each with the draft's first action and owner. Thresholds come with targets.
 - **Where they go:** `FAB_HOME/reports/<draft>/<day>.md` and
   `FAB_HOME/reports/landing/<day>.md` on hel8, written to a sibling and
-  renamed. `fab report daily PLAN_DIR...` writes yesterday's that do not
+  renamed. `fab report daily [PLAN_DIR...]` writes yesterday's that do not
   exist yet; the director reads them there.
 
 ## 3. Accounting
