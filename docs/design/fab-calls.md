@@ -208,7 +208,10 @@ overview, the event log and the tests are `docs/design/fab.md`'s.
     (`fab.run.collect` logs its report's first lines as a `question.asked`
     with `park`): before (findings-loop, 11-01), a failed run's task parked
     with no question, which no foreman, answerer or page heard, and its
-    dependents waited. A park's `question.asked` carries
+    dependents waited. As a backstop, `fab.dispatch.decide` parks the same
+    way a task whose last run ended failed with no question asked since (a
+    run collected before that, or by an older install: the playground
+    replay's fe-world-remove, 11-01, sat parked 40 minutes). A park's `question.asked` carries
     `park = true`, since it names the task's last run, which may itself have
     ended with a question; and an answer to a park grants the task a fresh
     run limit, counted from the answer. Without both, the playground replay
