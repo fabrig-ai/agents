@@ -1,0 +1,31 @@
+landing = "queue"
+
+# The thin cut of hel8-units: docs/design/machines.md 4 built whole, the dispatcher's four
+# services as persistent user units fab writes through one new installer in fab/units.py. One
+# direct part of two tasks, split as the request splits them so no two tasks edit fab/units.py
+# at once. The designs are already written (channel.md 3, reports.md 2 and 4-5 say where the
+# units are); deployment on hel8 is ops', after landing. Specs in tasks/, shared rules in
+# notes/common.md, decisions and the critical path in notes/decisions.md.
+draft = "hel8-units"
+repo = "agents"
+sources = [
+  "docs/plan/hel8-units/inputs/request.md",
+  "docs/design/draft/execution-modes.md",
+]
+
+[buffer]
+low = 1.0
+high = 2.0
+
+[[part]]
+id = "dispatcher-units"
+title = "fab serve, fab issues, fab logins check and fab report daily --install: persistent units on the dispatcher through units.install_units"
+mode = "direct"
+needs = []
+design = "docs/design/machines.md, 4"
+
+[[slice]]
+id = 1
+story = "On the dispatcher, `fab serve --install`, `fab issues --install`, `fab logins check --install` and `fab report daily --install` replace the transient units with persistent ones (a running timer's service refuses, a pause stays); fab-status restarts itself on new code with exit 75; the daily timer reports over the listed, unretired plans"
+parts = ["dispatcher-units"]
+walk = false
